@@ -1,0 +1,1577 @@
+                                                    DAGER: Exact Gradient Inversion for Large
+                                                              Language Models
+
+
+                                                          Ivo Petrov∗1 , Dimitar I. Dimitrov∗1,2 , Maximilian Baader2 ,
+                                                                     Mark Niklas Müller2,3 , Martin Vechev1,2
+arXiv:2405.15586v2 [cs.LG] 13 Nov 2024
+
+
+
+
+                                         1                                                         2                 3
+                                           INSAIT, Sofia University "St. Kliment Ohridski"           ETH Zurich         LogicStar.ai
+                                                                 {ivo.petrov, dimitar.iliev.dimitrov}@insait.ai 1
+                                                               {mbaader, mark.mueller, martin.vechev}@inf.ethz.ch 2
+
+
+
+
+                                                                                         Abstract
+                                                     Federated learning works by aggregating locally computed gradients from multiple
+                                                     clients, thus enabling collaborative training without sharing private client data.
+                                                     However, prior work has shown that the data can actually be recovered by the
+                                                     server using so-called gradient inversion attacks. While these attacks perform
+                                                     well when applied on images, they are limited in the text domain and only permit
+                                                     approximate reconstruction of small batches and short input sequences. In this
+                                                     work, we propose DAGER, the first algorithm to recover whole batches of input text
+                                                     exactly. DAGER leverages the low-rank structure of self-attention layer gradients
+                                                     and the discrete nature of token embeddings to efficiently check if a given token
+                                                     sequence is part of the client data. We use this check to exactly recover full batches
+                                                     in the honest-but-curious setting without any prior on the data for both encoder-
+                                                     and decoder-based architectures using exhaustive heuristic search and a greedy
+                                                     approach, respectively. We provide an efficient GPU implementation of DAGER
+                                                     and show experimentally that it recovers full batches of size up to 128 on large
+                                                     language models (LLMs), beating prior attacks in speed (20x at same batch size),
+                                                     scalability (10x larger batches), and reconstruction quality (ROUGE-1/2 > 0.99).
+
+
+                                         1    Introduction
+                                         While large language models (LLMs) have demonstrated exceptional potential across a wide range of
+                                         tasks, training them requires large amounts of data. However, this data is sensitive in many cases,
+                                         leading to privacy concerns when sharing it with third parties for model training. Federated learning
+                                         (FL) has emerged as a promising solution to addressing this issue by allowing multiple parties to
+                                         collaboratively train a model by sharing only gradients computed on their private data with the server
+                                         instead of the data itself. In particular, FL has been used to finetune LLMs while protecting private
+                                         data [1, 2, 3] in privacy-critical domains, such as law [4] and medicine [5].
+
+                                         Gradient Inversion Attacks Unfortunately, recent work has shown that this private data can be
+                                         recovered from the shared gradients using so-called gradient inversion attacks, raising concerns about
+                                         the privacy guarantees of federated learning [6]. While most prior work on gradient inversion attacks
+                                         has focused on image data [7, 8, 9], first works have demonstrated that text can also be recovered
+                                         [6, 10, 11]. However, as these approaches are optimization-based, the discrete nature of text data poses
+                                         a major challenge by inducing much harder optimization problems and limiting them to approximate
+                                         recovery of small batch sizes and short sequences. Therefore, applying existing attacks methods on
+                                         modern LLMs would be computationally infeasible or yield subpar reconstructions.
+                                             ∗
+                                                 Equal contribution.
+
+
+                                         38th Conference on Neural Information Processing Systems (NeurIPS 2024).
+This Work: Exact Recovery of Large Batches and Long Sequences To overcome these limita-
+tions, we propose DAGER (Discreteness-Based Attack on Gradients for Exact Recovery), the first
+exact gradient inversion attack for (transformer-based) LLMs in the challenging honest-but-curious
+setting. Our key insight is that while discrete inputs pose a challenge for optimization-based attacks,
+they can be leveraged in combination with the low-rank structure of gradients to enable exact recovery
+via search-based attacks. Crucially, we show that the gradients of self-attention projection matrices in
+transformers are i) typically low-rank and ii) linear combinations of input embeddings. This allows
+us to check whether a given input embedding lies within the span of the gradient and was thus part of
+the input sequence. We use this to first recover the set of input tokens and then reconstruct the full
+sequences. For decoder architectures DAGER leverages their causal attention masks for to derive an
+efficient greedy recovery, while for encoder architectures, DAGER uses several heuristics to make
+exhaustive search tractable. As DAGER only requires propagating inputs through the first transformer
+block instead of full gradient computations, it scales to very large models. In fact, the higher internal
+dimension of these models even allows DAGER to recover more information as our low-rankness
+assumptions hold for larger batch sizes and longer sequences. We note that this approach is applicable
+both to the easier next-token prediction and to the harder classification setting.
+
+Evaluation We demonstrate in an extensive evaluation that DAGER enables the exact recovery of
+long sequences and large batch sizes for both encoder- and decoder-based architectures, beating prior
+attacks in terms of speed (20x at same batch sizes), scalability (10x larger batches), and reconstruction
+quality (ROUGE-1/2 > 0.99). In particular, we show this for GPT-2 [12], LLaMa-2 [13], and BERT
+[14] across CoLA[15], SST-2 [16], Rotten Tomatoes [17] and ECHR [18], for batch sizes up to 128.
+Additionally, we demonstrate that DAGER is versatile and can be applied to a wide range of settings,
+including FedAvg [19], LoRA [20] finetuning and model quantization [21].
+
+Key Contributions Our main contributions are:
+       • We show how the low-rankness of self-attention layer gradients can be leveraged to check
+         whether specific discrete inputs were present in the input (Sec. 4).
+       • We leverage this key insight to propose DAGER, the first exact gradient inversion attack for
+         transformers (Sec. 5).
+       • We conduct an extensive empirical evaluation demonstrating that DAGER is not only able to
+         reconstruct inputs exactly but also scales to much larger batch sizes, longer input sequences,
+         and larger models than prior attacks, while also being significantly faster to mount (Sec. 6).
+       • We provide an efficient GPU implementation of DAGER, that can be publicly accessed at
+         https://github.com/insait-institute/dager-gradient-inversion.
+
+2   Related Work
+Gradient leakage attacks, first introduced by Zhu et al. [6], generally fall into two categories —
+honest-but-curious attacks [6, 22, 23, 7, 8, 24, 9, 10, 11, 25, 26, 27, 28], where the attacker passively
+observes the client’s federated learning updates and tries to recover the data solely based on them,
+and malicious server attacks [29, 30, 31, 32, 33] where the attacker is further allowed to modify the
+federated learning model shared with the client. In this work, we focus on the harder to attack and
+more realistic honest-but-curious setting. A large body of the gradient leakage literature in this setting
+focuses on image data [7, 8, 24, 9, 27]. Differently, gradient leakage in the text domain remains
+successful only in the case of a malicious adversary [31, 32, 34]. In the honest-but-curious setting,
+the results either remain limited to short sequences and small batch sizes B [6, 10, 11], require large
+number of gradient updates [25], or cannot recover the order of tokens in client sequences Xu et al.
+[35]. Further, state-of-the-art attacks require strong data priors [11, 25], and do not scale to realistic
+decoder-based LLMs. In contrast, DAGER, works on large batches and sequences for both encoder-
+and decoder-based transformers, including LLaMa-2 [13]. Additionally, unlike prior work, our attack
+works on both token prediction tasks and the harder setting of sentiment analysis [11] where label
+recovery methods, such as [35], are not applicable. Finally, DAGER has no requirements for the
+state of the model training. In instance, [25] exploits model memorization of the data, unlike DAGER,
+which can handle the more realistic setting of being applicable at any point in time. Further, in
+contrast to [26, 25, 31], we do not require the gradient of the embedding layer, making our setting
+significantly harder.
+
+
+                                                    2
+                 Table 1: Table of notations used in the technical description of DAGER.
+      Symbol     Definition                                    Symbol           Definition
+        B        Batch size                                      L              Loss function used for training
+        P        Transformer context length                      d              Hidden(embedding) dimension
+        L        Number of transformer blocks                    V              Vocabulary set
+        V        Vocabulary size |V|                             nj             Token length for the j-th sequence
+                                                                                PB
+                 maxj bj - the length of the                                       j=1 nj - the total number of non-
+        n                                                           b
+                 longest sequence                                               padding tokens
+                 Embedding function                                             The j-th entry of the i-th position
+        f0                                                        z ij
+                 (maps tokens to embeddings)                                    token’s embedding.
+        Zl       Input to the l-th attention layer                M             The attention mask
+      {Q,K,V }   Query/key/value projection weights                             The query/key/value embeddings
+    Wl                                                      {Q, K, V }l
+                 for the l-th attention layer                                   in the l-th attention layer
+                 The i-th token embedding after
+        fil                                                       Ti∗           The set of client tokens at position i
+                 the l-th transformer block
+                 The set of batch sequences up to
+        Si∗                                                 s1 , s2 , ..., sP   A sample sequence of P tokens
+                 position i
+        ∗        The set of the best reconstructed                              The set of distances to the span for
+       Sbest                                                      D∗
+                 sequences                                                      each token/sequence
+                 The singular value threshold for de-                           The distance threshold for filtering
+      τlrank                                                       τl
+                 termining the rank of the l-th layer                           token candidates on the l-th layer
+
+While most prior honest-but-curious attacks leverage optimization methods to approximately recover
+the client inputs [6, 23, 7, 8, 24, 9, 10, 11], several works have shown that exact reconstruction
+is possible for batch size B = 1 under various conditions for different architectures [22, 26, 27].
+Crucially, Dimitrov et al. [28] recently showed that B > 1 exact reconstruction from gradients of
+fully-connected layers is also possible. Our work, builds upon this result to show that exact gradient
+leakage is also possible for transformer-based LLMs.
+
+
+3      Background and Notation
+
+In this section, we introduce the background and notation required to understand our work. To this
+end, we first recall the basic operation of the transformer architecture in the context of LLMs, and
+then describe the result, first introduced in Dimitrov et al. [28] for linear layers, in the context of a
+self-attention layer showing that the gradients of its linear transformations have a low-rank structure.
+The notations used throughout this paper are summarized in Table 1 for clarity and ease of reference.
+
+3.1     Transformers
+
+In this paper, we consider LLMs based on both encoder and decoder transformer architectures trained
+using the FedSGD [36] protocol and a loss function L. While we mainly focus on the harder-to-attack
+binary-classification loss typically used for sentiment analysis, we demonstrate that DAGER is equally
+applicable to the next-token prediction loss in Sec. 6, which contains more gradient information, as
+suggested by prior work Zhu et al. [6]. We denote the transformer’s context length with P , its hidden
+dimension with d, the number of transformer blocks with L, the vocabulary of the tokenizer with V,
+and its size with V . We present our approach for single-headed self-attention but it can be directly
+extended to multi-head self-attention, and we experimentally apply DAGER in this context.
+
+Transformer Inputs We consider inputs batches consisting of B sequences of tokens, where nj is
+the length of the j th batch element. Sequences with length < n = maxj (nj ) are padded. We denote
+                                                             PB
+the total number of non-padding tokens in a batch with b = j=1 nj .
+
+Token Embeddings The discrete input tokens are usually embedded via a function f 0 : [V ]×[P ] →
+Rd mapping a token’s vocabulary index v and its position i in the sequence to an embedding vector
+z ij = f 0 (v, i). These embeddings z ij are then stacked row-wise to form the input Z1 ∈ Rb×d to the
+first self-attention layer. Note that f 0 is known to the server, as it is part of the model. Further, while
+f 0 differs between models, typically it maps token indices to embedding vectors before optionally
+adding a positional encoding and applying a LayerNorm. Crucially, f 0 is applied per-token.
+
+
+                                                        3
+Self-Attention The stacked embeddings Z1 are then passed through a series of self-attention layers.
+We denote the input to the lth self-attention layer as Zl ∈ Rb×d , for 1 ≤ l ≤ L. A self-attention
+layer is a combination of three linear layers: The query Ql = Zl WlQ , key Kl = Zl WlK , and value
+Vl = Zl WlV layer, which are then combined to compute the self-attention output:
+                                                                  Ql KlT
+                                                                        
+                       attention(Ql , Kl , Vl ) = softmax M ⊙ √      d
+                                                                           Vl ,
+
+where M is the binary self-attention mask, ⊙ is the element-wise product, and the softmax is applied
+row-wise. M is chosen to ensure that padding tokens do not affect the layer’s output. Further, for
+decoders, M ensures that only preceeding tokens are attended. For notational convenience, we denote
+as fil : V P → Rd the function that maps any sequence of input tokens to the ith input embedding at
+the 1 ≤ l ≤ L self-attention layer. Note that fil is part of the model and, thus, known to the attacker.
+
+3.2   Low-Rank Decomposition of Self-Attention Gradients
+
+For a linear layer Y = XW + (b| . . . |b)T with a weight matrix W ∈ Rn×m , a bias b ∈ Rm , and
+batched inputs X ∈ Rb×n and outputs Y ∈ Rb×m , Dimitrov et al. [28] show that:
+Theorem 3.1 (Adapted from Dimitrov et al. [28]). The network’s gradient w.r.t. the weights W can
+be represented as the matrix product:
+                                            ∂L
+                                            ∂W   = X T ∂Y
+                                                       ∂L
+                                                          .                                                     (1)
+                                                         ∂L
+Further, when the batch size b ≤ n, m, the rank of       ∂W   is at most b.
+                                                                   ∂L
+The rank limit follows directly from the dimensionalities of       ∂Y    ∈ Rb×m and X ∈ Rb×n in Eq. 1.
+                                                                                    {Q,K,V }
+In this work, we apply Theorem 3.1 to the linear projection matrices Wl                        ∈ Rd×d . As long as
+                                                                ∂L     ∂L                 ∂L
+the total number of tokens b < d, it states that the gradients ∂W Q , ∂W K , and         ∂WlV
+                                                                                                 are rank-deficient.
+                                                                    l          l
+                                                                  ∂L           ∂L
+Without loss of generality, for the rest of the paper we use     ∂WlQ
+                                                                         = ZlT ∂Ql
+                                                                                   to explain our method.
+
+
+4     Overview of DAGER
+In this section, we provide
+a high-level overview of our
+method DAGER, illustrated in
+Fig. 1. DAGER is an attack
+that recovers the client input se-
+quences from the shared gradi-
+ents of a transformer-based LLM.
+DAGER works for both encoder
+and decoder-based LLMs, how-
+ever, for simplicity here we focus
+on decoder-only LLMs. While, Figure 1: Overview of DAGER. DAGER first recovers the sets of
+in theory, one could enumerate client tokens T ∗ at each position i ∈ P by testing each token in
+all possible batches of input se- the vocabularyiV via a span check based on the client gradients
+quences, and check whether they of the first self-attention. Then it recursively combines them into
+produce the desired gradients, partial client sequences S with length up to i, filtered to obtain the
+this is infeasible in practice as correct sequences S ∗ via ithe gradients of the second self-attention.
+it requires computing V P ×B dif-                      i
+                                                                                     ∂L
+ferent gradients. We reduce the search space by leveraging the rank-deficiency of ∂W   Q , discussed in
+                                                                                                   l
+Sec. 3.2, combined with the finite number of possible inputs to each self-attention corresponding to
+one of the V P ×B gradients above. For the rest of the section, we assume rank-deficiency of ∂W∂L
+                                                                                                  Q,
+                                                                                                                 l
+that is b < d. This assumption is in practice satisfied for reasonable input lengths and batch sizes.
+
+                                                                         ∂L
+Leveraging the Rank Deficiency As the gradient matrix                   ∂WlQ
+                                                                                   is rank-deficient, i.e. b < d,
+                  ∂L                             d
+the columns of   ∂WlQ
+                        form a subspace of R of dimension b. Further, under mild assumptions
+
+
+                                                     4
+(see Theorem 5.1), the embedding vectors forming Zl are linear combinations of the columns of
+  ∂L
+∂W Q
+             ∂L
+      = ZlT ∂Q l
+                 . It is unlikely that any incorrect embedding vector, part of one of the V P ×B
+      l
+                                           ∂L       d
+incorrect inputs Zl , is part of colspan( ∂W Q ) ⊂ R , as the hypervolume of this subspace is 0.
+                                                l
+
+
+
+Filtering Incorrect Embeddings We can efficiently filter out all incorrect client embeddings at any
+                                                                                      ∂L
+layer l without computing their gradient, simply by checking if they are in colspan( ∂W Q ). However,
+                                                                                                  l
+applying this procedure naively still requires us to check all V P ×B different client batches. Instead,
+we leverage this filtering in a two-stage recovery algorithm that first recovers the client tokens Ti∗ at
+                                          ∂L
+position i using the rank deficiency of ∂W  Q (Token Recovery in Fig. 1), and then recovers the client
+                                               1
+batch of sequences S ∗ based on Ti∗ and the rank deficiency of          ∂L
+                                                                       ∂W2Q
+                                                                              (Sequence Recovery in Fig. 1).
+
+
+Token Recovery Our token recovery method relies on the observation that f 0 is computed per-
+token. Therefore, the input embeddings in Z1 are always part of the set {f 0 (v, i)|v ∈ [V ], i ∈ [P ]}.
+                                                                           ∂L
+We apply our span check above to this set for the first layer gradients ∂W    Q to filter the incorrect
+                                                                             1
+embeddings and their corresponding client tokens v at position i, thus, constructing the set of correct
+client tokens Ti∗ at position i.
+
+Sequence Recovery In our sequence recovery, we leverage the fact that fi1 is computed per-
+sequence and that the decoder mask M ensures that the second layer input embeddings at position i
+do not depend on tokens with position > i, i.e., fi1 (s1 , . . . , sP ) = fi1 (s1 , . . . , si ), for any sequence
+of tokens s1 , . . . , sP . Crucially, for a correct client partial sequence s1 , . . . , si−1 of length i − 1
+this allows us to find the correct next token in Ti∗ by simply extending it with all possible token
+si ∈ Ti∗ and then checking which of the resulting embedding vectors fi1 (s1 , . . . , si−1 , si ) is correct,
+                        ∂L
+i.e, is in colspan( ∂W     Q ). We apply this procedure iteratively starting with the single token sequences
+                          2
+  ∗        ∗
+S1 = T1 , extending them one token at a time to produce the partial sequence reconstructions Si∗ ,
+until the sequences cannot be extended anymore and return the result.
+
+
+5         DAGER: Exact Sequence Recovery for Transformers
+
+In this section, we present the technical details of DAGER. Specifically, we first theoretically derive
+                                                             ∂L
+of our filtering procedure based on the rank-deficiency of ∂W  Q in Sec. 5.1. We then describe how
+                                                                       l
+we apply it on the gradients of the first and second self-attention layers to respectively recover the
+client tokens (Sec. 5.2) and sequences (Sec. 5.3).
+
+5.1       Efficient Embedding Filtering
+
+Below, we discuss the technical details of our filtering procedure, outlined in Sec. 4, and prove its
+correctness. We first show that, under mild assumptions, the embedding vectors forming Zl are linear
+                                   ∂L                                                          ∂L
+combinations of the columns of ∂W    Q , restating this in terms of rowspan(Zl ) and colspan(      ):
+                                        l                                                     ∂W Q             l
+
+                                                    ∂L
+Theorem 5.1. If b < d and the matrix                ∂Ql   is of full rank (rank b), then rowspan(Zl ) =
+          ∂L
+colspan( ∂W Q ).
+                l
+
+
+                                 ∂L
+Note that the assumption that ∂Q    l
+                                      is full-rank holds in practice, as shown empirically in Dimitrov
+et al. [28], and that further b < d is almost always satisfied, i.e., that the total number of tokens in
+the input is smaller than the internal dimensionality of the model, for practical LLMs. We discuss
+the assumptions in further detail in App. B.2. The latter then directly implies the rank-deficiency of
+  ∂L
+∂W Q
+       , which we leverage to show:
+      l
+
+                                                                                         ∂L
+Theorem 5.2. When b < d, the probability of a random vector ∈ Rd to be part of colspan( ∂W Q ) is
+                                                                                                           l
+almost surely 0.
+
+
+                                                          5
+Combining Theorems 5.1 and 5.2, we arrive at our main result stating that, if b < d, an embedding
+                                                                                  ∂L
+vector z that is part of the client self-attention inputs Zl belongs to colspan( ∂W Q ), while random
+                                                                                          l
+embedding vectors that are not part of Zl almost surely do not.
+
+Span Check Implementation While the above result holds under real, i.e., infinite precision,
+arithmetic, for our method to work in practice, we require an implementation that is both fast and
+robust to numerical errors caused by floating-point arithmetic. We, therefore, introduce the metric d,
+                                                                                           ∂L
+the distance between a candidate embedding vector z and its projection on the colspan( ∂W     Q ):
+                                                                                                     l
+
+                                                                 ∂L
+                              d(z, l) = ∥z −   proj(z, colspan( ∂W  Q ))∥2 .                               (2)
+                                                                   l
+
+Intuitively, the closer d(z, l) is to 0, the more likely z is part of the span. To allow for efficient
+                                                                                        ∂L
+computation of the projection in Eq. 2, we first pre-compute an orthonormal basis for ∂W  Q using an
+                                                                                                 l
+SVD and truncating the eigenvalues below a chosen threshold τlrank . We can then trivially compute
+this projection, as the sum of projections onto each basis vector. Finally, we say that a vector z is in
+           ∂L
+colspan( ∂W   Q ), if the distance d(z, l) < τl is below a chosen per-layer threshold τl .
+               l
+
+
+
+5.2   Recovering Token Sets
+                                                            Algorithm 1 Recovering Individual Tokens
+We now describe how DAGER leverages the above
+                                                                                       ∂L
+filtering procedure to recover the input tokens ex-          1: function G ET T OK(
+                                                                                      ∂W1Q
+                                                                                           , V, P, f 0 , τ1 )
+actly. To this end, we consider the set of all tokens        2:    n←0
+in the model’s vocabulary v ∈ [V ] at every possible         3:    Ti∗ ← {}, Di∗ ← {}
+position i ∈ [P ] and compute their input embed-             4:    for v, i ← [V ] × [P ] do
+dings at the first layer via the per-token embedding         5:        d¯ ← d(f 0 (v, i), 1)
+function f 0 . We then filter out token-position tuples      6:        if d¯ < τ1 then
+(v, i) whose embedding vectors f 0 (v, i) do not lie in      7:             n ← max(n, i + 1)
+           ∂L
+colspan( ∂W    Q ) to obtain the set input tokens (across    8:             Ti∗ ← Ti∗ + {v}
+               1
+                                                             9:             D∗ ← D∗ + {d}    ¯
+batch elements) at position i:                                                 i      i
+                                                            10:    return n, {Ti∗ }ni=0 , {Di∗ }ni=0
+       Ti∗                     0
+             = {v ∈ [V ] | d(f (v, i), 1) < τ1 }.    (3)
+
+We formalize this process in Algorithm 1, where we simply enumerate all token position tuples (v, i).
+Additionally, we compute the length of the longest input sentence n as the largest position i of any
+recovered tuple (v, i) (Line 7). If f 0 is position-independent, e.g. when rotary
+                                                                               S instead of absolute
+positional embeddings are used, we recover the set of all input tokens T ∗ = i Ti∗ for every position.
+Our algorithm handles this at the sequence recovery stage at the price of slightly higher computational
+costs (see Theorem B.4).                                                # Tokens
+                                                                     105
+While conceptionally simple, this approach is exceptionally               L1 filtering
+effective and robust to the distance threshold τ1,2 , as we               L1+L2 filtering
+demonstrate in Fig. 2 for the GPT-2 model [12] (d = 768)           10 3   Ground truth
+and a batch of B = 32 sequences consisting of b = 391
+tokens. Despite the total number of tokens b exceeding
+half the model dimensionality d, even our single layer (L1)        101
+filtering approach narrows the set of possible starting tokens,
+which are independent of the rest of the input, down to less
+                                                                         10−6         10−3    100
+than 300 from GPT-2’s vocabulary of V ≈ 50K across a                            Threshold
+wide range of thresholds. Adding a second filtering stage
+using second-layer filtering, described next, allows DAGER Figure 2: Effect of L1 and L2 Filtering
+to recover the exact 32 starting tokens. This is used to exactly narrow down the first token for each
+sequence, allowing us to inductively reconstruct the whole sentence for decoder-only models.
+
+5.3   Recovering Sequences
+
+Given the set of input tokens, recovered above, we now describe how to recover input sequences by
+applying our filtering procedure to the inputs of the second self-attention layer Z2 . We first define
+the set S = T1∗ × · · · × TP∗ of all sequences formed using the recovered token sets Ti∗ . As the
+
+
+                                                     6
+second layer input embeddings z2 = f 1 (s) are computed independently for each sequence s, one
+can naively enumerate all s ∈ S, compute their second layer embedding vectors f 1 (s) and apply the
+span check for every position i to obtain the true set of client sequences:
+
+                            S ∗ = {s ∈ S | d(fi1 (s), 2) < τ2 , ∀i ∈ [P ]}.
+
+Unfortunately, this naive approach requires
+O(B P ) span checks. To alleviate this issue, Algorithm 2 DAGER for Decoders
+we first show that the causal attention mask 1: function ATT D EC(B, ∂LQ , ∂LQ , V, P, f 0/1 , τ1/2 )
+                                                                            ∂W1    ∂W2
+of decoder architectures allows us to greedily             ∗     ∗
+                                                2:   n, T    , D   ←G    ET T OK ( ∂LQ , V, P, f 0 , τ1 )
+recover the exact sequences in polynomial                                         ∂W1
+time, before discussing heuristics that make    3:   S0∗ ← {{}}B    j=1
+an exhaustive search tractable for encoder- 4:       for i ← 1, . . . , n do
+based architectures.                            5:       TokenFound ← False
+                                                                    ∗
+                                                6:       Si ← Si−1       × Ti∗
+                                                            ∗
+                                                7:       Si ← {}
+Recovering Decoder Sequences Due to             8:       for s ∈ Si do
+the causal attention mask M in decoder ar- 9:                  if d(fi1 (s), 2) < τ2 then
+chitectures, the ith input of the second-self 10:                  Si∗ ← Si∗ + {s}
+attention layer fi1 (s) depends only on the 11:                    TokenFound ← True
+first i tokens of the input sequence s. We can 12:       if not TokenFound then
+thus apply a span check on the results of fi1 13:              break            Sl
+to check arbitrary sequence prefixes of length 14:     ∗
+                                                     Sbest  ←T OP U NIQUE( i=1 Si∗ , ∂W     ∂L
+                                                                                              Q , B)
+i. We leverage this insight in Algorithm 2 to                    ∗
+                                                                                              2
+
+iteratively recover the sets S ∗ (Line 10) of 15:    return Sbest
+                              i
+input sequence prefixes
+
+                                        ∗
+                            Si∗ = {s ∈ Si−1 × Ti∗ | d(fi1 (s), 2) < τ2 },
+
+starting from the set of empty sequences S0 and extending them one token at a time (Line 6) until
+none of our sequences can be extended any further (Line 12).        Accuracy [%]
+                                                                      100                        ∆b =10
+For models with a small internal dimension d, or batches with                                    ∆b =20
+                                                            ∂L                                   ∆b =40
+a large number of total tokens b, the weight gradient ∂W       Q
+                                                                                                 ∆b =80
+might become full rank and all embeddings would pass our               60
+                                                                                                 dGPT-2
+span check. To avoid this we set a maximum rank threshold,
+b̃ = min(b, d − ∆b ) for the orthonormal basis computed via
+                                                                       20
+SVD (See Sec. 5.1). We visualize the effect of different ∆b
+on GPT-2, in Fig. 3, and observe that ∆b = 20 offers the best
+                                                                        650              750          850
+trade-off between stability and accuracy, yielding almost perfect                     # Tokens
+reconstruction even for very large inputs with b very close to d.
+                                                                    Figure 3: Encoder Ablation Study
+                                                                            Accuracy [%]
+Recovering Encoder Sequences For encoders, all second-           100
+                                                                                B=1
+layer embeddings fi1 (s) depend on all input tokens. We thus                    B=4 W/o heuristics
+cannot use the greedy reconstruction discussed above but have                   B=4 With heuristics
+to enumerate all sequences in S. To make this search tractable,   60
+
+we leverage the following heuristics. We can determine the
+positions i of end-of-sequence (EOS) tokens in the input to
+determine the input sequence lengths nj . This allows us to       20
+recover input sequences by increasing length and eliminate the       0        100           200
+tokens constituting the recovered sequences from the token sets              # Tokens
+Ti∗ . Additionally, we truncate the proposal token sets Ti∗ to Figure 4: Encoder Ablation Study
+                                             ∂L
+the batch size B token closest to colspan( ∂W  Q ). Finally, we
+                                                1
+                                                                                                 ∂L
+always consider at most 10M sequences from S before returning the ones closest to colspan( ∂W      Q ).
+                                                                                                   2
+We demonstrate the effectiveness of our heuristics in Fig. 4 for the base BERT model and different
+batch sizes B and note that for B = 1 we can still recover inputs perfectly, as |Ti∗ | = 1. We provide
+more details on DAGER for encoder-architectures in App. B.6.
+
+
+                                                    7
+6     Experimental Evaluation
+
+We now describe our extensive experimental evaluation of DAGER. Our results demonstrate signifi-
+cant performance improvements compared to prior methods, on a variety of settings. We also present
+ablation studies for isolating the effects of each DAGER component.
+
+6.1   Experimental Setup
+
+We evaluate DAGER on both encoder- and decoder-based models including BERT [14], GPT-2 [12],
+and variations of LLaMa [13, 37]. We consider three sentiment analysis datasets – CoLA [15], SST-
+2 [16], and Rotten Tomatoes (RT) [17], featuring sequences of varying lengths between typically 4 and
+27 words. Additionally, we consider the ECHR [18] dataset, which contains sentences exceeding 1000
+words to demonstrate the scalability of our approach in sequence length. We provide a more detailed
+description of our architectures and datasets in App. C. Following previous work, we report the mean
+and error of the ROUGE-1/2 [38] scores, i.e., the overlap rate of unigrams and bigrams, respectively,
+over 100 batches, excluding padding tokens. We report the error as the 95% confidence interval
+given by twice the standard error. Wherever we cannot assume normality of the mean’s distribution,
+we estimate the interval by generating 10 000 random samples by bootstrapping. Additional details
+regarding computational requirements and hyperparameters can be found in App. C.
+
+Comparison against baselines First, we compared our performance against the state-of-the-art
+algorithms TAG [10] and LAMP [11] with batch sizes ranging between B = 1 and B = 8. We run
+the two attacks for 2500 iterations per experiment, making use of the hyperparameters described in
+their respective studies. As Balunović et al. [11] provide two variations of the LAMP algorithm based
+on different objective functions — LAMPL2 + L1 and LAMPCos , we only report results from the
+variation with the higher ROUGE-1 score. In Table 2, we show results on GPT-2BASE and BERTBASE ,
+assessing the performance on decoder-based and encoder-based models respectively.
+The results indicate that for decoder-based models, such as GPT2, DAGER achieves near-perfect
+reconstructions across all datasets and batch sizes, significantly outperforming the baseline algorithms
+in every setting. Importantly, as further elaborated in App. C.1, DAGER achieves that while also being
+significantly more efficient — 100 batches of size 8 on RT took 3.5 hours vs TAG and LAMP which
+required ≈ 10 and 50 hours, respectively. Additionally, we confirm the claims made by Balunović
+et al. [11] that LAMP outperforms TAG in the majority of settings. Examples of reconstructed
+sentences can be seen in Table 9 in App. C.3. We note that while we observe non-perfect ROUGE-2
+scores on the SST-2 dataset, this is entirely due to an artifact of our metric library that assigns
+ROUGE-2 score of 0 to the SST-2’s single-word sequences. We kept this behaviour to avoid having
+to rerun the baseline experiments, that also relied on this.
+Further, Table 2 shows a significant improvement over prior work on encoder-based models like
+BERT, with near-perfect reconstruction for B = 1, 2, and an average of 43% more tokens recovered
+for larger batch sizes. A significant advantage of DAGER over the baselines is its ability to more
+accurately recover the sentence structure, as evidenced by the much higher ROUGE-2 scores.
+
+Main experiments While prior attacks’ performances become very poor for batch sizes as little as
+8, we now demonstrate that DAGER is only limited by the embedding dimension of the model. To
+this end, in Table 3 we compare two decoder-only models, GPT-2BASE with d = 768, and LLaMa-2
+7B with d = 4096 on B as large as 128.
+The results are consistent with our claims that DAGER produces almost perfect reconstructions in all
+cases when the total number of client tokens is not extremely close to the embedding dimension d.
+Further, while on LLaMa-2 DAGER achieves near-perfect reconstructions even up to a batch size of
+128, for GPT-2 DAGER shows partial or complete failure for B = 64, 128. This suggests that despite
+the significant computational costs of > 2 hours per batch for B = 128 on LLaMa-2, larger models
+have the potential to leak significantly more information. This is especially concerning given the
+current trend of ever-increasing model sizes. Finally, we observe the effect of attempting a best-effort
+reconstruction by establishing a rank threshold, as described in Sec. 5.3, when the gradients are of full
+rank. This allows DAGER to achieve a ROUGE-1 score of 30.3 (instead of 0) for GPT-2 on CoLA
+B = 128. A thorough ablation study on the advantage of this heuristic can be found in App. C.2.
+
+
+                                                   8
+Table 2: Comparison of sequence reconstruction from gradients between DAGER and the baseline
+algorithms TAG and LAMP on various batch sizes and datasets. R-1 and R-2 denote the ROUGE-1
+and ROUGE-2 scores respectively.
+                                            B=1                              B=2                                 B=4                                 B=8
+                                    R-1              R-2             R-1              R-2                R-1              R-2                R-1               R-2
+                    TAG            7.0 ± 2.5     0.54 ± 0.54        8.0 ± 2.0       1.4 ± 1.3           7.8 ± 1.2        0.8 ± 0.5          5.3 ± 0.7       0.4 ± 0.2
+         CoLA       LAMP          73.3 ± 4.5      43.3 ± 7.0       26.8 ± 2.8      11.0 ± 3.0          13.4 ± 1.4        3.9 ± 1.2          8.9 ± 1.2       1.9 ± 0.6
+                    DAGER       100.0 ± 0.0     100.0 ± 0.0      100.0 ± 0.0     100.0 ± 0.0         100.0 ± 0.0      100.0 ± 0.0        100.0 ± 0.0     100.0 ± 0.0
+                                   5.3 ± 0.5       0.0 ± 0.0        6.0 ± 1.7       0.5 ± 0.4           6.1 ± 1.2        0.6 ± 0.6          4.4 ± 0.6          0.2+0.6
+GPT-2
+
+
+
+
+                    TAG                                                                                                                                           −0.1
+         SST-2      LAMP          62.2 ± 6.9      31.8 ± 8.4       21.4 ± 3.1       9.2 ± 3.1           9.8 ± 2.0        2.7 ± 1.3          8.1 ± 1.1        0.7 ± 0.4
+                    DAGER       100.0 ± 0.0      86.0 ± 7.0      100.0 ± 0.0      89.5 ± 4.1         100.0 ± 0.0       92.8 ± 2.4        100.0 ± 0.0       92.9 ± 1.6
+                    TAG            7.1 ± 1.8         0.1+0.4
+                                                        −0.1        7.0 ± 1.2         0.1+0.2
+                                                                                         −0.1           6.2 ± 0.8          0.1+0.2
+                                                                                                                              −0.1         6.1 ± 0.5         0.1 ± 0.1
+         Rotten
+                    LAMP          31.4 ± 4.4       9.3 ± 3.6       11.2 ± 1.2      0.9 ± 0.42           6.3 ± 1.1        0.9 ± 0.6         6.8 ± 0.7           0.3+0.2
+                                                                                                                                                                  −0.1
+        Tomatoes
+                    DAGER       100.0 ± 0.0     100.0 ± 0.0      100.0 ± 0.0     100.0 ± 0.0            99.3+0.7
+                                                                                                             −1.7        99.3+0.7
+                                                                                                                              −1.8
+                                                                                                                                                +0.0
+                                                                                                                                          100.0−0.1          99.9+0.1
+                                                                                                                                                                  −0.6
+
+                    TAG           78.9 ± 4.4      10.3 ± 3.0       68.9 ± 4.2       7.7 ± 1.7          56.3 ± 3.4        6.8 ± 1.4         45.9 ± 1.9        3.9 ± 0.6
+         CoLA       LAMP          89.6 ± 2.5      51.9 ± 6.7       77.8 ± 3.6      31.5 ± 4.6          66.2 ± 3.4       21.8 ± 1.7         52.9 ± 2.2       13.1 ± 1.9
+                    DAGER       100.0 ± 0.0     100.0 ± 0.0      100.0 ± 0.0     100.0 ± 0.0          94.0 ± 2.0       89.9 ± 3.1         67.8 ± 2.3       48.8 ± 4.5
+                                  75.4 ± 4.3      19.0 ± 6.9       71.8 ± 3.6      16.0 ± 3.9          61.0 ± 3.4       12.3 ± 2.8         50.4 ± 2.4        9.2 ± 1.6
+BERT
+
+
+
+
+                    TAG
+         SST-2      LAMP          88.8 ± 3.0      56.8 ± 7.9       82.4 ± 3.6      45.7 ± 6.0          69.5 ± 3.6       32.5 ± 4.4         56.9 ± 2.6       19.1 ± 2.8
+                    DAGER       100.0 ± 0.0     100.0 ± 0.0         99.3+0.7
+                                                                         −2.0       99.0+0.8
+                                                                                         −2.1         95.6 ± 2.2       93.0 ± 3.3         74.1 ± 3.3       59.8 ± 2.9
+                    TAG           60.1 ± 4.4       3.3 ± 1.2       49.2 ± 3.5       3.0 ± 0.9          33.7 ± 2.5        1.6 ± 0.7         25.4 ± 1.2        0.9 ± 0.4
+         Rotten
+                    LAMP          64.7 ± 4.4      16.5 ± 3.9       46.4 ± 3.7       7.6 ± 2.0          35.1 ± 2.7        4.2 ± 1.3         27.3 ± 1.4        2.0 ± 0.6
+        Tomatoes
+                    DAGER       100.0 ± 0.0     100.0 ± 0.0       98.1 ± 1.2      96.5 ± 1.8          66.8 ± 3.2       50.1 ± 4.4         37.1 ± 1.2       11.4 ± 1.3
+
+
+
+Table 3: Main experiments on the GPT-2BASE and LLaMa-2 (7B) models with higher batch sizes on
+various datasets. R-1 and R-2 denote the ROUGE-1 and ROUGE-2 scores respectively.
+                                            B = 16                           B = 32                                 B = 64                           B = 128
+                                      R-1             R-2              R-1               R-2               R-1               R-2               R-1             R-2
+                 GPT-2           100.0 ± 0.0      100.0 ± 0.0     100.0 ± 0.0      100.0 ± 0.0         100.0 ± 0.0      100.0 ± 0.0         30.3 ± 1.0      14.6 ± 0.9
+   CoLA
+                 LLaMa-2 (7B)    100.0 ± 0.0      100.0 ± 0.0     100.0 ± 0.0      100.0 ± 0.0            99.9+0.0
+                                                                                                              −0.1         99.9+0.0
+                                                                                                                               −0.1        99.5 ± 0.2      99.3 ± 0.3
+                 GPT-2           100.0 ± 0.0        94.6 ± 1.1      100.0+0.0
+                                                                          −0.1         93.4 ± 1.0        92.9 ± 3.0       85.0 ± 3.5        13.7 ± 1.4       4.3 ± 0.5
+   SST-2
+                 LLaMa-2 (7B)    100.0 ± 0.0      100.0 ± 0.0         99.9+0.0
+                                                                          −0.1        99.9 ± 0.1        99.9 ± 0.1       99.9 ± 0.1        98.2 ± 0.4      97.8 ± 0.4
+ Rotten          GPT-2           100.0 ± 0.0         99.9+0.1
+                                                         −0.3       98.0 ± 1.7       97.8 ± 1.8           2.8 ± 1.1        1.1 ± 0.4         0.0 ± 0.0      0.0 ± 0.0
+Tomatoes         LLaMa-2 (7B)     100.0+0.0
+                                        −0.1       100.0+0.0
+                                                         −0.1     100.0 ± 0.0      100.0 ± 0.0          97.9 ± 0.5       97.8 ± 0.5          99.7+0.1
+                                                                                                                                                  −0.2      99.7+0.2
+                                                                                                                                                                 −0.3
+
+
+
+
+Reconstruction under FedAvg The FedAvg algorithm [19] is among the most widely used proto-
+cols in federated learning. It features E training epochs on minibatches of size Bmini < B with a
+fixed learning rate η. Despite featuring multiple low-rank gradient updates, this setting it remains
+vulnerable to our attack, as we elaborate in App. B.3. We show in Table 4 that FedAvg is susceptible
+to gradient leakage under DAGER for a range of reasonable learning rates and number of epochs.
+Table 4: Experiments on the FedAVG setting on the GPT-2 model with a batch size of 16 on the Rotten
+Tomatoes dataset. We use default set of hyperparameters of E = 10 epochs, learning rate η = 10−4
+and mini-batch size Bmini = 4. R-1 and R-2 denote ROUGE-1 and ROUGE-2 respectively.
+         E           R-1                  R-2               η              R-1                 R-2         Bmini                   R-1               R-2
+          2      98.4 ± 0.9        98.0 ± 1.0            10−5        100.0+0.0
+                                                                           −0.2            99.8+0.2
+                                                                                               −0.4            2              93.2 ± 1.7       92.3 ± 1.9
+          5      97.3 ± 1.2        96.8 ± 1.3          5 × 10−5       99.8+0.2
+                                                                          −0.5             99.6+0.3
+                                                                                               −0.7            4              95.4 ± 1.6       94.7 ± 1.7
+         10      95.4 ± 1.6        94.7 ± 1.7            10−4        95.4 ± 1.6           94.7 ± 1.7            8              98.6+0.5
+                                                                                                                                   −0.9         98.2+0.7
+                                                                                                                                                    −1.0
+         20      96.0 ± 1.4        95.3 ± 1.6          5 × 10−4      84.2 ± 1.8           82.2 ± 1.9           16            100.0 ± 0.0        99.8+0.2
+                                                                                                                                                    −0.3
+
+
+Effect of Fine-tuning Methods We further demonstrate DAGER’s versatility across a range of
+pretraining paradigms, including quantized models and Low-Rank Adaptation (LoRA) [20] finetuning.
+For both LLaMa-3 70B with B = 1 and LLaMa-3.1 8B with B = 32 at 16-bit quantization, we
+observed excellent ROUGE-1 and ROUGE-2 scores (>99%) (see Table 11 in App. C.5). We also
+present near-exact reconstructions under LoRA training, as DAGER can be directly applied to the
+decomposed weight matrix, with further technical specifics detailed in App. B.4. With LoRA updates
+of rank r = 256, which is standard for the LLaMa-2 model as noted by Biderman et al. [39], we
+observe ROUGE-1 and ROUGE-2 scores in the region of 94 − 95%, given in Table 11. These results
+reaffirm that DAGER is applicable to common fine-tuning methods.
+
+Effect of Model Size and Training on Reconstruction Prior work [11, 10] suggests that the
+size of a model, as well as, the degree of pre-training significantly affects the amount of leaked
+client information. To this end, in Table 5 we evaluate DAGER on the larger (GPT-2LARGE ) and
+
+
+                                                                                  9
+Table 5: Experiments on GPT-2 variations in different settings on the Rotten Tomatoes dataset. R-1
+and R-2 denote the ROUGE-1 and ROUGE-2 scores respectively.
+                           B = 16                        B = 32                     B = 64                 B = 128
+                     R-1             R-2           R-1             R-2        R-1            R-2        R-1        R-2
+GPT-2BASE        100.0 ± 0.0    99.9+0.1
+                                    −0.3         98.0 ± 1.7   97.8 ± 1.8     2.8 ± 1.1    1.1 ± 0.4   0.0 ± 0.0   0.0 ± 0.0
+GPT-2FineTuned   100.0 ± 0.0        99.8+0.1
+                                        −0.3     96.4 ± 2.3   96.0 ± 2.5    0.84 ± 0.6      0.2+0.2
+                                                                                               −0.1   0.0 ± 0.0   0.0 ± 0.0
+GPT-2NextToken     99.9 ± 0.0       99.7+0.2
+                                        −0.3       99.6+0.3
+                                                       −0.9     99.4+0.3
+                                                                    −0.9     2.3 ± 0.8      0.5+0.3
+                                                                                               −0.2   0.0 ± 0.0   0.0 ± 0.0
+GPT-2LARGE       100.0 ± 0.0        99.8+0.1
+                                        −0.3   100.0 ± 0.0          +0.1
+                                                               99.9−0.2    44.1 ± 4.2    38.1 ± 4.7   0.0 ± 0.0   0.0 ± 0.0
+
+pre-trained for 2 epochs (GPT-2FineTuned ) variants of GPT-2 on the RT dataset for batch sizes up to
+128. We observe very little difference in performance. In fact, the GPT-2LARGE ’s larger embedding
+dimension allows us to approximately reconstruct more tokens at larger batch sizes. We further note
+that a larger vocabulary does not negatively impact DAGER, as can be seen from the applications on
+LLaMa3.1-8B and LLaMa3.1-70B (see Table 11), which feature a vocabulary size of 128,256 tokens.
+
+Reconstruction under Next-Token Prediction Additionally, we evaluate our model on the next-
+token prediction task to demonstrate DAGER’s efficacy under different contexts. We again achieve
+near-perfect results with ROUGE-1/2 scores of > 99. DAGER does not reach perfect scores because
+the last token in each client sequence only acts as a target and it is, thus, masked out from the input.
+
+Reconstruction of Long Sequences Finally, to demonstrate our robustness to long sequences, we
+conducted a single experiment with B = 1 on the ECHR dataset truncated to 512 tokens. We obtain a
+perfect score of 100.0 ± 0.0 for ROUGE-1 and ROUGE-2 on GPT-2BASE , emphasizing the general
+applicability of DAGER. In contrast, in the same setting LAMP achieves a ROUGE-1 of 10.1 ± 2.3.
+
+
+7    Limitations
+
+As discussed in Sec. 5 and demonstrated in Sec. 6, the performance of DAGER on decoder-based
+models is only constrained by the embedding dimension d. While an exact reconstruction for a
+number of tokens b > d is unachievable, we showed that the attack’s effectiveness decreases only
+gradually with b. Given our robust performance in an undefended setting, an interesting avenue for
+future work is to improve DAGER against different defense mechanisms, including but not limited to
+using the Differential Privacy SGD optimization process (DPSGD)[40].
+On the other hand, applying DAGER on encoder-based architectures for larger batches (B >> 8)
+becomes challenging due to the high-order polynomial growth of the search space volume with
+respect to the batch size. These computational constraints make comprehensive exploration of the
+search space nearly impossible, thereby reducing the likelihood of achieving a feasible reconstruction.
+This issue extends to longer sequences, where the size of the search space expands exponentially with
+the maximum sequence length. To mitigate these effects, we propose that future research could focus
+on exploring further heuristics to efficiently reduce the search space.
+
+
+8    Conclusion
+
+We introduced DAGER, the first gradient inversion attack for transformers able to recover large
+batches of input text exactly. By exploiting the rank-deficiency of self-attention layer gradients
+and discreteness of the input space, we devised a greedy algorithm and a heuristic search approach
+for decoder-based and encoder-based architectures, respectively. Our results show that DAGER
+achieves exact reconstruction for batch sizes up to 128 and sequences up to 512 tokens. We further
+demonstrate DAGER’s effectiveness across model sizes, architectures, degrees of pre-training, and
+federated learning algorithms, establishing the widespread applicability of our attack.
+Our work demonstrates that recent decoder-based LLMs are particularly vulnerable to data leakage,
+allowing adversaries to recover very large batches and sequences in the absence of a robust defense
+mechanism. This underlying vulnerability highlights the need for increased awareness and develop-
+ment of effective countermeasures in privacy-critical applications. We hope this paper can facilitate
+further research into creating reliable frameworks for effective and private collaborative learning.
+
+
+                                                                  10
+Acknowledgments
+This research was partially funded by the Ministry of Education and Science of Bulgaria (support for
+INSAIT, part of the Bulgarian National Roadmap for Research Infrastructure).
+This work has been done as part of the EU grant ELSA (European Lighthouse on Secure and Safe AI,
+grant agreement no. 101070617) . Views and opinions expressed are however those of the authors
+only and do not necessarily reflect those of the European Union or European Commission. Neither
+the European Union nor the European Commission can be held responsible for them.
+The work has received funding from the Swiss State Secretariat for Education, Research and Innova-
+tion (SERI).
+
+References
+ [1] Jianyi Zhang, Saeed Vahidian, Martin Kuo, Chunyuan Li, Ruiyi Zhang, Tong Yu, Guoyin
+     Wang, and Yiran Chen. Towards building the federatedgpt: Federated instruction tuning. In
+     ICASSP 2024-2024 IEEE International Conference on Acoustics, Speech and Signal Processing
+     (ICASSP), pages 6915–6919. IEEE, 2024.
+ [2] Chaochao Chen, Xiaohua Feng, Jun Zhou, Jianwei Yin, and Xiaolin Zheng. Federated large
+     language model: A position paper. arXiv preprint arXiv:2307.08925, 2023.
+ [3] Sara Babakniya, Ahmed Roushdy Elkordy, Yahya H Ezzeldin, Qingfeng Liu, Kee-Bong Song,
+     Mostafa El-Khamy, and Salman Avestimehr. Slora: Federated parameter efficient fine-tuning of
+     language models. arXiv preprint arXiv:2308.06522, 2023.
+ [4] Zhuo Zhang, Xiangjing Hu, Jingyuan Zhang, Yating Zhang, Hui Wang, Lizhen Qu, and Zenglin
+     Xu. Fedlegal: The first real-world federated learning benchmark for legal nlp. In Proceedings
+     of the 61st Annual Meeting of the Association for Computational Linguistics (Volume 1: Long
+     Papers), pages 3492–3507, 2023.
+ [5] Adam Sadilek, Luyang Liu, Dung Nguyen, Methun Kamruzzaman, Stylianos Serghiou, Ben-
+     jamin Rader, Alex Ingerman, Stefan Mellem, Peter Kairouz, Elaine O Nsoesie, et al. Privacy-first
+     health research with federated learning. NPJ digital medicine, 4(1):132, 2021.
+ [6] Ligeng Zhu, Zhijian Liu, and Song Han. Deep leakage from gradients. In NeurIPS, 2019.
+ [7] Jonas Geiping, Hartmut Bauermeister, Hannah Dröge, and Michael Moeller. Inverting gradients-
+     how easy is it to break privacy in federated learning? NeurIPS, 2020.
+ [8] Hongxu Yin, Arun Mallya, Arash Vahdat, Jose M. Alvarez, Jan Kautz, and Pavlo Molchanov.
+     See through gradients: Image batch recovery via gradinversion. In CVPR, 2021.
+ [9] Zhuohang Li, Jiaxin Zhang, Luyang Liu, and Jian Liu. Auditing privacy defenses in federated
+     learning via generative gradient leakage. In Proceedings of the IEEE/CVF Conference on
+     Computer Vision and Pattern Recognition, pages 10132–10142, 2022.
+[10] Jieren Deng, Yijue Wang, Ji Li, Chenghong Wang, Chao Shang, Hang Liu, Sanguthevar
+     Rajasekaran, and Caiwen Ding. Tag: Gradient attack on transformer-based language models. In
+     Conference on Empirical Methods in Natural Language Processing, 2021.
+[11] Mislav Balunović, Dimitar I. Dimitrov, Nikola Jovanović, and Martin T. Vechev. LAMP:
+     extracting text from gradients with language model priors. In NeurIPS, 2022.
+[12] Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, Ilya Sutskever, et al.
+     Language models are unsupervised multitask learners. OpenAI blog, 1(8):9, 2019.
+[13] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei,
+     Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, et al. Llama 2: Open
+     foundation and fine-tuned chat models. arXiv preprint arXiv:2307.09288, 2023.
+[14] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of
+     deep bidirectional transformers for language understanding. arXiv preprint arXiv:1810.04805,
+     2018.
+
+
+                                                11
+[15] Alex Warstadt, Amanpreet Singh, and Samuel R. Bowman. Neural network acceptability
+     judgments. arXiv preprint 1805.12471, 2018.
+
+[16] Richard Socher, Alex Perelygin, Jean Wu, Jason Chuang, Christopher D Manning, Andrew Ng,
+     and Christopher Potts. Recursive deep models for semantic compositionality over a sentiment
+     treebank. In Proceedings of EMNLP, pages 1631–1642, 2013.
+
+[17] Bo Pang and Lillian Lee. Seeing stars: Exploiting class relationships for sentiment categorization
+     with respect to rating scales. In Proceedings of the ACL, 2005.
+
+[18] Ilias Chalkidis, Ion Androutsopoulos, and Nikolaos Aletras. Neural legal judgment prediction
+     in English. In Anna Korhonen, David Traum, and Lluís Màrquez, editors, Proceedings of the
+     57th Annual Meeting of the Association for Computational Linguistics, pages 4317–4323, July
+     2019.
+
+[19] Brendan McMahan, Eider Moore, Daniel Ramage, Seth Hampson, and Blaise Aguera y Arcas.
+     Communication-efficient learning of deep networks from decentralized data. In Artificial
+     intelligence and statistics, pages 1273–1282. PMLR, 2017.
+
+[20] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang,
+     Lu Wang, and Weizhu Chen. Lora: Low-rank adaptation of large language models. arXiv
+     preprint arXiv:2106.09685, 2021.
+
+[21] Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu, Matthew Tang, Andrew Howard,
+     Hartwig Adam, and Dmitry Kalenichenko. Quantization and training of neural networks for
+     efficient integer-arithmetic-only inference. In Proceedings of the IEEE conference on computer
+     vision and pattern recognition, pages 2704–2713, 2018.
+
+[22] Le Trieu Phong, Yoshinori Aono, Takuya Hayashi, Lihua Wang, and Shiho Moriai. Privacy-
+     preserving deep learning via additively homomorphic encryption. IEEE Trans. Inf. Forensics
+     Secur., (5), 2018.
+
+[23] Bo Zhao, Konda Reddy Mopuri, and Hakan Bilen. idlg: Improved deep leakage from gradients.
+     arXiv, 2020.
+
+[24] Jiahui Geng, Yongli Mou, Feifei Li, Qing Li, Oya Beyan, Stefan Decker, and Chunming Rong.
+     Towards general deep leakage in federated learning. arXiv, 2021.
+
+[25] Samyak Gupta, Yangsibo Huang, Zexuan Zhong, Tianyu Gao, Kai Li, and Danqi Chen. Recov-
+     ering private text in federated learning of language models. In NeurIPS, 2022.
+
+[26] Jiahao Lu, Xi Sheryl Zhang, Tianli Zhao, Xiangyu He, and Jian Cheng. April: Finding the
+     achilles’ heel on privacy for vision transformers. In Proceedings of the IEEE/CVF Conference
+     on Computer Vision and Pattern Recognition, pages 10051–10060, 2022.
+
+[27] Junyi Zhu and Matthew B. Blaschko. R-GAP: recursive gradient attack on privacy. In ICLR,
+     2021.
+
+[28] Dimitar I Dimitrov, Maximilian Baader, Mark Niklas Müller, and Martin Vechev. Spear: Exact
+     gradient inversion of batches in federated learning. arXiv preprint arXiv:2403.03945, 2024.
+
+[29] Franziska Boenisch, Adam Dziedzic, Roei Schuster, Ali Shahin Shamsabadi, Ilia Shumailov,
+     and Nicolas Papernot. When the curious abandon honesty: Federated learning is not private.
+     arXiv, 2021.
+
+[30] Liam H. Fowl, Jonas Geiping, Wojciech Czaja, Micah Goldblum, and Tom Goldstein. Robbing
+     the fed: Directly obtaining private data in federated learning with modified models. In ICLR,
+     2022.
+
+[31] Liam Fowl, Jonas Geiping, Steven Reich, Yuxin Wen, Wojtek Czaja, Micah Goldblum, and
+     Tom Goldstein. Decepticons: Corrupted transformers breach privacy in federated learning for
+     language models. ICLR, 2022.
+
+
+                                                  12
+[32] Hong-Min Chu, Jonas Geiping, Liam H Fowl, Micah Goldblum, and Tom Goldstein. Panning
+     for gold in federated learning: Targeted text extraction under arbitrarily large-scale aggregation.
+     ICLR, 2023.
+[33] Yuxin Wen, Jonas Geiping, Liam Fowl, Micah Goldblum, and Tom Goldstein. Fishing for user
+     data in large-batch federated learning via gradient magnification. In ICML, 2022.
+[34] Jianwei Li, Sheng Liu, and Qi Lei. Beyond gradient and priors in privacy attacks: Leveraging
+     pooler layer inputs of language models in federated learning. arXiv preprint arXiv:2312.05720,
+     2023.
+[35] Qiongkai Xu, Jun Wang, Olga Ohrimenko, and Trevor Cohn. Flat-chat: A word recovery attack
+     on federated language model training. 2023.
+[36] Brendan McMahan, Eider Moore, Daniel Ramage, Seth Hampson, and Blaise Agüera y Arcas.
+     Communication-efficient learning of deep networks from decentralized data. In AISTATS, 2017.
+[37] Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle,
+     Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, Anirudh Goyal, Anthony
+     Hartshorn, Aobo Yang, Archi Mitra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark,
+     Arun Rao, Aston Zhang, Aurélien Rodriguez, Austen Gregerson, Ava Spataru, Baptiste Rozière,
+     Bethany Biron, Binh Tang, Bobbie Chern, Charlotte Caucheteux, Chaya Nayak, Chloe Bi,
+     Chris Marra, Chris McConnell, Christian Keller, Christophe Touret, Chunyang Wu, Corinne
+     Wong, Cristian Canton Ferrer, Cyrus Nikolaidis, Damien Allonsius, Daniel Song, Danielle
+     Pintz, Danny Livshits, David Esiobu, Dhruv Choudhary, Dhruv Mahajan, Diego Garcia-Olano,
+     Diego Perino, Dieuwke Hupkes, Egor Lakomkin, Ehab AlBadawy, Elina Lobanova, Emily
+     Dinan, Eric Michael Smith, Filip Radenovic, Frank Zhang, Gabriel Synnaeve, Gabrielle Lee,
+     Georgia Lewis Anderson, Graeme Nail, Grégoire Mialon, Guan Pang, Guillem Cucurell, Hailey
+     Nguyen, Hannah Korevaar, Hu Xu, Hugo Touvron, Iliyan Zarov, Imanol Arrieta Ibarra, Isabel M.
+     Kloumann, Ishan Misra, Ivan Evtimov, Jade Copet, Jaewon Lee, Jan Geffert, Jana Vranes, Jason
+     Park, Jay Mahadeokar, Jeet Shah, Jelmer van der Linde, Jennifer Billock, Jenny Hong, Jenya Lee,
+     Jeremy Fu, Jianfeng Chi, Jianyu Huang, Jiawen Liu, Jie Wang, Jiecao Yu, Joanna Bitton, Joe
+     Spisak, Jongsoo Park, Joseph Rocca, Joshua Johnstun, Joshua Saxe, Junteng Jia, Kalyan Vasuden
+     Alwala, Kartikeya Upasani, Kate Plawiak, Ke Li, Kenneth Heafield, Kevin Stone, and et al.
+     The llama 3 herd of models. CoRR, abs/2407.21783, 2024. doi: 10.48550/ARXIV.2407.21783.
+     URL https://doi.org/10.48550/arXiv.2407.21783.
+[38] Chin-Yew Lin. Rouge: A package for automatic evaluation of summaries. In Text summarization
+     branches out, pages 74–81, 2004.
+[39] Dan Biderman, Jose Gonzalez Ortiz, Jacob Portes, Mansheej Paul, Philip Greengard, Connor
+     Jennings, Daniel King, Sam Havens, Vitaliy Chiley, Jonathan Frankle, et al. Lora learns less
+     and forgets less. arXiv preprint arXiv:2405.09673, 2024.
+[40] Martin Abadi, Andy Chu, Ian Goodfellow, H Brendan McMahan, Ilya Mironov, Kunal Talwar,
+     and Li Zhang. Deep learning with differential privacy. In Proceedings of the 2016 ACM SIGSAC
+     conference on computer and communications security, pages 308–318, 2016.
+[41] Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony
+     Moi, Pierric Cistac, Tim Rault, Rémi Louf, Morgan Funtowicz, et al. Huggingface’s transform-
+     ers: State-of-the-art natural language processing. arXiv preprint arXiv:1910.03771, 2019.
+[42] Shervin Minaee, Nal Kalchbrenner, Erik Cambria, Narjes Nikzad, Meysam Chenaghlu, and
+     Jianfeng Gao. Deep learning–based text classification: a comprehensive review. ACM computing
+     surveys (CSUR), 54(3):1–40, 2021.
+[43] Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer Levy, and Samuel R. Bowman.
+     GLUE: A multi-task benchmark and analysis platform for natural language understanding. 2019.
+     In the Proceedings of ICLR.
+[44] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan,
+     Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative
+     style, high-performance deep learning library. Advances in neural information processing
+     systems, 32, 2019.
+
+
+                                                  13
+[45] Martin Abadi, Andy Chu, Ian Goodfellow, H Brendan McMahan, Ilya Mironov, Kunal Talwar,
+     and Li Zhang. Deep learning with differential privacy. In Proceedings of the 2016 ACM SIGSAC
+     conference on computer and communications security, pages 308–318, 2016.
+
+
+
+
+                                               14
+A     Broader Impact
+In this work, we demonstrate that it is possible to exactly reconstruct large batches of textual data
+from gradients in the honest-but-curious setting. Our findings are widely applicable across different
+transformer-based LLM architectures, showing that, in contrast to prior belief, language transformers
+are actually more susceptible to gradient leakage attacks than other architectures. While our work
+naturally substantially increases the privacy risks posed to federated learning clients training LLMs,
+we also believe that sharing our work is crucial for finding future solutions to the issues we uncover.
+Importantly, we find that the recent decoder-based models are much more susceptible to gradient
+leakage attacks due to the causal nature of their self-attention masks. Our work implies that in
+the absence of proper defense mechanisms, receiving gradients from those models is essentially
+equivalent to receiving the client data directly. Further, we show that the attacker’s ability to mount
+DAGER grows with the embedding size d, suggesting the privacy risks posed by DAGER in practical
+settings will only grow over time. With these considerations in mind, we emphasize the importance
+of providing privacy safeguards via secure aggregation, larger batch sizes, or gradient perturbations.
+
+B     Additional Technical Details of Our Method
+B.1     Deferred Proofs
+
+
+                                                    ∂L
+Theorem 5.1. If b < d and the matrix                ∂Ql   is of full rank (rank b), then rowspan(Zl ) =
+          ∂L
+colspan( ∂W Q ).
+                l
+
+
+                                                                   ∂L
+Proof. We split the proof into two parts. We first prove colspan( ∂W Q ) ⊆ rowspan(Zl ) and then
+                                                                            l
+                  ∂L
+prove that rank( ∂W Q ) = rank(Zl ), thus implying the two spaces are the same.
+                        l
+
+                                                                                        ∂L          ∂L
+For the first part of the proof, we observe that due to the matrix multiplication in   ∂WlQ
+                                                                                              = ZlT ∂Ql
+                  ∂L                                                                                   ∂L
+all columns of  ∂WlQ
+                      are    linear combinations of the columns of ZlT with coefficients given by      ∂Ql .
+                  ∂L
+Thus,   colspan( ∂W Q ) ⊆    colspan(ZlT ) = rowspan(Zl ).
+                    l
+
+                                                        ∂L
+For the second part of the proof, we observe that since ∂Ql
+                                                            is of rank b and rank(ZlT ) is at most b,
+       ∂L                    T         ∂L               T
+rank( ∂W  Q ) = min(rank(Zl ), rank( ∂Q )) = rank(Zl ). This finishes the proof.
+                                         l
+           l
+
+
+
+
+                                                                                         ∂L
+Theorem 5.2. When b < d, the probability of a random vector ∈ Rd to be part of colspan( ∂W Q ) is
+                                                                                                   l
+almost surely 0.
+
+                ∂L                                               ∂L                                    d
+Proof. As      ∂WlQ
+                      is rank-deficient (Theorem 3.1), colspan( ∂W Q ) is a strict linear subspace of R .
+                                                                      l
+Thus, it has a hypervolume 0 via the Sard’s lemma. This directly implies that the probability of a
+                                           ∂L
+random vector ∈ Rd to be part of colspan( ∂W  Q ) is almost surely 0.
+                                                     l
+
+
+
+B.2     Technical Assumptions of DAGER
+
+Below we present a brief commentary on the technical assumptions of DAGER. DAGER makes three
+assumptions:
+                              ∂L
+        • We assume that      ∂Ql   is full-rank.
+        • We require the total number of tokens b in the batch to be smaller than the embedding
+                                      ∂L
+          dimension d, ensuring that ∂W Q is of low-rank.
+                                              l
+
+        • We assume a known discrete set of possible inputs to the model, i.e. its vocabulary.
+
+
+                                                         15
+Importantly, DAGER does not assume any prior knowledge of the labels or the lengths of each
+sequence in the batch nor access to the gradients of the embedding layers which have been shown
+to leak significant information [26]. Further, we require no language priors and operate under
+the honest-but-curious setting which does not allow malicious changes to model weights. Finally,
+sub-differentiability is sufficient for applying DAGER.
+In practice, DAGER requires much fewer assumptions than existing works in the honest-but-curious
+setting while being successful in a variety of common LLM tasks, e.g., next-token prediction and
+sentence classification. While these tasks use the cross-entropy loss, DAGER can be applied to any
+                                                                                                  ∂L
+loss function that non-trivially depends on every input token. This ensures the full-rankness of ∂W Q.
+                                                                                                                                 l
+
+To confirm its generality, we apply DAGER with a Frobenius norm-based loss and ReLU activation
+functions. We use a custom loss function L(s1 , s2 , . . . , sP ) = ∥f L (s1 , s2 , . . . , sP )∥F , where ∥.∥F
+is the Frobenius norm, which is equivalent to an MSE loss with 0 as a target vector. We report the
+results of applying DAGER with these modifications on Rotten Tomatoes using GPT-2 with B = 16
+in Table 11, achieving ROUGE-1 and ROUGE-2 scores of >99% in both cases.
+
+B.3   DAGER under the FedAvg protocol
+
+We establish that DAGER can be effectively used to attack clients employing FedAvg updates under
+mild assumptions. First, we show that it is possible to theoretically apply Theorem 5.1 to the
+protocol directly on the first layer, and under reasonably low model updates for further layers. We
+then demonstrate experimentally that DAGER can be successfully applied across a wide range of
+parameters, namely the number of epochs E, learning rate η and mini-batch size bmini .
+
+Spanchecks for FedAvg updates Let Xle = f l (se1 , se2 , . . . , sebmini ) denote the input embedding
+vectors to the relevant l-th layer query projection matrix for a mini-batch of size bmini . Obtaining Xle
+in the forward pass is equivalent to sampling the corresponding rows in the full-batch representation
+Xl = f l (se1 , se2 , . . . , sB ), as each sequence in a batch is independent from all the rest. Therefore,
+                                                      ∂L        e T ∂L       T ∂L
+we can rewrite each local gradient update ∂W            Q = Xl      ∂Qe as Xl ∂Ql , where the i-th column
+                                                          l                    l
+    ∂L
+of ∂Q l
+        is the zero vector 0 if si is not present in the mini-batch. Therefore, we are able to simply
+disregard the mini-batch sampling and focus only on the total number of iterations E, assuming that
+every sequence in the original batch is sampled at least once.
+Let the input embedding vectors to the l-th layer at timestep t < E be Xlt . The final weight WlE after
+E steps can be written as:
+
+                                                  E                                E
+                                                                                               T ∂L
+                                                  X                                X
+                            WlE   =   Wl0    −η           ∂L
+                                                         ∂Wlt
+                                                                =   Wl0     −η           Xlt     ∂Qtl
+                                                                                                                                 (4)
+                                                   t=0                             t=0
+
+Under the assumption that the changes in model weights are relatively small, we can approximate
+Xlt = Xl0 . This is always the case for l = 0, as the embeddings before the first layer are independent
+of the model weights. This allows us to rewrite WE as:
+
+                            E                                   E                                               E
+                            X           T ∂L
+                                                                X           T ∂L                        T       X
+        WlE = Wl0 − η             Xlt            = Wl0 − η            Xl0            = Wl0 − Xl0                      ∂L
+                                                                                                                             
+                                          ∂Qtl                                ∂Qtl
+                                                                                                            η         ∂Qtl
+                                                                                                                                 (5)
+                            t=0                                 t=0                                             t=0
+
+As the server has knowledge of the starting weight Wl0 and the final weight WlE , it is able to compute
+                                                                                T     PE ∂L
+the sum of all gradient steps, i.e we will be able to apply Theorem 5.1 to Xl0 (η t=0 ∂Q         t ). We
+                                                                                                 l
+             PE ∂L
+still require t=0 ∂Qt to be full-rank, which is satisfied under standard DAGER assumptions.
+                        l
+
+
+
+Further experimental details We further empircially demonstrate that DAGER can effectively
+utilise the assumption of consistent feature embeddings across epochs under a reasonable learning rate
+and number of iterations. As shown in Table 4, we observe near-exact reconstruction rates for most
+configurations, with metrics only slightly declining as the number of epochs increases. The key factor
+that influences the success of DAGER is observed to be the learning rate η, as the aforementioned
+
+
+                                                              16
+assumption might be invalidated at large η. However, learning rates exceeding η ≥ 10−3 are typically
+too high for the model to converge, particularly in multi-client settings. Therefore, we can conclude
+that DAGER is highly effective in the FedAvg context.
+
+B.4   DAGER under LoRA training
+
+In this section, we discuss how DAGER can be extended to work on LoRA weight decomposition.
+Under LoRA, the linear layer weight updates for a weight W ∈ Rd×d are performed on a low-rank
+representation: W = W0 + AB, where A ∈ Rd×r , B ∈ Rr×d . As we obtain the gradient weights
+                                                                                      ∂L         ∂L
+for both A and B, we can apply Theorem 5.1 to A with ZA = XA, namely because ∂A           = X T ∂Z A
+                                                                                                     .
+                 ∂L
+Assuming that ∂XA is full-rank and that b < r, our work is directly applicable. This can replace the
+spanchecks to be performed on A instead of W for each layer, after which DAGER can be applied
+directly. In practice, LoRA finetuning typically initializes W = W0 and B to only contain zeroes
+                           ∂L
+which reduce the rank of ∂A   for the first few optimization steps. We therefore train the LLaMa-3.1
+8B model on the Rotten Tomatoes dataset using a batch size of 4 with r = 256 (following [39]) for 3
+epochs before applying DAGER. We report results in Table 11 and observe an excellent R1 and R2
+of about 95%.
+
+B.5   Complexity Analysis
+
+A key point of DAGER is the algorithm’s exceptional computational efficiency on decoder-based
+models. In order to quantify the dependency of runtime on relevant variables, we describe the
+asymptotic complexity for both decoder- and encoder-based models. Below we list and prove several
+lemmas that assist us in the complete proof of our assertion for the complexity of DAGER. When not
+specified, a batch size of B = 1 is implied for any inputs.
+Lemma B.1. The product of two matrices M 1 ∈ Rn×m and M 2 ∈ Rm×p can be naively computed
+in O(nmp).
+
+Proof. We write down the product:
+                                                       X
+                                     (M 1 M 2 )ij =             1
+                                                               Mik  2
+                                                                   Mkj
+                                                           k
+
+To produce the entire matrix we explore all integers i = 1 . . . n, j = 1 . . . p and k = 1 . . . m, and in
+particular any combination of the 3. This implies that we make nmp iterations, from which a time
+complexity of O(nmp) follows.
+
+Lemma B.2. For any matrix M ∈ Rd×n and vector v ∈ Rd , we can compute the projection of v on
+the subspace spanned by the columns of M in O(d2 n) time.
+
+Proof. Projecting onto the column space of a matrix can be done by projecting the vector onto
+individual columns and then summing all projected components. We compute this using Einstein
+notation, while denoting the resulting vector as p ∈ Rd . Then, we obtain:
+                                              X
+                                        pk =      Mki Mji vj
+                                                i,j
+
+This loop iterates over i = 1 . . . n, j = 1 . . . d, k = 1 . . . d, resulting in a total number of d2 n
+iterations, which implies a time complexity of O(d2 n).
+
+Lemma B.3. For any transformer-based model, which has an embedding dimension d, square
+projection weights of dimension d × d, and an MLP hidden dimension of dMLP , propagating a
+sequence of b tokens, takes time of asymptotic complexity O(bd2 + b2 d + bdMLP d).
+
+Proof. We follow the notation defined in Sec. 3.1. The embedding representation of the sequence is
+denoted as z ∈ Rb×d . We then obtain the query, key and value vectors Q, K, V by multiplying with
+the weight matrices W1Q , W1K , W1V ∈ Rd×d . According to Lemma B.1, we can accomplish this in
+a time of O(bd2 ).
+
+
+                                                      17
+Computing the attention scores is dominated by computing QK T , which by applying Lemma B.1,
+can be done in O(b2 d).
+As a final step to the self-attention component, we compute the multiplication of the scores A =
+                     T
+softmax(M ⊙ QK    √ ) ∈ Rb×b and V ∈ Rb×d in time O(b2 d). We note that computing the row-wise
+                    d
+softmax operations can be amortized and take a total of O(b2 ) time, which is dominated by O(b2 d).
+The total computation up until this point can, therefore, be done in O(bd2 + b2 d).
+To produce the output of the transformer block, we pass the self-attention through an MLP layer, which
+can be represented by a set of simple matrix multiplications (of the same complexity). Therefore,
+applying Lemma B.1 once again, this step requires time O(bdMLP d).
+We can sum up all components to obtain a total complexity of O(bd2 + b2 d + bdMLP d). If we
+reasonably assume that dMLP = O(d), then the complexity can be simplified to O(bd2 + b2 d).
+
+Having explored in-depth each smaller component of the algorithm, we can now determine the
+complexity of DAGER. We explore 3 instances of our algorithm, namely separating decoder- and
+encoder-based models, while also differentiating between absolute positional encodings and RoPE.
+We summarize our findings in a single theorem:
+Theorem B.4. By considering a training iteration of batch of size B with the longest sentence being
+of length P , where the sentences are represented as a sequence of tokens from a vocabulary of size V ,
+DAGER can reconstruct the input with an asymptotic time complexity of:
+
+      1. For decoder-based models:
+          (a) If the model applies positional embeddings before layer 0 - O(P 2 BV d2 + d3 +
+              P 3 B 3 d2 )
+          (b) If the model applies positional embeddings after the first projection, i.e. RoPE -
+              O(P BV d2 + d3 + P 4 B 3 d2 )
+      2. For encoder-only models - O(P 2 BV d2 + d3 + B P P 2 d2 )
+
+Proof. We separate our algorithm in 2 different parts:
+
+      1. Recovering the tokens T ∗ through the span check on W1Q .
+      2. Reconstructing the entire sequences S ∗ .
+
+Token recovery We begin by describing the first step - recovering individual tokens per position.
+We begin by obtaining T ∗ by taking Ti∗ = {v ∈ V|f 0 (v, i) ∈ colspan( ∂W  ∂L
+                                                                              Q )}. Because we
+                                                                                   1
+determine the span check via the projection distance dproj of a representation vector z ∈ Rd , and
+                    ∂L      d×r                    ∂L
+truncated gradient ∂W Q ∈ R     , where r = rank( ∂W Q ) according to Lemma B.2, this can be done
+                      l                                  1
+                                     ∂L
+in time O(d2 r). The rank of both       , ∂L
+                                    ∂W1Q ∂W2Q
+                                                is limited by the total number of tokens b ∈ O(P B).
+As can be inferred by Theorem 5.1, the complexity of the spancheck is O(P Bd2 ). We perform this for
+every token in the vocabulary for an additional factor of V , making the total complexity O(P BV d2 ).
+We note that for models which employ positional embeddings before the first transformer block, we
+repeat this step P times, while we only have to do it once for those that don’t. This respectively
+results in time complexities of O(P 2 BV d2 ) and O(P BV d2 ) for recovering individual tokens.
+
+Spancheck complexity In practice, we perform all span checks by performing a Singular Value
+                  ∂L
+Decomposition on ∂W Q and then applying the projection distance to the right orthonormal. It is a
+                          1
+well known result that SVD for a matrix of size d × d takes time O(d3 ).
+
+Sequence reconstruction Having recovered the individual tokens, we detail the resulting time
+complexity of reconstructing the entire sequences. We describe each step for decoder-based models,
+before proceeding to encoder-based ones.
+
+
+                                                  18
+      • For decoder-based models we begin by describing the number of tokens we obtain per
+        position. If the model applies positional embedding before the first transformer layer, we
+        assume that for each position i we recover a set of tokens Ti∗ , such that |Ti∗ | = O(T ) for
+        some variable T that depends on our input parameters and setup. Similarly, for models that
+        do not have positional embeddings before the first transformer layer, we only recover a
+        single set of tokens T ∗ of size |T ∗ | = O(P T ).
+      • We now show the complexity required for performing the forward pass and span check
+        for a single sequence. For a sequence length n, according to Lemma B.3 the forward pass
+        takes time O(nd2 + n2 d), and the span check per token is of complexity O(P Bd2 ) (as
+        per Lemma B.2). This implies a time complexity of O(nP Bd2 ) per sequence for the span
+        check, leading us to an overall complexity of O(nP Bd2 + nd2 + n2 d).
+      • Finally, we apply our observations to the full reconstruction. We further assume that at each
+        step of the greedy reconstruction, we maintain O(B) possible sequences, which is usually
+        the case when performing a greedy reconstruction. By repeating the above propagation for
+        every combination per sequence length yields a total runtime of O(T × B × (nd2 + n2 d +
+        nP Bd2 )) = O(P T B 2 d2 n) and O(P T × B × (nd2 + n2 d + nP Bd2 )) = O(P 2 T B 2 d2 n)
+        in the cases described in statement 1a) and 1b) respectively.
+                                                          PP
+      • Summing over all lengths yields a time of O( n=1 P B 3 d2 n) = O(P 3 T B 2 d2 ) for the
+        former. Analogically, for the latter we obtain a complexity of O(P 4 T B 2 d2 ).
+      • In practice, we observe that T = αB for some factor α between 1 and 10, hence we
+        can assume that T = O(B). This is a practically correct assumption for a reasonably
+        defined threshold τ1 . This makes the final time complexity for recovering sequences
+        O(P 3 T B 2 d2 ) = O(P 3 B 3 d2 ) for case 1a) and O(P 4 T B 2 d2 ) = O(P 4 B 3 d2 ) for 1b).
+
+On the other hand, in the case of encoder-based models, we need to exhaust all possible token
+combinations over all positions.
+
+      • We again assume that for each position i we recover a set of tokens Ti∗ , such that |Ti∗ | =
+        O(T ).
+      • Because we have to explore all possible combinations, that results in a total number of
+        QP       ∗
+                      QP               P
+          i=1 |Ti | =  i=1 O(T ) = O(T ) sequences.
+
+      • We now show the cost of the span check on a single sequence. We leverage our finding that
+        one such span check takes time O(P Bd2 ) (we again substitute that the rank r = O(P B)
+        and apply Lemma B.2), meaning all span checks take time O(P 2 Bd2 ) per sequence.
+      • Additionally, the forward pass takes O(P d2 + P 2 d) time.
+      • Finally, because we reconstruct each sequence separately, we repeat the reconstruction
+        algorithm O(B) times. This leads to the complexity for this step - O(T P B(P 2 Bd2 + P d2 +
+        P 2 d)) = O(T P B 2 P 2 d2 ).
+      • As above, we assume T = O(B), leading us to a final complexity of O(B P B 2 P 2 d2 ) =
+        O(B P P 2 d2 ).
+
+Combining our conclusions for steps 1 and 2 yields the stated complexities for each setting.
+
+The key points to highlight is that DAGER is polynomial across both sequence length and batch size
+for decoders, regardless of the type of positional encoding. Meanwhile, for encoders the we observe
+that DAGER is exponential in length and polynomial with high degree in terms of batch size. To this
+end, the heuristics we described are crucial to significantly reduce the search space.
+
+B.6   Encoder Algorithm
+
+
+                                                19
+                      Table 6: Specifications of models that were used in our work.
+Model              Type     No. layers    d      No. heads    Feed-forward size     V       Positional embedding   No. Parameters
+GPT-2BASE         Decoder      12         768       12               3072         50,257         Absolute              137M
+GPT-2LARGE        Decoder      36        1280       20              5,120         50,257         Absolute              812M
+LLaMa-2 (7B)      Decoder      32        4,096      32              11,008        32,000          RoPE                 6.74B
+LLaMa-3.1 (8B)    Decoder      32        4,096      32              14,336        128,256         RoPE                 8.03B
+LLaMa-3.1 (70B)   Decoder      80        8,192      64              28,672        128,256         RoPE                 70.6B
+BERTBASE          Encoder      12         768       12               3072         30,522         Absolute              110M
+
+
+
+
+In this section, we provide pseudocode              Algorithm 3 DAGER for Encoders
+                                                                                      ∂L
+for DAGER when applied to encoder-                       1: function ATT E NC(T, B,       , ∂L , V, P, f 0/1 , τ1/2 )
+                                                                                     ∂W1Q ∂W2Q
+based LLMs. We provide it in Algo-
+                                                         2:     n, T ∗ , D∗ ←G ET T OK( ∂W
+                                                                                         ∂L           0
+                                                                                           Q , V, P, f , τ1 )
+rithm 3, where we first find the set of                                                    1
+                                                                  ∗                     ∗    ∗
+client sequence lengths nj and store                     3:     T ←T OP BT OKENS(T , D , B)
+them in N (Line 4 to Line 8). We then                    4:     N ← {}
+go through the nj s from the smallest                    5:     for i ← 1, . . . , n do
+to the largest (Line 9), enumerating all                 6:         if EOS ∈ Ti∗ then
+possible sequences s ∈ Si of length                      7:              N ← N + {i + 1}
+i (Line 10). Importantly, when a cor-                    8:              Ti∗ ← Ti∗ \ {EOS}
+rect sentence s ∈ Sicorr is found its to-             9:        for i ∈ S ORT(N ) do
+kens are removed for the token sets Ti∗              10:            Si ← T1∗ × · · · × Ti∗
+(Line 14). Finally, we return the dedu-              11:            Sicorr ← {s ∈ Si | d(fp1 (s), 2) < τ2 .∀p ∈ [i]}
+plicated best reconstructions across dif-            12:            for s ∈ Sicorr do
+                           ∗
+ferent sequence lengths Sbest (Line 15).             13:                 for p ← 1, . . . , i do
+We note that when Si is larger than 10M              14:                     Tp∗ ← Tp∗ \ {sp }
+combinations, we sample 10M random                                ∗
+                                                                                         Sl        ∂L
+                                                     15:        Sbest ←T OP U NIQUE( i=1 Si , ∂W     Q , B)
+combinations from it instead.                                                                        2
+                                                                           ∗
+                                                     16:        return Sbest
+C Additional experimental
+details
+In this section we describe additional details regarding the experimental setup for DAGER.
+
+Models In particular, we explore its feasibility on the base variant GPT-2BASE , featuring a 12-layer
+transformer with a 768-dimensional hidden state, 12 attention heads and a feed-forward filter of
+size 3072. Additionally, we examine the effects of model size by considering GPT-2LARGE , which
+contains 36 layers, a 1280-dimensional hidden state, 20 attention heads, and a feed-forward filter of
+size 5120. To demonstrate the versatility of our approach, we also evaluate our attack in a next-token
+prediction context on the GPT-2BASE model. We further demonstrate the efficacy of our attack on
+LLaMa 2-7B[13] and BERTBASE [14] to illustrate our performance on a state-of-the-art decoder
+and an encoder-only model, respectively. All models were sourced from HuggingFace[41] in their
+pre-trained form, following standard practice in language modeling research[42]. Full specification
+details for all models can be found in Table 6.
+
+Datasets In our evaluation, we utilize three binary classification datasets with varying sentence
+lengths, namely the Corpus of Linguistic Acceptability (CoLA)[15], the Stanford Sentiment Treebank
+(SST-2)[16], which are part of the GLUE benchmark[43], as well as the Rotten Tomatoes[17]
+sentiment analysis dataset. While our algorithm is data-independent, previous studies have indicated
+that text size can affect reconstructability[11, 6]. We demonstrate robustness to this factor by selecting
+the aforementioned datasets, with CoLA featuring text typically ranging from 4 to 9 words, SST-2 -
+from 4 to 13 words, and Rotten Tomatoes - from 10 to 27 words. We note that the binary classification
+setting has been shown to be a less vulnerable than next-token prediction which can be attacked via
+label reconstruction attacks [35], however, we conduct an additional experiment to substantiate the
+claim in this setting. Finally, to showcase DAGER’s capability to handle arbitrarily long sequences,
+we leverage the European Court of Human Rights (ECHR)[18] dataset which includes sentences
+that are over 1000 words long, far exceeding the maximum input length of any of the aforementioned
+models.
+
+
+                                                               20
+Table 7: Total runtime for all main experiments given in hours. Fields containing N/A represent
+experiments that were not run.
+                             B=1    B=2    B=4          B=8    B=16      B=32       B=64      B=128
+                     TAG      9.4    9.1    9.2          9.5   N/A        N/A       N/A         N/A
+           CoLA      LAMP    15.9   24.2   40.7         68.3   N/A        N/A       N/A         N/A
+                     DAGER    1.5    1.1    1.5          2.8    8.0        8.5       4.4         8.2
+GPT-2
+
+
+
+
+                     TAG      9.5    9.7    9.1          9.7   N/A        N/A       N/A         N/A
+           SST-2     LAMP    16.3   24.2   39.0         66.5   N/A        N/A       N/A         N/A
+                     DAGER    1.1    1.4    1.7          3.6    8.8       13.7       8.3         7.1
+                     TAG      8.6    8.8    9.2          9.7   N/A        N/A       N/A         N/A
+           Rotten
+                     LAMP    16.2   24.2   37.9         67.4   N/A        N/A       N/A         N/A
+          Tomatoes
+                     DAGER    1.8    1.7    2.5          3.5    8.5       10.2       1.4         1.9
+                     TAG      6.1    6.3    9.2         11.6   N/A        N/A       N/A         N/A
+           CoLA      LAMP    11.0   26.4   42.6         85.2   N/A        N/A       N/A         N/A
+                     DAGER    0.1    0.1    1.3         19.4   N/A        N/A       N/A         N/A
+BERT
+
+
+
+
+                     TAG      9.1    6.5    7.9         11.8   N/A        N/A       N/A         N/A
+           SST-2     LAMP    17.1   25.8   43.8         82.8   N/A        N/A       N/A         N/A
+                     DAGER    0.1    0.7   11.8         59.1   N/A        N/A       N/A         N/A
+                     TAG      8.5    8.6    8.6         11.2   N/A        N/A       N/A         N/A
+           Rotten
+                     LAMP    17.4   28.2   29.8         83.1   N/A        N/A       N/A         N/A
+          Tomatoes
+                     DAGER    0.1    7.6   48.9        195.0   N/A        N/A       N/A         N/A
+           CoLA      DAGER    7.7    8.6    8.2          9.9    12.6      21.2       41.2      160.0
+LLaMA-2
+
+
+
+
+           SST-2     DAGER    7.8    7.7   10.0         12.5    19.1      45.9       74.3      257.7
+            RT       DAGER    7.6    9.1   10.7         15.6    26.0      39.5      112.2      523.1
+
+
+
+
+Computational requirements We implement DAGER in PyTorch [44] and run all experiments on
+a single GPU. Tests on the LLaMa-2 (7B) architecture were performed on NVIDIA A100 Tensor
+Core GPUs, which boast 40 GB of memory, while all others were ran on NVIDIA L4 GPUs with
+24 GB of memory. In practice, less demanding resources may be used, especially for lower batch
+sizes on BERT and GPT-2BASE . In terms of required RAM, we used between 16 GB and 150 GB per
+experiment, depending on the batch size and model.
+
+
+Hyperparameter details We use a span check acceptance threshold of τ1 = 10−5 in the first layer,
+and τ2 = 10−3 in the second, a rank truncation of ∆b = 20, and for decoder-based models consider
+at most 10 000 000 proposal sentences per recovered EOS token position. We consider pre-trained
+models with a randomly initialized classification head using a normal distribution with σ = 10−3 . To
+manage numerical instabilities within the framework, we tweak the eigenvalue threshold when doing
+the SVD τlrank and decrease with the batch size growing, varying it between 10−7 and 10−9 .
+
+
+C.1        Runtime of experiments
+
+We further demonstrate the computational efficiency of DAGER. The runtime summary can be found
+in Table 7. It is notable that for the experiments on BERT, we have a drastic increase in complexity
+with respect to the batch size and sequence length, as expected from App. B.5, which do not affect
+the baselines as much. That said, we still remain within the same order of magnitude, while achieving
+significantly better results.
+In contrast, we achieve a significant improvement for decoder-based models. We notice that within
+the attack’s scope for GPT-2, we can reconstruct a batch for less than 8 minutes for any batch size.
+It is important to highlight that the runtime decreases for the batch sizes of 64 and 128 because we
+are more often than not unable to recover any tokens due to the embedding dimension limitation
+described in Sec. 7.
+
+
+                                                  21
+Table 8: Ablation study on GPT-2BASE with and without the rank threshold heuristic. We report scores
+of 0 for any example that has full-rank gradients. R-1 and R-2 denote the ROUGE-1 and ROUGE-2
+scores respectively.
+                                   B = 16                           B = 32                        B = 64                         B = 128
+                             R-1             R-2              R-1             R-2           R-1             R-2            R-1             R-2
+           With cutoff    100.0 ± 0.0   100.0 ± 0.0      100.0 ± 0.0     100.0 ± 0.0    100.0 ± 0.0    100.0 ± 0.0      30.3 ± 1.0    14.6 ± 0.9
+ CoLA
+           No cutoff      100.0 ± 0.0   100.0 ± 0.0      100.0 ± 0.0     100.0 ± 0.0    100.0 ± 0.0    100.0 ± 0.0        0.0 ± 0.0     0.0 ± 0.0
+           With cutoff    100.0 ± 0.0     94.6 ± 1.1       100.0+0.0
+                                                                −0.1      93.4 ± 1.0     92.9 ± 3.0     85.0 ± 3.5      13.7 ± 1.4     4.3 ± 0.5
+ SST-2
+           No cutoff      100.0 ± 0.0     94.6 ± 1.1       100.0+0.0
+                                                                −0.1      93.4 ± 1.0      75.0 ± 8.7     69.7 ± 8.2       0.0 ± 0.0     0.0 ± 0.0
+ Rotten    With cutoff    100.0 ± 0.0       99.9+0.1
+                                                −0.3       98.0 ± 1.7     97.8 ± 1.8      2.8 ± 1.1        1.1 ± 0.4      0.0 ± 0.0     0.0 ± 0.0
+Tomatoes   No cutoff      100.0 ± 0.0       99.9+0.1
+                                                −0.3        93.9 ± 4.8     93.8 ± 4.8      0.0 ± 0.0        0.0 ± 0.0     0.0 ± 0.0     0.0 ± 0.0
+
+
+
+
+Table 9: Example comparison between DAGER and LAMPCos for random samples from different
+datasets, reconstructed at batch size 1. We note that LAMPCos was selected, as it was the best-
+performing baseline model for a batch size of 1.
+                                            Sequence
+                              Reference     Sarah devoured the cakes in the kitchen last night.
+                 CoLA         DAGER          Sarah devoured the cakes in the kitchen last night.
+                              LAMPCos        Sarah imaginary even kitchen dev devoured cakes last night
+                              Reference     a caper that’s neither original nor terribly funny
+                  SST-2       DAGER          a caper that’s neither original nor terribly funny
+                              LAMPCos        a that’s neither an perennRe nor terribly funny
+                              Reference     plays like the old disease-of-the-week small-screen melodramas.
+                 Rotten
+                Tomatoes      DAGER          plays like the old disease-of-the-week small-screen melodramas.
+                              LAMPCos        plays it like the old screen impactnorm disease . small-screen like melodramas.
+
+
+
+
+C.2      Rank restriction ablation study
+
+In section Sec. 5.3, we described that for full-rank matrices we attempt a best-effort reconstruction by
+artificially restricting the rank by a threshold b̃. Here we demonstrate the effect of this component by
+showing the performance of DAGER without attempting to recover any part of the sentence. Any
+time we observe a sample with full-rank gradients at either the first or second layers, we immediately
+fail and report a score of 0. The results can be seen in Table 8.
+
+
+C.3      Example reconstructions
+
+In Table 9 we show sample reconstructions between the best-performing baseline LAMP_Cos for a
+batch size B = 1. We note that DAGER achieves exact reconstruction, while LAMP_Cos can predict
+less than half of the sentence correctly.
+
+
+C.4      DAGER under differential privacy
+
+In this section, we show how DAGER performs under a defended setting, in particular by adding
+random Gaussian noise with variance σ 2 to all gradients. We explore the range σ ∈ [10−5 , 5 × 10−4 ],
+as for any σ ≥ 10−3 , the sentiment prediction accuracy of the converged model drops to below 80%
+from > 87%. We apply DAGER on the GPT-2 model for the Rotten Tomatoes dataset at B = 1.
+Due to the highly random nature of this type of defense, we cannot simply filter the sequences by
+measuring the single span check distance at layer l = 2. Instead, we utilise that further layers l > 3
+retain the same property that the input embeddings only depend on previous tokens, and measure
+                  PLDP
+the average d¯ = l=2     d(fil−1 (s), l) for a certain number of layers LDP , which we optimise as a
+hyperparameter. Further, because any noise will make the gradient updates full-rank, for computation
+purposes we set a constant rank of r = 100, which is much higher than the length of any sentence.
+While it has been shown [45] that differencial privacy provides provable guarantees for protecting
+privacy, we provide promising initial results, as seen in Table 10. We believe that there are numerous
+improvements one could make, but leave these for future work.
+
+
+                                                                         22
+Table 10: Experiments on the differential privacy setting under Gaussian noise on the GPT-2 model
+with a batch size of 1 on the Rotten Tomatoes dataset. R-1 and R-2 denote the ROUGE-1 and
+ROUGE-2 scores respectively.
+              σ = 10−5                  σ = 5 × 10−5                  σ = 10−4                 σ = 5 × 10−4
+           R-1        R-2              R-1        R-2              R-1        R-2               R-1     R-2
+        74.0 ± 3.2 70.8 ± 3.4       46.9 ± 4.1 32.5 ± 4.0       20.7 ± 4.4 11.6 ± 3.4         5.6+2.6
+                                                                                                 −1.9 0.9+3.3
+                                                                                                         −0.7
+
+
+
+
+Table 11: Miscallaneous experiments, referenced in the evaluation section. We applied DAGER on
+the Rotten Tomatoes dataset for B = 16, if not specified otherwise.
+             LLaMa-3 70B (B = 1)     LLaMa-3.1 8B     Frobenius norm loss   ReLU activation    LoRA (r = 256)
+                      +0.1
+      R-1         99.9−0.2             99.4+0.1
+                                           −0.3            99.8+0.1
+                                                               −0.4           100.0 ± 0.0           94.8
+                      +0.1
+      R-2        99.9−0.2 s            99.4+0.2
+                                           −0.3            99.8+0.1
+                                                               −1.1            99.8+0.1
+                                                                                    −0.3         94.2 ± 0.7
+C.5       Miscallaneous
+
+Any other experiments, namely the ones on LLaMA-3 70B, LLaMa-3.1 8B, DAGER under LoRA
+training, or DAGER using different loss functions are included in Table 11.
+
+D        Licenses
+In our work, we use the publicly available datasets CoLA, SST-2, Rotten Tomatoes and ECHR. CoLA
+is licensed under the MIT license. No public licensing information was found for SST-2 and Rotten
+Tomatoes. Furthermore, we use ECHR under the Creative Commons Attribution-NonCommercial-
+ShareAlike 4.0 International (CC BY 4.0) license. For privacy concerns, ECHR has issued a statement
+of protection of personal data that ensures private data was handled appropriately1 .
+In terms of Large Language Model architectures, we use GPT-2 under the MIT license and BERT
+under the Apache License. All aforementioned licenses permit our use of the underlying assets for
+the purposes of this paper. We obtained access to LLaMa-2 through the Llama 2 Community License
+Agreement2 which permits the model’s use in commercial and research settings.
+Finally, we obtain the code for the LAMP and TAG attacks through the public repository for LAMP
+which is licensed under the Apache License 2.0.
+
+
+
+
+    1
+        The statement can be found under https://www.echr.coe.int/privacy.
+    2
+        The full license can be found under https://ai.meta.com/llama/license/.
+
+
+                                                         23
+

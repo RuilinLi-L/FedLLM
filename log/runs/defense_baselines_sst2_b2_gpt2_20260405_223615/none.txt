@@ -1,0 +1,11 @@
+===== defense=none param=n/a dataset=sst2 batch=2 model=gpt2 start=2026-04-05 22:36:15 =====
+Rec L1: [True, True], Rec L1 MaxB: [True, True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True, True]
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 93.500 | p: 93.500 | r: 93.500
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 193.500
+input #99 time: 0:00:01 | total time: 0:03:27
+Done with all.
+===== end=2026-04-05 22:41:11 exit_code=0 =====

@@ -1,0 +1,10 @@
+===== defense=topk param=0.7 dataset=sst2 batch=2 model=gpt2 start=2026-04-02 20:44:45 =====
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:12 | total time: 0:01:00
+Done with all.
+===== end=2026-04-02 20:46:33 exit_code=0 =====

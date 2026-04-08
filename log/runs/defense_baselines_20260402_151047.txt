@@ -1,0 +1,837 @@
+===== run start 2026-04-02 15:10:47 tag=defense_baselines argv: defense_baselines cola 1 gpt2 10 =====
+========== defense=none ==========
+/data2/lrl/dager-gradient-inversion/attack.py:331: FutureWarning: load_metric is deprecated and will be removed in the next major version of datasets. Use 'evaluate.load' instead, from the new library 🤗 Evaluate: https://huggingface.co/docs/evaluate
+  metric = load_metric('rouge', cache_dir=args.cache_dir)
+/data2/ky/envs/dager/lib/python3.11/site-packages/datasets/load.py:759: FutureWarning: The repository for rouge contains custom code which must be executed to correctly load the metric. You can inspect the repository content at https://raw.githubusercontent.com/huggingface/datasets/2.19.0/metrics/rouge/rouge.py
+You can avoid this message in future by passing the argument `trust_remote_code=True`.
+Passing `trust_remote_code=True` will be mandatory to load this metric from the next major release of `datasets`.
+  warnings.warn(
+Using the latest cached version of the module from /data/huggingface/modules/datasets_modules/metrics/rouge/08e775381ee5ffd82dec338205d8e4a2b57145ce6307ffd8b5fe26e75d0f9057 (last modified on Fri Jul 18 16:13:10 2025) since it couldn't be found locally at rouge, or remotely on the Hugging Face Hub.
+Some weights of GPT2ForSequenceClassification were not initialized from the model checkpoint at gpt2 and are newly initialized: ['score.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+/data2/ky/envs/dager/lib/python3.11/site-packages/transformers/tokenization_utils_base.py:1617: FutureWarning: `clean_up_tokenization_spaces` was not set. It will be set to `True` by default. This behavior will be deprecated in transformers v4.45, and will be then set to `False` by default. For more details check this issue: https://github.com/huggingface/transformers/issues/31884
+  warnings.warn(
+
+
+Attacking..
+
+Running input #0 of 10.
+reference: 
+========================
+The twig broke off of the branch.
+========================
+9/9/9
+L1 Position 0
+L1 Position 1
+L1 Position 2
+L1 Position 3
+L1 Position 4
+L1 Position 5
+L1 Position 6
+L1 Position 7
+L1 Position 8
+L1 Position 9
+{'input_ids': tensor([[ 464,  665,  328, 6265,  572,  286,  262, 8478,   13]],
+       device='cuda:0'), 'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')}
+tensor([[ 464],
+        [ 665],
+        [ 328],
+        [6265],
+        [ 572],
+        [ 286],
+        [ 262],
+        [8478],
+        [  13]], device='cuda:0')
+[0, 1, 2, 3, 4, 5, 6, 7, 8] [[464], [665], [328], [6265], [572], [286], [262], [8478], [13]] [[0], [0], [0], [0], [0], [0], [0], [0], [0], []]
+tensor([[7.0975e-07, 1.0572e-06, 8.5179e-07, 7.1795e-07, 8.4263e-07, 8.8759e-07,
+         7.5245e-07, 7.7870e-07, 1.1464e-06]], device='cuda:0')
+Rec L1: [True], Rec L1 MaxB: [True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True]
+Position 1
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 2
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 3
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 4
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 5
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 6
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 7
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 8
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 9
+Done with input #0 of 10.
+reference: 
+========================
+The twig broke off of the branch.
+========================
+predicted: 
+========================
+The twig broke off of the branch.
+========================
+[Curr input metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+input #0 time: 0:00:02 | total time: 0:00:02
+
+
+Running input #1 of 10.
+reference: 
+========================
+Tom was not more reliable than a grasshopper.
+========================
+11/11/11
+L1 Position 0
+L1 Position 1
+L1 Position 2
+L1 Position 3
+L1 Position 4
+L1 Position 5
+L1 Position 6
+L1 Position 7
+L1 Position 8
+L1 Position 9
+L1 Position 10
+L1 Position 11
+{'input_ids': tensor([[13787,   373,   407,   517,  9314,   621,   257,  8701,  8873,  2848,
+            13]], device='cuda:0'), 'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')}
+tensor([[13787],
+        [  373],
+        [  407],
+        [  517],
+        [ 9314],
+        [  621],
+        [  257],
+        [ 8701],
+        [ 8873],
+        [ 2848],
+        [   13]], device='cuda:0')
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] [[13787], [373], [407], [517], [9314], [621], [257], [8701], [8873], [2848], [13]] [[0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], []]
+tensor([[6.2060e-07, 5.8254e-07, 5.7723e-07, 6.2225e-07, 6.5290e-07, 6.3945e-07,
+         6.1517e-07, 5.6375e-07, 9.4716e-07, 1.0462e-06, 1.0100e-06]],
+       device='cuda:0')
+Rec L1: [True], Rec L1 MaxB: [True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True]
+Position 1
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 2
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 3
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 4
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 5
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 6
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 7
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 8
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 9
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 10
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 11
+Done with input #1 of 10.
+reference: 
+========================
+Tom was not more reliable than a grasshopper.
+========================
+predicted: 
+========================
+Tom was not more reliable than a grasshopper.
+========================
+[Curr input metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+input #1 time: 0:00:02 | total time: 0:00:05
+
+
+Running input #2 of 10.
+reference: 
+========================
+I detached the handle and the box apart.
+========================
+9/9/9
+L1 Position 0
+L1 Position 1
+L1 Position 2
+L1 Position 3
+L1 Position 4
+L1 Position 5
+L1 Position 6
+L1 Position 7
+L1 Position 8
+L1 Position 9
+{'input_ids': tensor([[   40, 30795,   262,  5412,   290,   262,  3091,  5475,    13]],
+       device='cuda:0'), 'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')}
+tensor([[   40],
+        [30795],
+        [  262],
+        [ 5412],
+        [  290],
+        [  262],
+        [ 3091],
+        [ 5475],
+        [   13]], device='cuda:0')
+[0, 1, 2, 3, 4, 5, 6, 7, 8] [[40], [30795], [262], [5412], [290], [262], [3091], [5475], [13]] [[0], [0], [0], [0], [0], [0], [0], [0], [0], []]
+tensor([[4.7494e-07, 6.3688e-07, 7.1845e-07, 6.0144e-07, 7.3532e-07, 6.7159e-07,
+         6.9870e-07, 6.7278e-07, 9.9120e-07]], device='cuda:0')
+Rec L1: [True], Rec L1 MaxB: [True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True]
+Position 1
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 2
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 3
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 4
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 5
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 6
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 7
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 8
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 9
+Done with input #2 of 10.
+reference: 
+========================
+I detached the handle and the box apart.
+========================
+predicted: 
+========================
+I detached the handle and the box apart.
+========================
+[Curr input metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+input #2 time: 0:00:02 | total time: 0:00:07
+
+
+Running input #3 of 10.
+reference: 
+========================
+John offers few advice.
+========================
+5/5/5
+L1 Position 0
+L1 Position 1
+L1 Position 2
+L1 Position 3
+L1 Position 4
+L1 Position 5
+{'input_ids': tensor([[7554, 4394, 1178, 5608,   13]], device='cuda:0'), 'attention_mask': tensor([[1, 1, 1, 1, 1]], device='cuda:0')}
+tensor([[7554],
+        [4394],
+        [1178],
+        [5608],
+        [  13]], device='cuda:0')
+[0, 1, 2, 3, 4] [[7554], [4394], [1178], [5608], [13]] [[0], [0], [0], [0], [0], []]
+tensor([[5.6742e-07, 4.5458e-07, 4.8569e-07, 4.9035e-07, 9.3528e-07]],
+       device='cuda:0')
+Rec L1: [True], Rec L1 MaxB: [True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True]
+Position 1
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 2
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 3
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 4
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 5
+Done with input #3 of 10.
+reference: 
+========================
+John offers few advice.
+========================
+predicted: 
+========================
+John offers few advice.
+========================
+[Curr input metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+input #3 time: 0:00:01 | total time: 0:00:09
+
+
+Running input #4 of 10.
+reference: 
+========================
+The pig grunt
+========================
+3/3/3
+L1 Position 0
+L1 Position 1
+L1 Position 2
+L1 Position 3
+{'input_ids': tensor([[  464, 12967, 45836]], device='cuda:0'), 'attention_mask': tensor([[1, 1, 1]], device='cuda:0')}
+tensor([[  464],
+        [12967],
+        [45836]], device='cuda:0')
+[0, 1, 2] [[464], [12967], [45836]] [[0], [0], [0], []]
+tensor([[1.0097e-06, 1.0605e-06, 9.5152e-07]], device='cuda:0')
+Rec L1: [True], Rec L1 MaxB: [True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True]
+Position 1
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 2
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 3
+Done with input #4 of 10.
+reference: 
+========================
+The pig grunt
+========================
+predicted: 
+========================
+The pig grunt
+========================
+[Curr input metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+input #4 time: 0:00:02 | total time: 0:00:11
+
+
+Running input #5 of 10.
+reference: 
+========================
+That John coughs loves Bill.
+========================
+7/7/7
+L1 Position 0
+L1 Position 1
+L1 Position 2
+L1 Position 3
+L1 Position 4
+L1 Position 5
+L1 Position 6
+L1 Position 7
+{'input_ids': tensor([[ 2504,  1757, 22094,    82, 10408,  3941,    13]], device='cuda:0'), 'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1]], device='cuda:0')}
+tensor([[ 2504],
+        [ 1757],
+        [22094],
+        [   82],
+        [10408],
+        [ 3941],
+        [   13]], device='cuda:0')
+[0, 1, 2, 3, 4, 5, 6] [[2504], [1757], [22094], [82], [10408], [3941], [13]] [[0], [0], [0], [0], [0], [0], [0], []]
+tensor([[7.0354e-07, 1.0153e-06, 5.9342e-07, 5.0422e-07, 1.0787e-06, 1.0636e-06,
+         9.1932e-07]], device='cuda:0')
+Rec L1: [True], Rec L1 MaxB: [True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True]
+Position 1
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 2
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 3
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 4
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 5
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 6
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 7
+Done with input #5 of 10.
+reference: 
+========================
+That John coughs loves Bill.
+========================
+predicted: 
+========================
+That John coughs loves Bill.
+========================
+[Curr input metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+input #5 time: 0:00:02 | total time: 0:00:13
+
+
+Running input #6 of 10.
+reference: 
+========================
+The students all worked that summer.
+========================
+7/7/7
+L1 Position 0
+L1 Position 1
+L1 Position 2
+L1 Position 3
+L1 Position 4
+L1 Position 5
+L1 Position 6
+L1 Position 7
+{'input_ids': tensor([[ 464, 2444,  477, 3111,  326, 3931,   13]], device='cuda:0'), 'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1]], device='cuda:0')}
+tensor([[ 464],
+        [2444],
+        [ 477],
+        [3111],
+        [ 326],
+        [3931],
+        [  13]], device='cuda:0')
+[0, 1, 2, 3, 4, 5, 6] [[464], [2444], [477], [3111], [326], [3931], [13]] [[0], [0], [0], [0], [0], [0], [0], []]
+tensor([[5.6111e-07, 5.8250e-07, 4.8192e-07, 5.9586e-07, 1.0730e-06, 9.2704e-07,
+         1.0249e-06]], device='cuda:0')
+Rec L1: [True], Rec L1 MaxB: [True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True]
+Position 1
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 2
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 3
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 4
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 5
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 6
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 7
+Done with input #6 of 10.
+reference: 
+========================
+The students all worked that summer.
+========================
+predicted: 
+========================
+The students all worked that summer.
+========================
+[Curr input metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+input #6 time: 0:00:02 | total time: 0:00:16
+
+
+Running input #7 of 10.
+reference: 
+========================
+Heidi investigated whether John ate the cauliflower.
+========================
+10/10/10
+L1 Position 0
+L1 Position 1
+L1 Position 2
+L1 Position 3
+L1 Position 4
+L1 Position 5
+L1 Position 6
+L1 Position 7
+L1 Position 8
+L1 Position 9
+L1 Position 10
+{'input_ids': tensor([[ 1544, 19830, 12565,  1771,  1757, 15063,   262, 46087, 42642,    13]],
+       device='cuda:0'), 'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')}
+tensor([[ 1544],
+        [19830],
+        [12565],
+        [ 1771],
+        [ 1757],
+        [15063],
+        [  262],
+        [46087],
+        [42642],
+        [   13]], device='cuda:0')
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9] [[1544], [19830], [12565], [1771], [1757], [15063], [262], [46087], [42642], [13]] [[0], [0], [0], [0], [0], [0], [0], [0], [0], [0], []]
+tensor([[7.3973e-07, 7.5451e-07, 7.2722e-07, 7.1254e-07, 6.5579e-07, 5.9929e-07,
+         6.7677e-07, 7.3982e-07, 1.1049e-06, 1.0155e-06]], device='cuda:0')
+Rec L1: [True], Rec L1 MaxB: [True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True]
+Position 1
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 2
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 3
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 4
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 5
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 6
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 7
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 8
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 9
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 10
+Done with input #7 of 10.
+reference: 
+========================
+Heidi investigated whether John ate the cauliflower.
+========================
+predicted: 
+========================
+Heidi investigated whether John ate the cauliflower.
+========================
+[Curr input metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+input #7 time: 0:00:01 | total time: 0:00:18
+
+
+Running input #8 of 10.
+reference: 
+========================
+Yesterday, the child really kicked a monkey in the street.
+========================
+12/12/12
+L1 Position 0
+L1 Position 1
+L1 Position 2
+L1 Position 3
+L1 Position 4
+L1 Position 5
+L1 Position 6
+L1 Position 7
+L1 Position 8
+L1 Position 9
+L1 Position 10
+L1 Position 11
+L1 Position 12
+{'input_ids': tensor([[28065,    11,   262,  1200,  1107, 12165,   257, 21657,   287,   262,
+          4675,    13]], device='cuda:0'), 'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')}
+tensor([[28065],
+        [   11],
+        [  262],
+        [ 1200],
+        [ 1107],
+        [12165],
+        [  257],
+        [21657],
+        [  287],
+        [  262],
+        [ 4675],
+        [   13]], device='cuda:0')
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] [[28065], [11], [262], [1200], [1107], [12165], [257], [21657], [287], [262], [4675], [13]] [[0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], []]
+tensor([[5.7012e-07, 7.2824e-07, 6.5827e-07, 8.8099e-07, 7.9847e-07, 8.0692e-07,
+         7.6174e-07, 8.4882e-07, 7.6215e-07, 9.1824e-07, 8.6004e-07, 8.9944e-07]],
+       device='cuda:0')
+Rec L1: [True], Rec L1 MaxB: [True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True]
+Position 1
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 2
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 3
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 4
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 5
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 6
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 7
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 8
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 9
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 10
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 11
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 12
+Done with input #8 of 10.
+reference: 
+========================
+Yesterday, the child really kicked a monkey in the street.
+========================
+predicted: 
+========================
+Yesterday, the child really kicked a monkey in the street.
+========================
+[Curr input metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+input #8 time: 0:00:02 | total time: 0:00:20
+
+
+Running input #9 of 10.
+reference: 
+========================
+This is the problem that you'll beat the competition more easily, the sooner you solve.
+========================
+18/18/18
+L1 Position 0
+L1 Position 1
+L1 Position 2
+L1 Position 3
+L1 Position 4
+L1 Position 5
+L1 Position 6
+L1 Position 7
+L1 Position 8
+L1 Position 9
+L1 Position 10
+L1 Position 11
+L1 Position 12
+L1 Position 13
+L1 Position 14
+L1 Position 15
+L1 Position 16
+L1 Position 17
+L1 Position 18
+{'input_ids': tensor([[ 1212,   318,   262,  1917,   326,   345,  1183,  4405,   262,  5449,
+           517,  3538,    11,   262, 14556,   345,  8494,    13]],
+       device='cuda:0'), 'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]],
+       device='cuda:0')}
+tensor([[ 1212],
+        [  318],
+        [  262],
+        [ 1917],
+        [  326],
+        [  345],
+        [ 1183],
+        [ 4405],
+        [  262],
+        [ 5449],
+        [  517],
+        [ 3538],
+        [   11],
+        [  262],
+        [14556],
+        [  345],
+        [ 8494],
+        [   13]], device='cuda:0')
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] [[1212], [318], [262], [1917], [326], [345], [1183], [4405], [262], [5449], [517], [3538], [11], [262], [14556], [345], [8494], [13]] [[0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], [0], []]
+tensor([[5.1662e-07, 8.3737e-07, 6.5424e-07, 8.3357e-07, 6.9494e-07, 7.4382e-07,
+         9.4022e-07, 8.9372e-07, 6.4662e-07, 8.9718e-07, 7.6589e-07, 7.3557e-07,
+         6.1843e-07, 6.8356e-07, 9.9990e-07, 7.2854e-07, 9.7512e-07, 9.0726e-07]],
+       device='cuda:0')
+Rec L1: [True], Rec L1 MaxB: [True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True]
+Position 1
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 2
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 3
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 4
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 5
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 6
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 7
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 8
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 9
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 10
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 11
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 12
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 13
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 14
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 15
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 16
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 17
+  0%|          | 0/1 [00:00<?, ?it/s]  0%|          | 0/1 [00:00<?, ?it/s]
+Position 18
+Done with input #9 of 10.
+reference: 
+========================
+This is the problem that you'll beat the competition more easily, the sooner you solve.
+========================
+predicted: 
+========================
+This is the problem that you'll beat the competition more easily, the sooner you solve.
+========================
+[Curr input metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+
+input #9 time: 0:00:02 | total time: 0:00:23
+
+
+Done with all.
+========== defense=noise ==========
+/data2/lrl/dager-gradient-inversion/attack.py:331: FutureWarning: load_metric is deprecated and will be removed in the next major version of datasets. Use 'evaluate.load' instead, from the new library 🤗 Evaluate: https://huggingface.co/docs/evaluate
+  metric = load_metric('rouge', cache_dir=args.cache_dir)
+/data2/ky/envs/dager/lib/python3.11/site-packages/datasets/load.py:759: FutureWarning: The repository for rouge contains custom code which must be executed to correctly load the metric. You can inspect the repository content at https://raw.githubusercontent.com/huggingface/datasets/2.19.0/metrics/rouge/rouge.py
+You can avoid this message in future by passing the argument `trust_remote_code=True`.
+Passing `trust_remote_code=True` will be mandatory to load this metric from the next major release of `datasets`.
+  warnings.warn(
+Using the latest cached version of the module from /data/huggingface/modules/datasets_modules/metrics/rouge/08e775381ee5ffd82dec338205d8e4a2b57145ce6307ffd8b5fe26e75d0f9057 (last modified on Fri Jul 18 16:13:10 2025) since it couldn't be found locally at rouge, or remotely on the Hugging Face Hub.
+Some weights of GPT2ForSequenceClassification were not initialized from the model checkpoint at gpt2 and are newly initialized: ['score.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+/data2/ky/envs/dager/lib/python3.11/site-packages/transformers/tokenization_utils_base.py:1617: FutureWarning: `clean_up_tokenization_spaces` was not set. It will be set to `True` by default. This behavior will be deprecated in transformers v4.45, and will be then set to `False` by default. For more details check this issue: https://github.com/huggingface/transformers/issues/31884
+  warnings.warn(
+
+
+Attacking..
+
+Running input #0 of 10.
+reference: 
+========================
+The twig broke off of the branch.
+========================
+We strongly recommend passing in an `attention_mask` since your input_ids may be padded. See https://huggingface.co/docs/transformers/troubleshooting#incorrect-output-when-padding-tokens-arent-masked.
+You may ignore this warning if your `pad_token_id` (50256) is identical to the `bos_token_id` (50256), `eos_token_id` (50256), or the `sep_token_id` (None), and your input is not padded.
+748/9/9
+L1 Position 0
+Traceback (most recent call last):
+  File "/data2/lrl/dager-gradient-inversion/attack.py", line 391, in <module>
+    main()
+  File "/data2/lrl/dager-gradient-inversion/attack.py", line 355, in main
+    prediction, reference = reconstruct(args, device, sample, metric, model_wrapper)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/lrl/dager-gradient-inversion/attack.py", line 119, in reconstruct
+    res_pos, res_ids, res_types, sentence_ends = filter_l1(args, model_wrapper, R_Qs)
+                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/lrl/dager-gradient-inversion/attack.py", line 46, in filter_l1
+    d = get_span_dists(args, model_wrapper, R_Qs, embeds, p)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/lrl/dager-gradient-inversion/utils/functional.py", line 142, in get_span_dists
+    embs = model_wrapper.get_layer_inputs(sentences, layers=args.n_layers-1)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/lrl/dager-gradient-inversion/utils/models.py", line 376, in get_layer_inputs
+    return self.model.transformer.get_hidden_states(input_ids=sentences, attention_mask=attention_mask, n_layers=layers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/lrl/dager-gradient-inversion/utils/partial_models.py", line 152, in get_hidden_states
+    outputs = block(
+              ^^^^^^
+  File "/data2/ky/envs/dager/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/ky/envs/dager/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/ky/envs/dager/lib/python3.11/site-packages/transformers/models/gpt2/modeling_gpt2.py", line 652, in forward
+    feed_forward_hidden_states = self.mlp(hidden_states)
+                                 ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/ky/envs/dager/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/ky/envs/dager/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/ky/envs/dager/lib/python3.11/site-packages/transformers/models/gpt2/modeling_gpt2.py", line 576, in forward
+    hidden_states = self.act(hidden_states)
+                    ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/ky/envs/dager/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/ky/envs/dager/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data2/ky/envs/dager/lib/python3.11/site-packages/transformers/activations.py", line 56, in forward
+    return 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))))
+                                                                               ~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 590.00 MiB. GPU 0 has a total capacity of 47.40 GiB of which 483.94 MiB is free. Process 2277063 has 38.29 GiB memory in use. Process 2812935 has 4.59 GiB memory in use. Including non-PyTorch memory, this process has 4.01 GiB memory in use. Of the allocated memory 3.66 GiB is allocated by PyTorch, and 44.58 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

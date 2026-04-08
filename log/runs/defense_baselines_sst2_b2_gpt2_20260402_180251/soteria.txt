@@ -1,0 +1,11 @@
+===== defense=soteria dataset=sst2 batch=2 model=gpt2 start=2026-04-02 18:09:34 =====
+Rec L1: [True, True], Rec L1 MaxB: [True, True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True, True]
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 83.333 | p: 83.333 | r: 83.333
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 183.333
+input #2 time: 0:00:08 | total time: 0:00:26
+Done with all.
+===== end=2026-04-02 18:10:40 exit_code=0 =====

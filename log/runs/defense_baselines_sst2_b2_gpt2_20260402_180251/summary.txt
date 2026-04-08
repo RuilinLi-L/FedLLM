@@ -1,0 +1,84 @@
+===== run start 2026-04-02 18:02:51 tag=defense_baselines argv: sst2 2 gpt2 3 =====
+
+========== defense=none ==========
+Rec L1: [True, True], Rec L1 MaxB: [True, True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True, True]
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 83.333 | p: 83.333 | r: 83.333
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 183.333
+input #2 time: 0:00:02 | total time: 0:00:07
+Done with all.
+
+========== defense=noise ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #2 time: 0:00:05 | total time: 0:00:14
+Done with all.
+
+========== defense=dpsgd ==========
+Rec L1: [False, False], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.0, Rec Token: 0.0, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #2 time: 0:00:05 | total time: 0:02:30
+Done with all.
+
+========== defense=topk ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #2 time: 0:00:05 | total time: 0:00:15
+Done with all.
+
+========== defense=compression ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #2 time: 0:00:03 | total time: 0:00:10
+Done with all.
+
+========== defense=soteria ==========
+Rec L1: [True, True], Rec L1 MaxB: [True, True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True, True]
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 83.333 | p: 83.333 | r: 83.333
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 183.333
+input #2 time: 0:00:08 | total time: 0:00:26
+Done with all.
+
+========== defense=mixup ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #2 time: 0:00:01 | total time: 0:00:05
+Done with all.
+
+===== COMPARISON =====
+defense      |    r1_fm |    r2_fm |    r1+r2 | status
+none         |  100.000 |   83.333 |  183.333 | ok
+noise        |    0.000 |    0.000 |    0.000 | ok
+dpsgd        |    0.000 |    0.000 |    0.000 | ok
+topk         |    0.000 |    0.000 |    0.000 | ok
+compression  |    0.000 |    0.000 |    0.000 | ok
+soteria      |  100.000 |   83.333 |  183.333 | ok
+mixup        |    0.000 |    0.000 |    0.000 | ok

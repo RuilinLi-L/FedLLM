@@ -1,0 +1,20 @@
+===== run start 2026-04-02 14:46:04 tag=defense_baselines argv: defense_baselines sst2 1 gpt2 100 =====
+========== defense=none ==========
+/data2/lrl/dager-gradient-inversion/attack.py:331: FutureWarning: load_metric is deprecated and will be removed in the next major version of datasets. Use 'evaluate.load' instead, from the new library 🤗 Evaluate: https://huggingface.co/docs/evaluate
+  metric = load_metric('rouge', cache_dir=args.cache_dir)
+/data2/ky/envs/dager/lib/python3.11/site-packages/datasets/load.py:759: FutureWarning: The repository for rouge contains custom code which must be executed to correctly load the metric. You can inspect the repository content at https://raw.githubusercontent.com/huggingface/datasets/2.19.0/metrics/rouge/rouge.py
+You can avoid this message in future by passing the argument `trust_remote_code=True`.
+Passing `trust_remote_code=True` will be mandatory to load this metric from the next major release of `datasets`.
+  warnings.warn(
+Using the latest cached version of the module from /data/huggingface/modules/datasets_modules/metrics/rouge/08e775381ee5ffd82dec338205d8e4a2b57145ce6307ffd8b5fe26e75d0f9057 (last modified on Fri Jul 18 16:13:10 2025) since it couldn't be found locally at rouge, or remotely on the Hugging Face Hub.
+Traceback (most recent call last):
+  File "/data2/lrl/dager-gradient-inversion/attack.py", line 391, in <module>
+    main()
+  File "/data2/lrl/dager-gradient-inversion/attack.py", line 334, in main
+    model_wrapper = ModelWrapper(args)
+                    ^^^^^^^^^^^^^^^^^^
+  File "/data2/lrl/dager-gradient-inversion/utils/models.py", line 16, in __init__
+    access_token = os.environ['HF_TOKEN']
+                   ~~~~~~~~~~^^^^^^^^^^^^
+  File "<frozen os>", line 679, in __getitem__
+KeyError: 'HF_TOKEN'

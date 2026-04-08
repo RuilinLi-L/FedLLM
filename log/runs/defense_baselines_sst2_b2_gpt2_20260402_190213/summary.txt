@@ -1,0 +1,379 @@
+===== run start 2026-04-02 19:02:13 tag=defense_baselines argv: sst2 2 gpt2 5 =====
+
+========== defense=none ==========
+Rec L1: [True, True], Rec L1 MaxB: [True, True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True, True]
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+input #4 time: 0:00:03 | total time: 0:00:15
+Done with all.
+
+========== defense=noise param=1e-6 ==========
+Rec L1: [True, True], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.8492063492063492, Rec Token: 1.0, Rec L2: [False, True]
+[Aggregate metrics]:
+rouge1     | fm: 15.806 | p: 50.000 | r: 9.643
+rouge2     | fm: 4.286 | p: 20.000 | r: 2.436
+rougeL     | fm: 15.667 | p: 50.000 | r: 9.490
+rougeLsum  | fm: 15.389 | p: 50.000 | r: 9.338
+r1fm+r2fm = 20.091
+input #4 time: 0:02:14 | total time: 0:11:26
+Done with all.
+
+========== defense=noise param=1e-5 ==========
+Rec L1: [True, True], Rec L1 MaxB: [False, True], Rec MaxB Token: 0.3968253968253968, Rec Token: 1.0, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 22.444 | p: 65.000 | r: 15.205
+rouge2     | fm: 4.339 | p: 30.000 | r: 2.436
+rougeL     | fm: 22.324 | p: 65.000 | r: 14.946
+rougeLsum  | fm: 22.152 | p: 65.000 | r: 15.105
+r1fm+r2fm = 26.783
+input #4 time: 0:02:01 | total time: 0:11:37
+Done with all.
+
+========== defense=noise param=1e-4 ==========
+Rec L1: [False, True], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.15873015873015872, Rec Token: 0.7698412698412699, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:02:18 | total time: 0:11:21
+Done with all.
+
+========== defense=noise param=5e-4 ==========
+Rec L1: [False, False], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.0, Rec Token: 0.25, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:04 | total time: 0:02:19
+Done with all.
+
+========== defense=noise param=1e-3 ==========
+Rec L1: [False, False], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.0, Rec Token: 0.05, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:04 | total time: 0:02:45
+Done with all.
+
+========== defense=dpsgd param=1e-6 ==========
+Rec L1: [False, True], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.29365079365079366, Rec Token: 0.8492063492063492, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 8.889 | p: 30.000 | r: 5.636
+rouge2     | fm: 2.857 | p: 10.000 | r: 1.667
+rougeL     | fm: 9.444 | p: 30.000 | r: 5.766
+rougeLsum  | fm: 8.889 | p: 30.000 | r: 5.584
+r1fm+r2fm = 11.746
+input #4 time: 0:03:10 | total time: 0:13:42
+Done with all.
+
+========== defense=dpsgd param=1e-5 ==========
+Rec L1: [True, False], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.10638297872340426, Rec Token: 0.4787234042553192, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:05 | total time: 0:15:38
+Done with all.
+
+========== defense=dpsgd param=1e-4 ==========
+Rec L1: [False, False], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.0, Rec Token: 0.030303030303030304, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:05 | total time: 0:04:24
+Done with all.
+
+========== defense=dpsgd param=5e-4 ==========
+Rec L1: [False, False], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.0, Rec Token: 0.0, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:05 | total time: 0:05:21
+Done with all.
+
+========== defense=dpsgd param=1e-3 ==========
+Rec L1: [False, False], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.0, Rec Token: 0.0, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:05 | total time: 0:05:15
+Done with all.
+
+========== defense=topk param=0.01 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:03 | total time: 0:00:18
+Done with all.
+
+========== defense=topk param=0.05 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:05 | total time: 0:00:27
+Done with all.
+
+========== defense=topk param=0.1 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:06 | total time: 0:00:30
+Done with all.
+
+========== defense=topk param=0.3 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:08 | total time: 0:00:42
+Done with all.
+
+========== defense=topk param=0.5 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:10 | total time: 0:00:51
+Done with all.
+
+========== defense=topk param=0.7 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:12 | total time: 0:01:00
+Done with all.
+
+========== defense=topk param=0.9 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:12 | total time: 0:01:03
+Done with all.
+
+========== defense=compression param=2 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:04 | total time: 0:00:21
+Done with all.
+
+========== defense=compression param=4 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:03 | total time: 0:00:21
+Done with all.
+
+========== defense=compression param=8 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:04 | total time: 0:00:20
+Done with all.
+
+========== defense=compression param=16 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:02 | total time: 0:00:12
+Done with all.
+
+========== defense=compression param=32 ==========
+Rec L1: [True, True], Rec L1 MaxB: [True, True], Rec MaxB Token: 1.0, Rec Token: 1.0, Rec L2: [True, True]
+[Aggregate metrics]:
+rouge1     | fm: 100.000 | p: 100.000 | r: 100.000
+rouge2     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeL     | fm: 100.000 | p: 100.000 | r: 100.000
+rougeLsum  | fm: 100.000 | p: 100.000 | r: 100.000
+r1fm+r2fm = 200.000
+input #4 time: 0:00:04 | total time: 0:00:21
+Done with all.
+
+========== defense=soteria param=10 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:09 | total time: 0:00:47
+Done with all.
+
+========== defense=soteria param=30 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:08 | total time: 0:00:45
+Done with all.
+
+========== defense=soteria param=50 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:08 | total time: 0:00:41
+Done with all.
+
+========== defense=soteria param=70 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:08 | total time: 0:00:41
+Done with all.
+
+========== defense=soteria param=90 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:08 | total time: 0:00:42
+Done with all.
+
+========== defense=mixup param=0.1 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:02 | total time: 0:00:10
+Done with all.
+
+========== defense=mixup param=0.3 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:02 | total time: 0:00:10
+Done with all.
+
+========== defense=mixup param=0.5 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:02 | total time: 0:00:11
+Done with all.
+
+========== defense=mixup param=1.0 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:03 | total time: 0:00:12
+Done with all.
+
+========== defense=mixup param=2.0 ==========
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:02 | total time: 0:00:12
+Done with all.
+
+===== COMPARISON =====
+variant                      |      param |    r1_fm |    r2_fm |    r1+r2 | status
+none                         |        n/a |  100.000 |  100.000 |  200.000 | ok
+noise_1e-6                   |       1e-6 |   15.806 |    4.286 |   20.091 | ok
+noise_1e-5                   |       1e-5 |   22.444 |    4.339 |   26.783 | ok
+noise_1e-4                   |       1e-4 |    0.000 |    0.000 |    0.000 | ok
+noise_5e-4                   |       5e-4 |    0.000 |    0.000 |    0.000 | ok
+noise_1e-3                   |       1e-3 |    0.000 |    0.000 |    0.000 | ok
+dpsgd_1e-6                   |       1e-6 |    8.889 |    2.857 |   11.746 | ok
+dpsgd_1e-5                   |       1e-5 |    0.000 |    0.000 |    0.000 | ok
+dpsgd_1e-4                   |       1e-4 |    0.000 |    0.000 |    0.000 | ok
+dpsgd_5e-4                   |       5e-4 |    0.000 |    0.000 |    0.000 | ok
+dpsgd_1e-3                   |       1e-3 |    0.000 |    0.000 |    0.000 | ok
+topk_0.01                    |       0.01 |    0.000 |    0.000 |    0.000 | ok
+topk_0.05                    |       0.05 |    0.000 |    0.000 |    0.000 | ok
+topk_0.1                     |        0.1 |    0.000 |    0.000 |    0.000 | ok
+topk_0.3                     |        0.3 |    0.000 |    0.000 |    0.000 | ok
+topk_0.5                     |        0.5 |    0.000 |    0.000 |    0.000 | ok
+topk_0.7                     |        0.7 |    0.000 |    0.000 |    0.000 | ok
+topk_0.9                     |        0.9 |    0.000 |    0.000 |    0.000 | ok
+compression_2                |          2 |    0.000 |    0.000 |    0.000 | ok
+compression_4                |          4 |    0.000 |    0.000 |    0.000 | ok
+compression_8                |          8 |    0.000 |    0.000 |    0.000 | ok
+compression_16               |         16 |    0.000 |    0.000 |    0.000 | ok
+compression_32               |         32 |  100.000 |  100.000 |  200.000 | ok
+soteria_10                   |         10 |    0.000 |    0.000 |    0.000 | ok
+soteria_30                   |         30 |    0.000 |    0.000 |    0.000 | ok
+soteria_50                   |         50 |    0.000 |    0.000 |    0.000 | ok
+soteria_70                   |         70 |    0.000 |    0.000 |    0.000 | ok
+soteria_90                   |         90 |    0.000 |    0.000 |    0.000 | ok
+mixup_0.1                    |        0.1 |    0.000 |    0.000 |    0.000 | ok
+mixup_0.3                    |        0.3 |    0.000 |    0.000 |    0.000 | ok
+mixup_0.5                    |        0.5 |    0.000 |    0.000 |    0.000 | ok
+mixup_1.0                    |        1.0 |    0.000 |    0.000 |    0.000 | ok
+mixup_2.0                    |        2.0 |    0.000 |    0.000 |    0.000 | ok

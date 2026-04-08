@@ -1,0 +1,11 @@
+===== defense=dpsgd param=1e-6 dataset=sst2 batch=2 model=gpt2 start=2026-04-02 19:46:55 =====
+Rec L1: [False, True], Rec L1 MaxB: [False, False], Rec MaxB Token: 0.29365079365079366, Rec Token: 0.8492063492063492, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 8.889 | p: 30.000 | r: 5.636
+rouge2     | fm: 2.857 | p: 10.000 | r: 1.667
+rougeL     | fm: 9.444 | p: 30.000 | r: 5.766
+rougeLsum  | fm: 8.889 | p: 30.000 | r: 5.584
+r1fm+r2fm = 11.746
+input #4 time: 0:03:10 | total time: 0:13:42
+Done with all.
+===== end=2026-04-02 20:01:24 exit_code=0 =====

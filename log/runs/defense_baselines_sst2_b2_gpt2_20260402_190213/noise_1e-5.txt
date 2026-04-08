@@ -1,0 +1,11 @@
+===== defense=noise param=1e-5 dataset=sst2 batch=2 model=gpt2 start=2026-04-02 19:15:17 =====
+Rec L1: [True, True], Rec L1 MaxB: [False, True], Rec MaxB Token: 0.3968253968253968, Rec Token: 1.0, Rec L2: [False, False]
+[Aggregate metrics]:
+rouge1     | fm: 22.444 | p: 65.000 | r: 15.205
+rouge2     | fm: 4.339 | p: 30.000 | r: 2.436
+rougeL     | fm: 22.324 | p: 65.000 | r: 14.946
+rougeLsum  | fm: 22.152 | p: 65.000 | r: 15.105
+r1fm+r2fm = 26.783
+input #4 time: 0:02:01 | total time: 0:11:37
+Done with all.
+===== end=2026-04-02 19:27:36 exit_code=0 =====

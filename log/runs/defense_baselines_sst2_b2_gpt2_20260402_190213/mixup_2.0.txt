@@ -1,0 +1,10 @@
+===== defense=mixup param=2.0 dataset=sst2 batch=2 model=gpt2 start=2026-04-02 21:05:11 =====
+[Aggregate metrics]:
+rouge1     | fm: 0.000 | p: 0.000 | r: 0.000
+rouge2     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeL     | fm: 0.000 | p: 0.000 | r: 0.000
+rougeLsum  | fm: 0.000 | p: 0.000 | r: 0.000
+r1fm+r2fm = 0.000
+input #4 time: 0:00:02 | total time: 0:00:12
+Done with all.
+===== end=2026-04-02 21:06:52 exit_code=0 =====
