@@ -32,9 +32,10 @@ dager_param_slug() {
   printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | sed 's/__*/_/g' | sed 's/^_\|_$//g'
 }
 
-# Extract final Rec L1, last [Aggregate metrics]: block, last timing line, Done with all. (attack.py output)
+# Extract final Rec Status, final Rec L1, last [Aggregate metrics]: block, last timing line, Done with all. (attack.py output)
 dager_extract_attack_metrics() {
   awk '
+    /^Rec Status:/ { rec_status = $0 }
     /^Rec L1:/ { rec = $0 }
     /\[Aggregate metrics\]:/ { agg = ""; in_agg = 1 }
     in_agg { agg = agg $0 "\n" }
@@ -42,6 +43,7 @@ dager_extract_attack_metrics() {
     /^input #[0-9]+ time:/ { timeln = $0 }
     /^Done with all/ { done = $0 }
     END {
+      if (rec_status != "") print rec_status
       if (rec != "") print rec
       if (agg != "") printf "%s", agg
       if (timeln != "") print timeln
@@ -85,6 +87,74 @@ BASE=(
 # Record variant basename for comparison table (space-separated, appended each run)
 comparison_variants=()
 
+run_variant() {
+  local defense="$1"
+  local log_base="$2"
+  local param="$3"
+  shift 3
+  local def_extra=( "$@" )
+  local summary_title=""
+
+  if [[ "$defense" == "none" ]]; then
+    summary_title="========== defense=none =========="
+  else
+    summary_title="========== defense=${defense} param=${param} =========="
+  fi
+
+  echo "---------- ${log_base} ----------"
+
+  if [ -n "$run_dir" ]; then
+    comparison_variants+=( "$log_base" )
+  fi
+
+  if [ -n "$run_dir" ]; then
+    local tmpfile
+    local t_start
+    local t_end
+    local rc
+    local def_file
+
+    tmpfile=$(mktemp)
+    t_start=$(date '+%Y-%m-%d %H:%M:%S')
+    set +e
+    "${BASE[@]}" --defense "$defense" "${def_extra[@]}" "${EXTRA[@]}" 2>&1 | tee "$tmpfile"
+    rc=${PIPESTATUS[0]}
+    set -e
+    t_end=$(date '+%Y-%m-%d %H:%M:%S')
+
+    def_file="${run_dir}/${log_base}.txt"
+    {
+      echo "===== defense=${defense} param=${param:-n/a} dataset=${DATASET} batch=${BATCH} model=$(basename "$MODEL") start=${t_start} ====="
+      if [ "$rc" -eq 0 ]; then
+        dager_extract_attack_metrics "$tmpfile"
+      else
+        echo "(run failed before completion; partial output below if any)"
+        dager_extract_attack_metrics "$tmpfile"
+      fi
+      echo "===== end=${t_end} exit_code=${rc} ====="
+      if [ "$rc" -ne 0 ]; then
+        echo "--- last 25 lines from run output ---"
+        tail -n 25 "$tmpfile"
+      fi
+    } >"$def_file"
+
+    {
+      echo ""
+      echo "$summary_title"
+      if [ "$rc" -eq 0 ] && grep -q '^Done with all' "$tmpfile" 2>/dev/null; then
+        dager_extract_attack_metrics "$tmpfile"
+      else
+        echo "FAILED (exit_code=${rc})"
+        tail -n 25 "$tmpfile"
+      fi
+    } >>"${run_dir}/summary.txt"
+
+    rm -f "$tmpfile"
+  else
+    "${BASE[@]}" --defense "$defense" "${def_extra[@]}" "${EXTRA[@]}"
+  fi
+}
+
 for defense in none noise dpsgd topk compression soteria mixup; do
   echo "========== defense=${defense} (sweep) =========="
 
@@ -119,11 +189,11 @@ for defense in none noise dpsgd topk compression soteria mixup; do
     DEF_EXTRA=()
     if [[ "$defense" == "none" ]]; then
       log_base="none"
-      summary_title="========== defense=none =========="
+      param=""
     else
       slug=$(dager_param_slug "$val")
       log_base="${defense}_${slug}"
-      summary_title="========== defense=${defense} param=${val} =========="
+      param="$val"
       case "$defense" in
         noise|dpsgd)
           DEF_EXTRA=( --defense_noise "$val" )
@@ -142,55 +212,31 @@ for defense in none noise dpsgd topk compression soteria mixup; do
           ;;
       esac
     fi
-
-    echo "---------- ${log_base} ----------"
-
-    if [ -n "$run_dir" ]; then
-      comparison_variants+=( "$log_base" )
-    fi
-
-    if [ -n "$run_dir" ]; then
-      tmpfile=$(mktemp)
-      t_start=$(date '+%Y-%m-%d %H:%M:%S')
-      set +e
-      "${BASE[@]}" --defense "$defense" "${DEF_EXTRA[@]}" "${EXTRA[@]}" 2>&1 | tee "$tmpfile"
-      rc=${PIPESTATUS[0]}
-      set -e
-      t_end=$(date '+%Y-%m-%d %H:%M:%S')
-
-      def_file="${run_dir}/${log_base}.txt"
-      {
-        echo "===== defense=${defense} param=${val:-n/a} dataset=${DATASET} batch=${BATCH} model=$(basename "$MODEL") start=${t_start} ====="
-        if [ "$rc" -eq 0 ]; then
-          dager_extract_attack_metrics "$tmpfile"
-        else
-          echo "(run failed before completion; partial output below if any)"
-          dager_extract_attack_metrics "$tmpfile"
-        fi
-        echo "===== end=${t_end} exit_code=${rc} ====="
-        if [ "$rc" -ne 0 ]; then
-          echo "--- last 25 lines from run output ---"
-          tail -n 25 "$tmpfile"
-        fi
-      } >"$def_file"
-
-      {
-        echo ""
-        echo "$summary_title"
-        if [ "$rc" -eq 0 ] && grep -q '^Done with all' "$tmpfile" 2>/dev/null; then
-          dager_extract_attack_metrics "$tmpfile"
-        else
-          echo "FAILED (exit_code=${rc})"
-          tail -n 25 "$tmpfile"
-        fi
-      } >>"${run_dir}/summary.txt"
-
-      rm -f "$tmpfile"
-    else
-      "${BASE[@]}" --defense "$defense" "${DEF_EXTRA[@]}" "${EXTRA[@]}"
-    fi
+    run_variant "$defense" "$log_base" "$param" "${DEF_EXTRA[@]}"
   done
 done
+
+echo "========== defense=dager (sweep) =========="
+run_variant "dager" "dager_basis_1e-3" "basis_1e-3" \
+  --defense_dager_basis_perturb --defense_dager_basis_noise_scale 0.001
+run_variant "dager" "dager_basis_5e-3" "basis_5e-3" \
+  --defense_dager_basis_perturb --defense_dager_basis_noise_scale 0.005
+run_variant "dager" "dager_basis_1e-2" "basis_1e-2" \
+  --defense_dager_basis_perturb --defense_dager_basis_noise_scale 0.01
+run_variant "dager" "dager_slice_first_1" "slice_first_1" \
+  --no_defense_dager_basis_perturb \
+  --defense_dager_gradient_slicing --defense_dager_slice_first_n 1
+run_variant "dager" "dager_slice_random_0.3" "slice_random_0.3" \
+  --no_defense_dager_basis_perturb \
+  --defense_dager_gradient_slicing --defense_dager_random_slice --defense_dager_slice_prob 0.3
+run_variant "dager" "dager_combined_light" "combined_light" \
+  --defense_dager_basis_perturb --defense_dager_basis_noise_scale 0.01 \
+  --defense_dager_gradient_slicing --defense_dager_random_slice --defense_dager_slice_prob 0.5
+run_variant "dager" "dager_combined_full" "combined_full" \
+  --defense_dager_basis_perturb --defense_dager_basis_noise_scale 0.01 \
+  --defense_dager_offset_embedding --defense_dager_offset_scale 0.005 \
+  --defense_dager_gradient_slicing --defense_dager_random_slice --defense_dager_slice_prob 0.3 \
+  --defense_dager_rank_limit
 
 if [ -n "$run_dir" ]; then
   {

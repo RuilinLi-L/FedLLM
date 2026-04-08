@@ -22,6 +22,34 @@ total_correct_tokens = 0
 total_tokens = 0
 total_correct_maxB_tokens = 0
 
+def emit_rec_metrics(
+    args,
+    orig_batch,
+    rec_status,
+    rec_l1=None,
+    rec_l1_maxB=None,
+    rec_l2=None,
+    rec_maxb_token=0.0,
+    rec_token=0.0,
+):
+    batch_size = orig_batch['input_ids'].shape[0]
+    rec_l1 = rec_l1 if rec_l1 is not None else [False] * batch_size
+    rec_l1_maxB = rec_l1_maxB if rec_l1_maxB is not None else [False] * batch_size
+    rec_l2 = rec_l2 if rec_l2 is not None else [False] * batch_size
+
+    print(f'Rec Status: {rec_status}')
+    print(
+        f'Rec L1: {rec_l1}, Rec L1 MaxB: {rec_l1_maxB}, '
+        f'Rec MaxB Token: {rec_maxb_token}, Rec Token: {rec_token}, Rec L2: {rec_l2}'
+    )
+
+    if args.neptune:
+        args.neptune['logs/rec_l1'].log(np.array(rec_l1).sum())
+        args.neptune['logs/rec_l1_max_b'].log(np.array(rec_l1_maxB).sum())
+        args.neptune['logs/maxB token'].log(rec_maxb_token)
+        args.neptune['logs/token'].log(rec_token)
+        args.neptune['logs/rec_l2'].log(np.array(rec_l2).sum())
+
 def filter_l1(args, model_wrapper, R_Qs):
     tokenizer = model_wrapper.tokenizer
     res_pos, res_ids, res_types = [], [], []
@@ -98,6 +126,7 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
             reference = []
             for i in range(orig_batch['input_ids'].shape[0]):
                 reference += [remove_padding(tokenizer, orig_batch['input_ids'][i], left=(args.pad=='left'))]
+            emit_rec_metrics(args, orig_batch, rec_status='rank_decomp_failed')
             return ['' for _ in range(len(reference))], reference
         R_Q, R_Q2 = R_Q.to(args.device), R_Q2.to(args.device)
         total_true_token_count, total_true_token_count2 = 0, 0
@@ -123,7 +152,8 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
         if len(res_ids) == 0:        
             reference = []
             for i in range(orig_batch['input_ids'].shape[0]):
-                reference += [remove_padding(tokenizer, orig_batch['input_ids'][i], left=(args.pad=='left'))]        
+                reference += [remove_padding(tokenizer, orig_batch['input_ids'][i], left=(args.pad=='left'))]
+            emit_rec_metrics(args, orig_batch, rec_status='no_l1_candidates')
             return ['' for _ in reference], reference
         if len(res_ids[0])<100000:
             print( res_pos, res_ids, res_types )
@@ -192,16 +222,20 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
                 rec_l2.append( torch.all(boolsq2[1:]).item() )
             else:
                 rec_l2.append( torch.all(boolsq2).item() )
-        
-        print( f'Rec L1: {rec_l1}, Rec L1 MaxB: {rec_l1_maxB}, Rec MaxB Token: {total_correct_maxB_tokens/total_tokens}, Rec Token: {total_correct_tokens/total_tokens}, Rec L2: {rec_l2}' )
 
-        if args.neptune:
-            args.neptune['logs/rec_l1'].log( np.array(rec_l1).sum() )
-            args.neptune['logs/rec_l1_max_b'].log( np.array(rec_l1_maxB).sum() ) 
-            args.neptune['logs/maxB token'].log( total_correct_maxB_tokens/total_tokens ) 
-            args.neptune['logs/token'].log( total_correct_tokens/total_tokens ) 
-            args.neptune['logs/rec_l2'].log( np.array(rec_l2).sum() ) 
-            
+        rec_maxb_token = total_correct_maxB_tokens/total_tokens if total_tokens > 0 else 0.0
+        rec_token = total_correct_tokens/total_tokens if total_tokens > 0 else 0.0
+        emit_rec_metrics(
+            args,
+            orig_batch,
+            rec_status='ok',
+            rec_l1=rec_l1,
+            rec_l1_maxB=rec_l1_maxB,
+            rec_l2=rec_l2,
+            rec_maxb_token=rec_maxb_token,
+            rec_token=rec_token,
+        )
+             
         if model_wrapper.is_decoder():
             max_ids = -1
             for i in range(len(res_ids)):
