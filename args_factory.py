@@ -71,7 +71,7 @@ def get_args(argv=None):
         '--defense',
         type=str,
         default='none',
-        choices=['none', 'noise', 'dpsgd', 'topk', 'compression', 'soteria', 'mixup', 'dager'],
+        choices=['none', 'noise', 'dpsgd', 'topk', 'compression', 'soteria', 'mixup', 'dager', 'lrb'],
         help='Defense applied to client gradients before attack reconstruction.',
     )
     parser.add_argument(
@@ -109,6 +109,48 @@ def get_args(argv=None):
         type=float,
         default=1.0,
         help='Beta(alpha, alpha) for MixUp mixing coefficient.',
+    )
+    parser.add_argument(
+        '--defense_lrb_sensitive_n_layers',
+        type=int,
+        default=2,
+        help='How many earliest transformer layers receive the strongest LRB protection.',
+    )
+    parser.add_argument(
+        '--defense_lrb_keep_ratio_sensitive',
+        type=float,
+        default=0.2,
+        help='Target low-resolution keep ratio for sensitive layers under LRB.',
+    )
+    parser.add_argument(
+        '--defense_lrb_keep_ratio_other',
+        type=float,
+        default=0.75,
+        help='Target low-resolution keep ratio for less-sensitive layers under LRB.',
+    )
+    parser.add_argument(
+        '--defense_lrb_clip_scale_sensitive',
+        type=float,
+        default=0.5,
+        help='Layer clip threshold multiplier (relative to median grad norm) for sensitive layers.',
+    )
+    parser.add_argument(
+        '--defense_lrb_clip_scale_other',
+        type=float,
+        default=1.0,
+        help='Layer clip threshold multiplier (relative to median grad norm) for less-sensitive layers.',
+    )
+    parser.add_argument(
+        '--defense_lrb_noise_sensitive',
+        type=float,
+        default=0.03,
+        help='Orthogonal noise multiplier for sensitive layers under LRB.',
+    )
+    parser.add_argument(
+        '--defense_lrb_noise_other',
+        type=float,
+        default=0.005,
+        help='Orthogonal noise multiplier for less-sensitive layers under LRB.',
     )
     
     # DAGER-specific defense parameters

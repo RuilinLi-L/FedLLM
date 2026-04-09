@@ -17,6 +17,12 @@ except ImportError:
     def apply_dager_defense(grads, args, model_wrapper=None, batch=None, labels=None, layer_names=None):
         raise ImportError("DAGER defense module not available")
 
+try:
+    from .lrb_defense import apply_lrb_defense
+except ImportError:
+    def apply_lrb_defense(grads, args, layer_names=None):
+        raise ImportError("LRB defense module not available")
+
 
 def uses_noisy_gradient_decoding(args) -> bool:
     """Use outlier-based L1/L2 decoding paths (same as legacy --defense_noise)."""
@@ -337,6 +343,14 @@ def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
             if p.requires_grad:
                 layer_names.append(name)
         g = apply_dager_defense(g, args, model_wrapper, batch, labels, layer_names)
+    elif defense == "lrb":
+        layer_names = None
+        if model_wrapper is not None:
+            layer_names = []
+            for name, p in model_wrapper.model.named_parameters():
+                if p.requires_grad:
+                    layer_names.append(name)
+        g = apply_lrb_defense(g, args, layer_names=layer_names)
     else:
         raise ValueError(f"Unknown defense: {defense}")
 

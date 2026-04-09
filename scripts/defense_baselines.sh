@@ -1,11 +1,12 @@
 #!/bin/bash
-# Run DAGER attack with each defense baseline (FL-LLM.md).
+# Run DAGER attack with the baseline defenses listed in FL-LLM.md.
 # Usage: ./scripts/defense_baselines.sh [DATASET] [BATCH_SIZE] [MODEL_PATH] [N_INPUTS] [extra python args...]
 # Example: ./scripts/defense_baselines.sh sst2 2 gpt2 3
 #
 # Each defense (except none) sweeps a strength parameter so logs show a privacy–utility curve,
 # not only a single aggressive default. Per-variant logs: {defense}_{param_slug}.txt
 # For LLaMA + Soteria, add e.g. --defense_soteria_sample_dims 256 to extra args (applies to every run).
+# For credible seq_class results, pass --finetuned_path to a trained checkpoint.
 #
 # Logging: by default creates a run directory under log/runs/ with per-variant metrics-only .txt files,
 # a summary.txt (compatible with collect_experiment_logs.py), and _run_header.txt.
@@ -25,6 +26,27 @@ N_INPUTS="${4:-3}"
 EXTRA=()
 if [ "$#" -gt 4 ]; then
   EXTRA=( "${@:5}" )
+fi
+
+has_extra_flag() {
+  local flag="$1"
+  local arg
+  for arg in "${EXTRA[@]}"; do
+    if [[ "$arg" == "$flag" || "$arg" == "${flag}="* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! has_extra_flag "--finetuned_path"; then
+  cat >&2 <<EOF
+[dager] defense_baselines.sh uses --task seq_class with backbone model ids such as ${MODEL}.
+[dager] For credible baseline results, pass --finetuned_path <trained checkpoint>.
+[dager] Example:
+[dager]   ./scripts/defense_baselines.sh ${DATASET} ${BATCH} ${MODEL} ${N_INPUTS} --finetuned_path ./models/gpt2-ft-rt
+EOF
+  exit 2
 fi
 
 # Safe filename fragment from a parameter value (e.g. 1e-6 -> 1e-6, 0.05 -> 0_05)
@@ -155,7 +177,7 @@ run_variant() {
   fi
 }
 
-for defense in none noise dpsgd topk compression soteria mixup; do
+for defense in none noise dpsgd topk compression soteria mixup lrb; do
   echo "========== defense=${defense} (sweep) =========="
 
   case "$defense" in
@@ -179,6 +201,9 @@ for defense in none noise dpsgd topk compression soteria mixup; do
       ;;
     mixup)
       param_vals=( 0.1 0.3 0.5 1.0 2.0 )
+      ;;
+    lrb)
+      param_vals=( 0.05 0.1 0.2 0.35 0.5 )
       ;;
     *)
       param_vals=( "" )
@@ -210,33 +235,14 @@ for defense in none noise dpsgd topk compression soteria mixup; do
         mixup)
           DEF_EXTRA=( --defense_mixup_alpha "$val" )
           ;;
+        lrb)
+          DEF_EXTRA=( --defense_lrb_keep_ratio_sensitive "$val" )
+          ;;
       esac
     fi
     run_variant "$defense" "$log_base" "$param" "${DEF_EXTRA[@]}"
   done
 done
-
-echo "========== defense=dager (sweep) =========="
-run_variant "dager" "dager_basis_1e-3" "basis_1e-3" \
-  --defense_dager_basis_perturb --defense_dager_basis_noise_scale 0.001
-run_variant "dager" "dager_basis_5e-3" "basis_5e-3" \
-  --defense_dager_basis_perturb --defense_dager_basis_noise_scale 0.005
-run_variant "dager" "dager_basis_1e-2" "basis_1e-2" \
-  --defense_dager_basis_perturb --defense_dager_basis_noise_scale 0.01
-run_variant "dager" "dager_slice_first_1" "slice_first_1" \
-  --no_defense_dager_basis_perturb \
-  --defense_dager_gradient_slicing --defense_dager_slice_first_n 1
-run_variant "dager" "dager_slice_random_0.3" "slice_random_0.3" \
-  --no_defense_dager_basis_perturb \
-  --defense_dager_gradient_slicing --defense_dager_random_slice --defense_dager_slice_prob 0.3
-run_variant "dager" "dager_combined_light" "combined_light" \
-  --defense_dager_basis_perturb --defense_dager_basis_noise_scale 0.01 \
-  --defense_dager_gradient_slicing --defense_dager_random_slice --defense_dager_slice_prob 0.5
-run_variant "dager" "dager_combined_full" "combined_full" \
-  --defense_dager_basis_perturb --defense_dager_basis_noise_scale 0.01 \
-  --defense_dager_offset_embedding --defense_dager_offset_scale 0.005 \
-  --defense_dager_gradient_slicing --defense_dager_random_slice --defense_dager_slice_prob 0.3 \
-  --defense_dager_rank_limit
 
 if [ -n "$run_dir" ]; then
   {

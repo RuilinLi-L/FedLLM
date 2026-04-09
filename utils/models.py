@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 import peft
 import numpy as np
+import warnings
 from utils.ext import update_causal_mask
 from utils.partial_models import add_partial_forward_gpt2, add_partial_forward_bert, add_partial_forward_llama
 from constants import config
@@ -37,6 +38,15 @@ class ModelWrapper():
             self.model = AutoModelForCausalLM.from_pretrained(**model_kwargs)
         else:
             assert False
+        if args.task == 'seq_class' and args.finetuned_path is None:
+            warnings.warn(
+                (
+                    'seq_class run without --finetuned_path: supported backbone models load a '
+                    'newly initialized classifier head, so attack/defense results are not '
+                    'trustworthy for baseline comparison.'
+                ),
+                stacklevel=2,
+            )
         g_cpu = torch.Generator(device=self.model.device)
         g_cpu.manual_seed(0)
         self.model.eval()
@@ -51,7 +61,7 @@ class ModelWrapper():
             self.eos_token = self.model.config.eos_token_id
             self.layer_ids = list(range(4, 137, 12))
             
-            if args.task == 'seq_class':
+            if args.task == 'seq_class' and args.finetuned_path is None:
                 self.model.score.weight.data.normal_( mean=0.0, std=1e-3, generator=g_cpu )
             
             # Set padding token
@@ -97,7 +107,7 @@ class ModelWrapper():
                 self.model = self.model.model
                 self.layer_ids = list(range(0,64,2))
             else:
-                if args.task == 'seq_class':
+                if args.task == 'seq_class' and args.finetuned_path is None:
                     self.model.score.weight.data.normal_(mean=0.0, std=1e-3)
                 #else:
                     #self.model.lm_head.weight.data.normal_(mean=0.0, std=1e-6)
@@ -402,4 +412,3 @@ class ModelWrapper():
         return self.start_token is not None
     def is_lower(self):
         return self.args.precision in ['8bit', 'half']
-

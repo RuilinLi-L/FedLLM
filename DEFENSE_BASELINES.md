@@ -14,6 +14,7 @@
 | `compression` | `--defense_n_bits` | 2 … 32 |
 | `soteria` | `--defense_soteria_pruning_rate` | 10 … 90 |
 | `mixup` | `--defense_mixup_alpha` | 0.1 … 2.0 |
+| `lrb` | `--defense_lrb_keep_ratio_sensitive` | 0.05 … 0.5 |
 
 日志目录下每个变体一个文件：`none.txt`、`noise_1e-6.txt`、`topk_0_9.txt` 等；`summary.txt` 末尾 **COMPARISON** 表含 `variant` 与 `param` 列。
 
@@ -130,6 +131,22 @@ python attack.py --dataset sst2 --split val --n_inputs 3 --batch_size 2 \
   --defense mixup --defense_mixup_alpha 1.0
 ```
 
+### 8. LRB（Layer-wise Recoverability Bottleneck）
+
+这是一个更偏“通用信息瓶颈”的防御：对敏感层做更强的按层裁剪、低分辨率公共子空间投影，以及残差方向噪声注入。
+
+```bash
+python attack.py --dataset sst2 --split val --n_inputs 10 --batch_size 2 \
+  --l1_filter all --l2_filter non-overlap --model_path gpt2 \
+  --device cuda --task seq_class --cache_dir ./models_cache \
+  --defense lrb \
+  --defense_lrb_sensitive_n_layers 2 \
+  --defense_lrb_keep_ratio_sensitive 0.2 \
+  --defense_lrb_keep_ratio_other 0.75 \
+  --defense_lrb_noise_sensitive 0.03 \
+  --defense_lrb_noise_other 0.005
+```
+
 ---
 
 ## 关键 CLI 参数
@@ -144,6 +161,13 @@ python attack.py --dataset sst2 --split val --n_inputs 3 --batch_size 2 \
 | `--defense_soteria_pruning_rate` | `60.0` | Soteria：低于该百分位得分的列被剪枝 |
 | `--defense_soteria_sample_dims` | `None` | Soteria：若设置则只随机采样这么多隐维打分 |
 | `--defense_mixup_alpha` | `1.0` | MixUp：`Beta(alpha, alpha)` 混合系数分布 |
+| `--defense_lrb_sensitive_n_layers` | `2` | LRB：视为高敏感的最前若干 transformer 层数 |
+| `--defense_lrb_keep_ratio_sensitive` | `0.2` | LRB：敏感层保留的低分辨率比例 |
+| `--defense_lrb_keep_ratio_other` | `0.75` | LRB：其他层保留的低分辨率比例 |
+| `--defense_lrb_clip_scale_sensitive` | `0.5` | LRB：敏感层裁剪阈值 = 中位梯度范数 × 该倍率 |
+| `--defense_lrb_clip_scale_other` | `1.0` | LRB：其他层裁剪阈值倍率 |
+| `--defense_lrb_noise_sensitive` | `0.03` | LRB：敏感层残差方向噪声强度 |
+| `--defense_lrb_noise_other` | `0.005` | LRB：其他层残差方向噪声强度 |
 
 ---
 
