@@ -4,3 +4,6 @@
 **finetune**
 **dager_dp/**
 models/
+log/runs/
+out.csv
+out.md
