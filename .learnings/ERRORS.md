@@ -61,3 +61,36 @@ Install or expose a real Python interpreter on PATH, or activate the intended Co
 - Related Files: environment.yml, test_dager_defense.py, test_dager_defense_simple.py
 
 ---
+## [ERR-20260410-003] local_validation_shells_unavailable
+
+**Logged**: 2026-04-10T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: config
+
+### Summary
+This workspace session cannot run the usual local validation commands because `bash` returns an access-denied startup error and `python` is still mapped to an unusable Windows app alias.
+
+### Error
+```
+bash -n scripts/defense_baselines.sh
+CreateInstance / E_ACCESSDENIED
+
+python --version
+python.exe cannot run: the system cannot access this file
+```
+
+### Context
+- Commands attempted: `bash -n scripts/defense_baselines.sh`, `python --version`, `py -3 --version`
+- Workspace: `D:\code\Projects\FedLLM`
+- Impact: implementation could proceed, but runtime syntax checks and parser smoke tests had to be replaced with static review
+
+### Suggested Fix
+Expose a usable Bash executable for shell-script validation and activate a real Python interpreter or Conda environment before running repo verification commands.
+
+### Metadata
+- Reproducible: yes
+- Related Files: scripts/defense_baselines.sh, scripts/collect_experiment_logs.py, environment.yml
+- See Also: ERR-20260408-002
+
+---

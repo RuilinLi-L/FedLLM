@@ -5,9 +5,9 @@ and write a summary CSV (optional Markdown).
 
 Log kinds
 ---------
-- **attack_dager** (attack.py / attack_new.py): ROUGE aggregate, per-batch Rec Token rates,
-  optional rank line ``B/u/t``. Final aggregate = last ``[Aggregate metrics]:`` block before
-  ``Done with all.`` if present, else last such block in the file.
+- **attack_dager** (attack.py / attack_new.py): prefer the final ``RESULT SUMMARY`` block when
+  present; otherwise fall back to ROUGE aggregate, per-batch Rec Token rates, and the last
+  ``[Aggregate metrics]:`` block before ``Done with all.`` if present.
 - **train** (train.py): ``metric eval:`` / ``metric train:`` lines; argv from
   ``terminal log started`` banner when present.
 - **feasibility** (attack_len_increment.py): ``Sample accuracy`` / ``Sample set accuracy``.
@@ -52,6 +52,10 @@ SAMPLE_SET_ACC_RE = re.compile(
 )
 METRIC_EVAL_RE = re.compile(r"^metric eval:\s*(\{.*\})\s*$", re.MULTILINE)
 METRIC_TRAIN_RE = re.compile(r"^metric train:\s*(\{.*\})\s*$", re.MULTILINE)
+RESULT_SUMMARY_BLOCK_RE = re.compile(
+    r"^===== RESULT SUMMARY START =====\s*\n(?P<body>.*?)^===== RESULT SUMMARY END =====\s*$",
+    re.MULTILINE | re.DOTALL,
+)
 
 # Shell tags where argv[1], argv[2] are DATASET and BATCH_SIZE (see README scripts).
 TAG_DATASET_BATCH = frozenset(
@@ -135,6 +139,21 @@ def _parse_train_argv(argv_list: list[str]) -> dict[str, str]:
     return out
 
 
+def _parse_result_summary(text: str) -> dict[str, str]:
+    matches = list(RESULT_SUMMARY_BLOCK_RE.finditer(text))
+    if not matches:
+        return {}
+    body = matches[-1].group("body")
+    summary: dict[str, str] = {}
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        summary[key] = value
+    return summary
+
+
 def _parse_aggregate_section(section: str) -> dict[str, float]:
     metrics: dict[str, float] = {}
     for line in section.splitlines():
@@ -180,9 +199,12 @@ def _last_input_time(text: str) -> tuple[str, str, str]:
 def parse_attack_dager(text: str, meta: dict) -> dict:
     row = {**meta}
     row["log_kind"] = "attack_dager"
+    summary = _parse_result_summary(text)
+    if summary:
+        row.update(summary)
 
     rec_pairs = REC_LINE_RE.findall(text)
-    if rec_pairs:
+    if rec_pairs and "rec_token_mean" not in row:
         maxb = [float(a) for a, _ in rec_pairs]
         tok = [float(b) for _, b in rec_pairs]
         row["n_rec_lines"] = str(len(rec_pairs))
@@ -193,32 +215,36 @@ def parse_attack_dager(text: str, meta: dict) -> dict:
         else:
             row["rec_token_std"] = ""
     else:
-        row["n_rec_lines"] = "0"
-        row["rec_maxb_token_mean"] = ""
-        row["rec_token_mean"] = ""
-        row["rec_token_std"] = ""
+        if "n_rec_lines" not in row:
+            row["n_rec_lines"] = row.get("n_inputs_completed", "0")
+        row.setdefault("rec_maxb_token_mean", "")
+        row.setdefault("rec_token_mean", "")
+        row.setdefault("rec_token_std", "")
 
     ranks = []
     for line in text.splitlines():
         m = RANK_LINE_RE.match(line.strip())
         if m:
             ranks.append((int(m.group(1)), int(m.group(2)), int(m.group(3))))
-    if ranks:
+    if ranks and "rank_b_mean" not in row:
         row["n_rank_lines"] = str(len(ranks))
         row["rank_b_mean"] = f"{statistics.mean(r[0] for r in ranks):.4f}"
     else:
-        row["n_rank_lines"] = "0"
-        row["rank_b_mean"] = ""
+        row.setdefault("n_rank_lines", "0")
+        row.setdefault("rank_b_mean", "")
 
     agg_sec = _final_aggregate_text(text)
     agg = _parse_aggregate_section(agg_sec)
     for k, v in agg.items():
-        row[k] = f"{v:.6f}" if isinstance(v, float) else str(v)
+        row.setdefault(k, f"{v:.6f}" if isinstance(v, float) else str(v))
 
     inp, tin, ttot = _last_input_time(text)
-    row["last_input_idx"] = inp
-    row["last_input_time"] = tin
-    row["last_total_time"] = ttot
+    if inp:
+        row.setdefault("last_input_idx", inp)
+    if tin:
+        row.setdefault("last_input_time", tin)
+    if ttot:
+        row.setdefault("last_total_time", ttot)
     return row
 
 
@@ -310,9 +336,12 @@ def classify_and_parse(path: Path, text: str) -> dict:
         meta["rank_tol"] = ""
         meta["model_path_guess"] = ""
 
+    has_result_summary = bool(_parse_result_summary(text))
     has_agg = AGG_HEADER in text or re.search(r"^rouge1\s+\|", text, re.MULTILINE) is not None
     has_feas_acc = SAMPLE_ACC_RE.search(text) is not None
 
+    if has_result_summary:
+        return parse_attack_dager(text, meta)
     if has_feas_acc and not has_agg:
         return parse_feasibility(text, meta)
     if has_agg:
@@ -343,6 +372,23 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "defense_noise",
         "rank_tol",
         "model_path_guess",
+        "summary_version",
+        "result_status",
+        "dataset",
+        "split",
+        "task",
+        "model_path",
+        "finetuned_path",
+        "batch_size",
+        "defense",
+        "defense_param_name",
+        "defense_param_value",
+        "n_inputs_requested",
+        "n_inputs_completed",
+        "last_rec_status",
+        "rec_l1_mean",
+        "rec_l1_maxb_mean",
+        "rec_l2_mean",
         "n_rec_lines",
         "rec_token_mean",
         "rec_token_std",
@@ -365,6 +411,8 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "last_input_idx",
         "last_input_time",
         "last_total_time",
+        "error_type",
+        "error_message",
         "n_sample_accuracy_lines",
         "sample_accuracy_mean",
         "sample_accuracy_last",
