@@ -1,14 +1,15 @@
 """
 Defense baselines for gradient inversion experiments (FL-LLM.md).
 
-Post-gradient: noise, dpsgd, topk, compression, optional random mask (defense_pct_mask).
-Pre-gradient / special: soteria (prune classifier grads using representation sensitivity), mixup.
+Post-gradient: noise, topk, compression, optional random mask (defense_pct_mask).
+Direct gradient generation: dpsgd, soteria, mixup.
 DAGER-specific: dager defense methods targeting DAGER attack assumptions.
 """
 from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 try:
     from .dager_defense import apply_dager_defense
@@ -24,12 +25,24 @@ except ImportError:
         raise ImportError("LRB defense module not available")
 
 
+SPECIAL_GRADIENT_DEFENSES = {"mixup", "dpsgd", "soteria"}
+
+
+def requires_gradient_generation_defense(defense: str) -> bool:
+    return defense in SPECIAL_GRADIENT_DEFENSES
+
+
 def uses_noisy_gradient_decoding(args) -> bool:
-    """Use outlier-based L1/L2 decoding paths (same as legacy --defense_noise)."""
+    """Use outlier-based L1/L2 decoding paths only when actual Gaussian noise is present."""
     defense = getattr(args, "defense", "none")
-    if defense in ("noise", "dpsgd") and getattr(args, "defense_noise", None) is not None:
+    sigma = getattr(args, "defense_noise", None)
+    if sigma is None:
+        return False
+    if float(sigma) <= 0:
+        return False
+    if defense in ("noise", "dpsgd"):
         return True
-    if defense == "none" and getattr(args, "defense_noise", None) is not None:
+    if defense == "none":
         return True
     return False
 
@@ -44,11 +57,11 @@ def _make_generator(seed: int, device: torch.device) -> torch.Generator:
 def _apply_random_mask(grads, pct_mask: float, seed: int = 0):
     """Element-wise: keep with probability (1 - pct_mask), same semantics as train.py."""
     out = []
-    for g in grads:
+    for idx, g in enumerate(grads):
         if g is None:
             out.append(None)
             continue
-        gen = _make_generator(seed, g.device)
+        gen = _make_generator(seed + 104729 * (idx + 1), g.device)
         mask = (torch.rand(g.shape, device=g.device, dtype=g.dtype, generator=gen) > pct_mask).float()
         out.append(g * mask)
     return tuple(out)
@@ -56,38 +69,60 @@ def _apply_random_mask(grads, pct_mask: float, seed: int = 0):
 
 def noise_injection(grads, sigma: float, seed: int = 0):
     out = []
-    for g in grads:
+    for idx, g in enumerate(grads):
         if g is None:
             out.append(None)
             continue
-        gen = _make_generator(seed, g.device)
+        gen = _make_generator(seed + 104729 * (idx + 1), g.device)
         noise = torch.randn(g.shape, device=g.device, dtype=g.dtype, generator=gen)
         out.append(g + noise * sigma)
     return tuple(out)
 
 
-def dpsgd_defense(grads, max_norm: float, sigma: float, seed: int = 0):
-    """Batch-level L2 clip of stacked gradient norms + Gaussian noise (DP-SGD style)."""
-    flat_parts = []
-    for g in grads:
-        if g is None:
-            continue
-        flat_parts.append(g.flatten())
-    if not flat_parts:
-        return grads
-    stacked = torch.cat(flat_parts)
-    total_norm = stacked.norm(2)
-    clip_coef = (max_norm / (total_norm + 1e-6)).clamp(max=1.0)
+def _average_grad_list(grad_list):
+    if not grad_list:
+        return tuple()
+
+    n_samples = len(grad_list)
     out = []
-    for g in grads:
-        if g is None:
+    for tensors in zip(*grad_list):
+        ref = next((tensor for tensor in tensors if tensor is not None), None)
+        if ref is None:
             out.append(None)
             continue
-        clipped = g * clip_coef
-        gen = _make_generator(seed, g.device)
-        noise = torch.randn(g.shape, device=g.device, dtype=g.dtype, generator=gen)
-        out.append(clipped + noise * sigma)
+        acc = torch.zeros_like(ref)
+        for tensor in tensors:
+            if tensor is not None:
+                acc = acc + tensor.to(device=ref.device, dtype=ref.dtype)
+        out.append(acc / n_samples)
     return tuple(out)
+
+
+def dpsgd_defense(per_example_grads, max_norm: float, sigma: float, seed: int = 0):
+    """Faithful DP-SGD: per-example clip, mean aggregation, then Gaussian noise."""
+    if not per_example_grads:
+        return tuple()
+
+    clipped = []
+    for sample_grads in per_example_grads:
+        flat_parts = [g.detach().float().flatten() for g in sample_grads if g is not None]
+        if not flat_parts:
+            clipped.append(sample_grads)
+            continue
+        total_norm = torch.cat(flat_parts).norm(2)
+        clip_coef = (max_norm / (total_norm + 1e-6)).clamp(max=1.0)
+        clipped.append(
+            tuple(
+                None if g is None else g * clip_coef.to(device=g.device, dtype=g.dtype)
+                for g in sample_grads
+            )
+        )
+
+    avg = _average_grad_list(clipped)
+    noise_std = float(sigma) * float(max_norm) / float(len(per_example_grads))
+    if noise_std > 0:
+        avg = noise_injection(avg, noise_std, seed=seed)
+    return avg
 
 
 def topk_sparsification(grads, keep_ratio: float):
@@ -127,183 +162,120 @@ def gradient_compression(grads, n_bits: int):
     return tuple(out)
 
 
-def _classifier_param_name(model_path: str) -> str:
-    if "bert" in model_path.lower():
-        return "classifier.weight"
-    return "score.weight"
-
-
-def _apply_soteria_hidden_mask(
-    g: torch.Tensor | None,
-    mask: torch.Tensor,
-    hidden_dim: int,
-) -> torch.Tensor | None:
+def soteria_defense(model_wrapper, batch, labels, args, create_graph=False):
     """
-    Zero out gradient components along axes that align with hidden_dim, using
-    a per-feature keep mask from Soteria (length hidden_dim).
+    Representation-side Soteria defense.
 
-    Matches last dim (*, H), first dim (H, *), or 1D (H,) biases.
+    For each sample, score classifier-input representation dimensions by
+    |r_i| / (||dr_i / dX|| + eps), prune the highest-scoring fraction, recompute
+    the sample loss with the masked representation, then average the resulting
+    per-example gradients.
     """
-    if g is None:
-        return None
-    if g.dim() == 1 and g.shape[0] == hidden_dim:
-        return g * mask
-    if g.shape[-1] == hidden_dim:
-        view_shape = (1,) * (g.dim() - 1) + (hidden_dim,)
-        return g * mask.view(*view_shape)
-    if g.shape[0] == hidden_dim:
-        view_shape = (hidden_dim,) + (1,) * (g.dim() - 1)
-        return g * mask.view(*view_shape)
-    return g
-
-
-def soteria_defense(
-    grads,
-    model_wrapper,
-    batch,
-    labels,
-    args,
-):
-    """
-    Transformer adaptation of Soteria: score hidden dimensions by ||dL/dEmb|| when L = sum_t h[t,f],
-    prune features below the pruning_rate percentile of scores.
-
-    The keep mask is applied to every trainable gradient tensor whose shape aligns with the
-    model hidden size (same axes as classifier columns/rows), so transformer blocks used by
-    DAGER are perturbed—not only the classifier head.
-    """
-    if getattr(args, "train_method", "full") == "lora":
-        raise NotImplementedError("Soteria baseline is not supported with train_method=lora in this integration.")
+    if getattr(args, "task", None) != "seq_class":
+        raise NotImplementedError("Soteria baseline is only supported for task=seq_class.")
+    if getattr(args, "train_method", "full") != "full":
+        raise NotImplementedError("Soteria baseline is only supported for train_method=full.")
 
     pruning_rate = float(getattr(args, "defense_soteria_pruning_rate", 60.0))
+    if pruning_rate < 0 or pruning_rate > 100:
+        raise ValueError("defense_soteria_pruning_rate must be in [0, 100].")
+
     sample_dims = getattr(args, "defense_soteria_sample_dims", None)
-    model = model_wrapper.model
-    device = next(model.parameters()).device
-    param_name = _classifier_param_name(args.model_path)
+    base_seed = int(getattr(args, "rng_seed", 0))
+    eps = 1e-12
 
-    idx_map = {}
-    i = 0
-    for name, p in model.named_parameters():
-        if p.requires_grad:
-            idx_map[name] = i
-            i += 1
-    if param_name not in idx_map:
-        raise RuntimeError(f"Soteria: could not find {param_name} in trainable parameters")
-    cls_idx = idx_map[param_name]
+    def sample_grad_fn(sample_batch, sample_labels, sample_idx=0, create_graph=False):
+        model_wrapper.model.zero_grad(set_to_none=True)
+        inputs_embeds = model_wrapper._seq_class_input_embeds(sample_batch).detach()
+        inputs_embeds.requires_grad_(True)
+        _, representation = model_wrapper._seq_class_logits_from_embeds(sample_batch, inputs_embeds)
+        representation = representation.squeeze(0)
 
-    grad_list = list(grads)
+        dim = representation.shape[-1]
+        dims_to_score = list(range(dim))
+        if sample_dims is not None and 0 < sample_dims < dim:
+            rng = np.random.RandomState(base_seed + sample_idx)
+            dims_to_score = sorted(rng.choice(dim, size=sample_dims, replace=False).tolist())
 
-    model.eval()
-    b = {k: v.to(device) for k, v in batch.items()}
-    lab = labels.to(device) if not isinstance(labels, torch.Tensor) else labels.to(device)
-    if lab.dim() > 1:
-        lab = lab.view(-1)
+        scores = torch.full((dim,), float("-inf"), device=representation.device, dtype=torch.float32)
+        for feature_idx in dims_to_score:
+            grad_emb, = torch.autograd.grad(
+                representation[feature_idx],
+                inputs_embeds,
+                retain_graph=True,
+                allow_unused=True,
+                create_graph=False,
+            )
+            sensitivity = float(grad_emb.detach().float().norm().item()) if grad_emb is not None else 0.0
+            scores[feature_idx] = representation[feature_idx].detach().abs().float() / (sensitivity + eps)
 
-    emb = None
-    h_pool = None
+        prune_count = int(np.ceil(len(dims_to_score) * pruning_rate / 100.0))
+        mask = torch.ones(dim, device=representation.device, dtype=representation.dtype)
+        if prune_count > 0:
+            dims_tensor = torch.tensor(dims_to_score, device=representation.device, dtype=torch.long)
+            top_idx = torch.topk(scores[dims_tensor], k=prune_count, largest=True).indices
+            mask[dims_tensor[top_idx]] = 0.0
 
-    if args.model_path in ["gpt2", "openai-community/gpt2-large"]:
-        wte = model.transformer.wte
-        wpe = model.transformer.wpe
-        pos = torch.arange(b["input_ids"].size(1), device=device).unsqueeze(0).expand_as(b["input_ids"])
-        emb = wte(b["input_ids"]) + wpe(pos)
-        emb = emb.requires_grad_(True)
-        tr_out = model.transformer(inputs_embeds=emb, attention_mask=b.get("attention_mask"))
-        h_pool = tr_out.last_hidden_state.mean(dim=0)
-    elif args.model_path in ["bert-base-uncased"]:
-        bert = model.bert
-        emb_layer = bert.embeddings
-        input_ids = b["input_ids"]
-        token_type_ids = b.get("token_type_ids", torch.zeros_like(input_ids))
-        seq_length = input_ids.size(1)
-        position_ids = torch.arange(seq_length, device=device).unsqueeze(0).expand_as(input_ids)
-        word = emb_layer.word_embeddings(input_ids)
-        pos_e = emb_layer.position_embeddings(position_ids)
-        tok_e = emb_layer.token_type_embeddings(token_type_ids)
-        emb = emb_layer.LayerNorm(word + pos_e + tok_e)
-        emb = emb_layer.dropout(emb)
-        emb = emb.requires_grad_(True)
-        raw_mask = b.get("attention_mask")
-        ext_mask = bert.get_extended_attention_mask(raw_mask, input_ids.shape) if raw_mask is not None else None
-        enc_out = bert.encoder(emb, attention_mask=ext_mask)
-        h_pool = enc_out.last_hidden_state.mean(dim=0)
-    elif args.model_path in [
-        "meta-llama/Llama-2-7b-hf",
-        "meta-llama/Llama-2-70b-hf",
-        "meta-llama/Meta-Llama-3-8B",
-        "meta-llama/Meta-Llama-3.1-8B",
-        "meta-llama/Meta-Llama-3-70B",
-    ]:
-        llama = model.model
-        input_ids = b["input_ids"]
-        emb = llama.embed_tokens(input_ids).requires_grad_(True)
-        attn = b.get("attention_mask")
-        pos = torch.arange(input_ids.size(1), device=device).unsqueeze(0).expand_as(input_ids)
-        out = llama(inputs_embeds=emb, attention_mask=attn, position_ids=pos)
-        h_pool = out.last_hidden_state.mean(dim=0)
-    else:
-        raise NotImplementedError(f"Soteria not implemented for model_path={args.model_path}")
-
-    dim = h_pool.size(-1)
-    dims_to_score = list(range(dim))
-    if sample_dims is not None and sample_dims < dim:
-        rng = np.random.RandomState(getattr(args, "rng_seed", 0))
-        dims_to_score = sorted(rng.choice(dim, size=sample_dims, replace=False).tolist())
-
-    scores = np.zeros(dim, dtype=np.float64)
-    for f in dims_to_score:
-        model.zero_grad(set_to_none=True)
-        if emb.grad is not None:
-            emb.grad.zero_()
-        scalar = h_pool[:, f].sum()
-        g_emb, = torch.autograd.grad(
-            scalar, emb, retain_graph=True, allow_unused=True, create_graph=False
+        model_wrapper.model.zero_grad(set_to_none=True)
+        logits, _ = model_wrapper._seq_class_logits_from_embeds(
+            sample_batch,
+            inputs_embeds,
+            representation_mask=mask.unsqueeze(0),
         )
-        if g_emb is None:
-            scores[f] = 0.0
-        else:
-            scores[f] = float(g_emb.detach().float().norm().cpu())
+        loss = F.cross_entropy(logits, sample_labels.view(-1))
+        return torch.autograd.grad(
+            loss,
+            model_wrapper.trainable_parameters(),
+            create_graph=create_graph,
+            allow_unused=True,
+        )
 
-    sampled_vals = scores[dims_to_score]
-    thresh = float(np.percentile(sampled_vals, pruning_rate))
-    keep = np.ones(dim, dtype=bool)
-    for f in dims_to_score:
-        keep[f] = scores[f] >= thresh
-
-    ref = grad_list[cls_idx]
-    if ref is None:
-        for g in grad_list:
-            if g is not None:
-                ref = g
-                break
-    if ref is None:
-        return tuple(grad_list)
-
-    mask = torch.tensor(keep, device=ref.device, dtype=ref.dtype)
-    for j in range(len(grad_list)):
-        grad_list[j] = _apply_soteria_hidden_mask(grad_list[j], mask, dim)
-    return tuple(grad_list)
+    grad_list = model_wrapper.compute_per_example_grads(
+        batch,
+        labels,
+        create_graph=create_graph,
+        sample_grad_fn=sample_grad_fn,
+    )
+    return _average_grad_list(grad_list)
 
 
 def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
     """
-    Apply selected defense to gradients (or compute mixup gradients).
+    Apply selected defense to gradients (or compute defended gradients directly).
 
     Returns: gradient tuple (same structure as compute_grads).
     """
     defense = getattr(args, "defense", "none")
     seed = int(getattr(args, "rng_seed", 0))
 
-    if defense == "mixup":
+    if defense in SPECIAL_GRADIENT_DEFENSES:
         if model_wrapper is None or batch is None or labels is None:
-            raise ValueError("mixup requires model_wrapper, batch, labels")
-        g = model_wrapper.compute_grads_mixup(batch, labels)
+            raise ValueError(f"{defense} requires model_wrapper, batch, labels")
+
+        if defense == "mixup":
+            g = model_wrapper.compute_grads_mixup(batch, labels)
+        elif defense == "dpsgd":
+            sigma = getattr(args, "defense_noise", None)
+            if sigma is None:
+                raise ValueError("--defense dpsgd requires --defense_noise as noise multiplier")
+            per_example_grads = model_wrapper.compute_per_example_grads(batch, labels)
+            g = dpsgd_defense(
+                per_example_grads,
+                float(args.defense_clip_norm),
+                float(sigma),
+                seed=seed,
+            )
+        elif defense == "soteria":
+            g = soteria_defense(model_wrapper, batch, labels, args)
+        else:
+            raise ValueError(f"Unknown direct-generation defense: {defense}")
+
         if getattr(args, "defense_pct_mask", None) is not None:
             g = _apply_random_mask(g, float(args.defense_pct_mask), seed=seed)
         return g
 
     if grads is None:
-        raise ValueError("apply_defense: grads is None but defense is not mixup")
+        raise ValueError("apply_defense: grads is None but defense does not generate gradients directly")
 
     if (
         defense == "none"
@@ -321,23 +293,13 @@ def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
         if sigma is None:
             raise ValueError("--defense noise requires --defense_noise sigma")
         g = noise_injection(g, float(sigma), seed=seed)
-    elif defense == "dpsgd":
-        sigma = args.defense_noise
-        if sigma is None:
-            raise ValueError("--defense dpsgd requires --defense_noise as noise multiplier")
-        g = dpsgd_defense(g, float(args.defense_clip_norm), float(sigma), seed=seed)
     elif defense == "topk":
         g = topk_sparsification(g, float(args.defense_topk_ratio))
     elif defense == "compression":
         g = gradient_compression(g, int(args.defense_n_bits))
-    elif defense == "soteria":
-        if model_wrapper is None or batch is None or labels is None:
-            raise ValueError("soteria requires model_wrapper, batch, labels")
-        g = soteria_defense(g, model_wrapper, batch, labels, args)
     elif defense == "dager":
         if model_wrapper is None or batch is None or labels is None:
             raise ValueError("dager defense requires model_wrapper, batch, labels")
-        # Get layer names for gradient slicing
         layer_names = []
         for name, p in model_wrapper.model.named_parameters():
             if p.requires_grad:

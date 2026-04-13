@@ -80,6 +80,11 @@ bash scripts/defense_baselines.sh sst2 2 gpt2 100 \
 | `mixup` | `--defense_mixup_alpha` | `0.1 0.3 0.5 1.0 2.0` |
 | `lrb` | `--defense_lrb_keep_ratio_sensitive` | `0.05 0.1 0.2 0.35 0.5` |
 
+语义说明：
+- `dpsgd` 现在是标准 DP-SGD 语义：逐样本裁剪，再求平均，再按 `sigma * clip_norm / batch_size` 加高斯噪声。
+- `soteria` 现在按分类头真正使用的 representation 打分，并剪掉**最高分**的那部分维度。
+- 旧版本 `dpsgd` / `soteria` 结果与当前实现**不可直接横向比较**。
+
 ## 3. 只跑某一个 baseline
 
 如果你只想看某一种防御，使用 `--baseline_defense`。
@@ -216,6 +221,8 @@ python attack.py --dataset sst2 --split val --n_inputs 10 --batch_size 2 \
   --finetuned_path ./models/gpt2-ft-rt \
   --defense dpsgd --defense_noise 1e-4 --defense_clip_norm 1.0
 ```
+
+这里的 `--defense_clip_norm` 是逐样本裁剪阈值 `C`，`--defense_noise` 是 noise multiplier `sigma`。
 
 `topk`：
 

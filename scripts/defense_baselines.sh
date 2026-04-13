@@ -1,5 +1,9 @@
 #!/bin/bash
 # Run DAGER attack with the defense baselines listed in FL-LLM.md.
+# Notes:
+# - dpsgd uses faithful DP-SGD semantics: per-example clipping, mean aggregation, then noise.
+# - soteria prunes the highest-scoring classifier-input representation dimensions.
+# - Historical dpsgd/soteria logs from older revisions are not directly comparable.
 # Usage:
 #   ./scripts/defense_baselines.sh [DATASET] [BATCH_SIZE] [MODEL_PATH] [N_INPUTS] [extra attack args...]
 # Examples:

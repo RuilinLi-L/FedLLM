@@ -155,117 +155,78 @@ class ModelWrapper():
             param.data = og_weights[i]
         self.model.eval()
         return grad
-            
-    def compute_grads(self, batch, y_labels, create_graph=False):
+
+    def _set_grad_mode(self):
         if self.args.grad_mode == 'eval':
             self.model.eval()
         else:
             self.model.train()
+
+    def _prepare_grad_context(self, batch, y_labels):
+        self._set_grad_mode()
         dev = y_labels.device
         if self.args.precision != '8bit':
             batch = batch.to(self.args.device_grad)
             y_labels = y_labels.to(self.args.device_grad)
             self.model.to(self.args.device_grad)
-        if self.args.task == 'next_token_pred':
-            labels = torch.where(batch['attention_mask'].bool(), batch['input_ids'], -100)
-        elif self.args.task == 'seq_class':
-            labels = y_labels
-        if self.args.grad_b is None:
-            if self.args.algo == 'fedavg':
-                grad=self.compute_grads_fed_avg(batch, labels, create_graph)
-            elif self.is_lower():
-                outputs = self.model(**batch)
-                logits = outputs.logits.float()
-                loss = torch.nn.functional.nll_loss(torch.nn.functional.log_softmax(logits, dim=-1), labels.squeeze(0))
-                for name, param in self.model.named_parameters():
-                    param.requires_grad=True
-                    print(name, param.shape, param.requires_grad)
-                grad = torch.autograd.grad(loss, self.trainable_parameters(), create_graph=create_graph, allow_unused=True)
-                
-            else:
-                
-                outs = self.model(**batch, labels=labels, output_hidden_states=True)
-                    
-                if self.args.loss == 'mse':
-                    loss = outs.hidden_states[-1].pow(2).mean()
-                elif self.args.loss == 'ce':
-                    loss = outs.loss
-                grad = torch.autograd.grad(loss, self.trainable_parameters(), create_graph=create_graph, allow_unused=True)
+        return batch, y_labels, dev
 
-        else:
-            
-            minib_size = self.args.batch_size // self.args.grad_b
-            for i in range(self.args.grad_b):
-                mini_batch = {k: batch[k][i*minib_size:(i+1)*minib_size] for k in batch.keys()}
-                if self.is_lower():
-                    outputs = self.model(**mini_batch)
-                    logits = outputs.logits.float()
-                    loss = torch.nn.functional.nll_loss(torch.nn.functional.log_softmax(logits, dim=-1), labels.squeeze(0)[i*minib_size:(i+1)*minib_size])
-                    loss.backward()
-                else:
-                    outs = self.model(**mini_batch, labels=labels[:,i*minib_size:(i+1)*minib_size])
-                    outs.loss.backward()
-            grad = tuple([param.grad.detach().cpu()/self.args.grad_b for param in self.model.parameters()])
+    def _restore_grad_context(self, batch, y_labels, dev):
         self.set_model_device(dev)
         if self.args.precision != '8bit':
             batch = batch.to(dev)
             y_labels = y_labels.to(dev)
         self.model.eval()
-        #torch.save(grad, f'./grad_{self.args.algo}1.pt')
-        #raise ValueError
-        return grad
 
-    def compute_grads_mixup(self, batch, y_labels, create_graph=False):
-        """
-        Embedding-level MixUp for seq_class: mixed embeddings and mixed CE loss.
-        Falls back to compute_grads for next_token_pred or batch_size < 2.
-        """
-        if self.args.task != "seq_class":
-            return self.compute_grads(batch, y_labels, create_graph=create_graph)
-        alpha = float(getattr(self.args, "defense_mixup_alpha", 1.0))
-        if self.args.grad_mode == "eval":
-            self.model.eval()
-        else:
-            self.model.train()
-        dev = y_labels.device
-        if self.args.precision != "8bit":
-            batch = batch.to(self.args.device_grad)
-            y_labels = y_labels.to(self.args.device_grad)
-            self.model.to(self.args.device_grad)
-        labels = y_labels.view(-1).long()
-        B = batch["input_ids"].shape[0]
-        if B < 2:
-            result = self.compute_grads(batch, y_labels, create_graph=create_graph)
-            self.set_model_device(dev)
-            return result
+    def _prepare_task_labels(self, batch, y_labels):
+        if self.args.task == 'next_token_pred':
+            return torch.where(batch['attention_mask'].bool(), batch['input_ids'], -100)
+        if self.args.task == 'seq_class':
+            return y_labels.view(-1).long()
+        raise ValueError(f'Unsupported task: {self.args.task}')
 
-        perm = torch.randperm(B, device=batch["input_ids"].device)
-        lab_b = labels[perm]
-        lam = float(torch.distributions.Beta(alpha, alpha).sample().item())
+    def _slice_batch(self, batch, idx):
+        return {k: v[idx:idx+1] for k, v in batch.items()}
 
-        model = self.model
-        attn = batch.get("attention_mask")
-
-        if self.args.model_path in ["gpt2", "openai-community/gpt2-large"]:
-            pos = torch.arange(batch["input_ids"].size(1), device=batch["input_ids"].device).unsqueeze(0).expand_as(
-                batch["input_ids"]
+    def _compute_standard_grads_prepared(self, batch, labels, create_graph=False):
+        self.model.zero_grad(set_to_none=True)
+        if self.is_lower() and self.args.task == 'seq_class':
+            outputs = self.model(**batch)
+            logits = outputs.logits.float()
+            loss = torch.nn.functional.nll_loss(
+                torch.nn.functional.log_softmax(logits, dim=-1),
+                labels.view(-1),
             )
-            emb = model.transformer.wte(batch["input_ids"]) + model.transformer.wpe(pos)
-            emb_m = lam * emb + (1.0 - lam) * emb[perm]
-            tr_out = model.transformer(inputs_embeds=emb_m, attention_mask=attn)
-            hidden = tr_out.last_hidden_state
-            if attn is not None:
-                idx = attn.sum(dim=1).long() - 1
-                idx = idx.clamp(min=0)
-                pooled = hidden[torch.arange(B, device=hidden.device), idx]
-            else:
-                pooled = hidden[:, -1]
-            logits = model.score(pooled)
-        elif self.args.model_path in ["bert-base-uncased"]:
-            bert = model.bert
+            return torch.autograd.grad(
+                loss,
+                self.trainable_parameters(),
+                create_graph=create_graph,
+                allow_unused=True,
+            )
+
+        outs = self.model(**batch, labels=labels, output_hidden_states=True)
+        if self.args.loss == 'mse':
+            loss = outs.hidden_states[-1].pow(2).mean()
+        elif self.args.loss == 'ce':
+            loss = outs.loss
+        else:
+            raise ValueError(f'Unsupported loss: {self.args.loss}')
+        return torch.autograd.grad(
+            loss,
+            self.trainable_parameters(),
+            create_graph=create_graph,
+            allow_unused=True,
+        )
+
+    def _seq_class_input_embeds(self, batch):
+        if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
+            return self.model.transformer.wte(batch['input_ids'])
+
+        if self.args.model_path in ['bert-base-uncased']:
+            bert = self.model.bert
             el = bert.embeddings
-            input_ids = batch["input_ids"]
-            token_type_ids = batch.get("token_type_ids", torch.zeros_like(input_ids))
+            input_ids = batch['input_ids']
+            token_type_ids = batch.get('token_type_ids', torch.zeros_like(input_ids))
             seq_length = input_ids.size(1)
             position_ids = torch.arange(seq_length, device=input_ids.device).unsqueeze(0).expand_as(input_ids)
             word = el.word_embeddings(input_ids)
@@ -273,46 +234,211 @@ class ModelWrapper():
             tok_e = el.token_type_embeddings(token_type_ids)
             emb = el.LayerNorm(word + pos_e + tok_e)
             emb = el.dropout(emb)
-            emb_m = lam * emb + (1.0 - lam) * emb[perm]
-            ext_mask = bert.get_extended_attention_mask(attn, input_ids.shape) if attn is not None else None
-            enc_out = bert.encoder(emb_m, attention_mask=ext_mask)
-            pooled = enc_out.last_hidden_state[:, 0]
-            logits = model.classifier(pooled)
-        elif self.args.model_path in [
-            "meta-llama/Llama-2-7b-hf",
-            "meta-llama/Llama-2-70b-hf",
-            "meta-llama/Meta-Llama-3-8B",
-            "meta-llama/Meta-Llama-3.1-8B",
-            "meta-llama/Meta-Llama-3-70B",
+            return emb
+
+        if self.args.model_path in [
+            'meta-llama/Llama-2-7b-hf',
+            'meta-llama/Llama-2-70b-hf',
+            'meta-llama/Meta-Llama-3-8B',
+            'meta-llama/Meta-Llama-3.1-8B',
+            'meta-llama/Meta-Llama-3-70B',
+        ]:
+            return self.model.model.embed_tokens(batch['input_ids'])
+
+        raise NotImplementedError(f'Seq-class embeddings not implemented for {self.args.model_path}')
+
+    def _seq_class_logits_from_embeds(self, batch, inputs_embeds, representation_mask=None):
+        model = self.model
+        attn = batch.get('attention_mask')
+
+        if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
+            position_ids = torch.arange(
+                batch['input_ids'].size(1),
+                device=batch['input_ids'].device,
+            ).unsqueeze(0).expand_as(batch['input_ids'])
+            tr_out = model.transformer(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attn,
+                position_ids=position_ids,
+            )
+            hidden = tr_out.last_hidden_state
+            if attn is not None:
+                idx = attn.long().sum(dim=1) - 1
+                idx = idx.clamp(min=0)
+            else:
+                idx = torch.full(
+                    (hidden.size(0),),
+                    hidden.size(1) - 1,
+                    dtype=torch.long,
+                    device=hidden.device,
+                )
+            representation = hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
+            if representation_mask is not None:
+                representation = representation * representation_mask
+            logits = model.score(representation)
+            return logits, representation
+
+        if self.args.model_path in ['bert-base-uncased']:
+            bert = model.bert
+            input_ids = batch['input_ids']
+            raw_mask = batch.get('attention_mask')
+            ext_mask = bert.get_extended_attention_mask(raw_mask, input_ids.shape) if raw_mask is not None else None
+            enc_out = bert.encoder(inputs_embeds, attention_mask=ext_mask)
+            sequence_output = enc_out.last_hidden_state
+            if bert.pooler is not None:
+                representation = bert.pooler(sequence_output)
+            else:
+                representation = sequence_output[:, 0]
+            if representation_mask is not None:
+                representation = representation * representation_mask
+            logits = model.classifier(model.dropout(representation))
+            return logits, representation
+
+        if self.args.model_path in [
+            'meta-llama/Llama-2-7b-hf',
+            'meta-llama/Llama-2-70b-hf',
+            'meta-llama/Meta-Llama-3-8B',
+            'meta-llama/Meta-Llama-3.1-8B',
+            'meta-llama/Meta-Llama-3-70B',
         ]:
             llama = model.model
-            input_ids = batch["input_ids"]
-            emb = llama.embed_tokens(input_ids)
-            emb_m = lam * emb + (1.0 - lam) * emb[perm]
-            pos = torch.arange(input_ids.size(1), device=input_ids.device).unsqueeze(0).expand_as(input_ids)
-            out = llama(inputs_embeds=emb_m, attention_mask=attn, position_ids=pos)
+            input_ids = batch['input_ids']
+            position_ids = torch.arange(
+                input_ids.size(1),
+                device=input_ids.device,
+            ).unsqueeze(0).expand_as(input_ids)
+            out = llama(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attn,
+                position_ids=position_ids,
+            )
             hidden = out.last_hidden_state
             if attn is not None:
-                idx = attn.sum(dim=1).long() - 1
+                idx = attn.long().sum(dim=1) - 1
                 idx = idx.clamp(min=0)
-                pooled = hidden[torch.arange(B, device=hidden.device), idx]
             else:
-                pooled = hidden[:, -1]
-            logits = model.score(pooled)
-        else:
-            return self.compute_grads(batch, y_labels, create_graph=create_graph)
+                idx = torch.full(
+                    (hidden.size(0),),
+                    hidden.size(1) - 1,
+                    dtype=torch.long,
+                    device=hidden.device,
+                )
+            representation = hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
+            if representation_mask is not None:
+                representation = representation * representation_mask
+            logits = model.score(representation)
+            return logits, representation
 
-        loss = lam * F.cross_entropy(logits, labels) + (1.0 - lam) * F.cross_entropy(logits, lab_b)
-        grad = torch.autograd.grad(
-            loss, self.trainable_parameters(), create_graph=create_graph, allow_unused=True
-        )
+        raise NotImplementedError(f'Seq-class forward not implemented for {self.args.model_path}')
 
-        self.set_model_device(dev)
-        if self.args.precision != "8bit":
-            batch = batch.to(dev)
-            y_labels = y_labels.to(dev)
-        self.model.eval()
-        return grad
+    def compute_per_example_grads(self, batch, y_labels, create_graph=False, sample_grad_fn=None):
+        if self.args.algo == 'fedavg':
+            raise NotImplementedError('Per-example gradients are not implemented for algo=fedavg.')
+        if self.args.grad_b is not None:
+            raise NotImplementedError('Per-example gradients are not implemented with grad_b mini-batching.')
+
+        batch, y_labels, dev = self._prepare_grad_context(batch, y_labels)
+        try:
+            labels = self._prepare_task_labels(batch, y_labels)
+            grad_list = []
+            for idx in range(batch['input_ids'].shape[0]):
+                sample_batch = self._slice_batch(batch, idx)
+                sample_labels = labels[idx:idx+1]
+                if sample_grad_fn is None:
+                    grad = self._compute_standard_grads_prepared(
+                        sample_batch,
+                        sample_labels,
+                        create_graph=create_graph,
+                    )
+                else:
+                    grad = sample_grad_fn(
+                        sample_batch,
+                        sample_labels,
+                        sample_idx=idx,
+                        create_graph=create_graph,
+                    )
+                grad_list.append(
+                    tuple(
+                        g if (g is None or create_graph) else g.detach().clone()
+                        for g in grad
+                    )
+                )
+            return grad_list
+        finally:
+            self._restore_grad_context(batch, y_labels, dev)
+
+    def compute_grads(self, batch, y_labels, create_graph=False):
+        batch, y_labels, dev = self._prepare_grad_context(batch, y_labels)
+        try:
+            labels = self._prepare_task_labels(batch, y_labels)
+            if self.args.grad_b is None:
+                if self.args.algo == 'fedavg':
+                    if self.args.task != 'seq_class':
+                        raise NotImplementedError('FedAvg gradients are only supported for seq_class.')
+                    grad = self.compute_grads_fed_avg(batch, y_labels, create_graph)
+                else:
+                    grad = self._compute_standard_grads_prepared(batch, labels, create_graph=create_graph)
+            else:
+                if self.args.algo == 'fedavg':
+                    raise NotImplementedError('grad_b mini-batching is not implemented for algo=fedavg.')
+                self.model.zero_grad(set_to_none=True)
+                minib_size = self.args.batch_size // self.args.grad_b
+                for i in range(self.args.grad_b):
+                    mini_batch = {
+                        k: batch[k][i*minib_size:(i+1)*minib_size]
+                        for k in batch.keys()
+                    }
+                    mini_labels = labels[i*minib_size:(i+1)*minib_size]
+                    if self.is_lower() and self.args.task == 'seq_class':
+                        outputs = self.model(**mini_batch)
+                        logits = outputs.logits.float()
+                        loss = torch.nn.functional.nll_loss(
+                            torch.nn.functional.log_softmax(logits, dim=-1),
+                            mini_labels.view(-1),
+                        )
+                        loss.backward()
+                    else:
+                        outs = self.model(**mini_batch, labels=mini_labels)
+                        outs.loss.backward()
+                grad = tuple([
+                    param.grad.detach().cpu() / self.args.grad_b
+                    for param in self.model.parameters()
+                ])
+            return grad
+        finally:
+            self._restore_grad_context(batch, y_labels, dev)
+
+    def compute_grads_mixup(self, batch, y_labels, create_graph=False):
+        """
+        Embedding-level MixUp for seq_class: mixed embeddings and mixed CE loss.
+        Falls back to standard gradients for next_token_pred or batch_size < 2.
+        """
+        batch, y_labels, dev = self._prepare_grad_context(batch, y_labels)
+        try:
+            labels = self._prepare_task_labels(batch, y_labels)
+            if self.args.task != 'seq_class':
+                return self._compute_standard_grads_prepared(batch, labels, create_graph=create_graph)
+
+            batch_size = batch['input_ids'].shape[0]
+            if batch_size < 2:
+                return self._compute_standard_grads_prepared(batch, labels, create_graph=create_graph)
+
+            alpha = float(getattr(self.args, 'defense_mixup_alpha', 1.0))
+            perm = torch.randperm(batch_size, device=batch['input_ids'].device)
+            lam = float(torch.distributions.Beta(alpha, alpha).sample().item())
+            emb = self._seq_class_input_embeds(batch)
+            emb_mixed = lam * emb + (1.0 - lam) * emb[perm]
+            logits, _ = self._seq_class_logits_from_embeds(batch, emb_mixed)
+            loss = lam * F.cross_entropy(logits, labels) + (1.0 - lam) * F.cross_entropy(logits, labels[perm])
+            self.model.zero_grad(set_to_none=True)
+            return torch.autograd.grad(
+                loss,
+                self.trainable_parameters(),
+                create_graph=create_graph,
+                allow_unused=True,
+            )
+        finally:
+            self._restore_grad_context(batch, y_labels, dev)
 
     def set_model_device(self, device):
         if self.args.precision == '8bit':

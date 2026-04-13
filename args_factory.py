@@ -72,13 +72,13 @@ def get_args(argv=None):
         type=str,
         default='none',
         choices=['none', 'noise', 'dpsgd', 'topk', 'compression', 'soteria', 'mixup', 'dager', 'lrb'],
-        help='Defense applied to client gradients before attack reconstruction.',
+        help='Defense applied to client gradients before attack reconstruction; some defenses generate gradients directly.',
     )
     parser.add_argument(
         '--defense_clip_norm',
         type=float,
         default=1.0,
-        help='L2 clip norm for dpsgd (batch-level clipping of stacked gradients).',
+        help='Per-example L2 clip norm C for dpsgd.',
     )
     parser.add_argument(
         '--defense_topk_ratio',
@@ -96,7 +96,7 @@ def get_args(argv=None):
         '--defense_soteria_pruning_rate',
         type=float,
         default=60.0,
-        help='Percentile threshold for Soteria (columns below percentile are pruned).',
+        help='Percent of classifier-input representation dimensions pruned by Soteria.',
     )
     parser.add_argument(
         '--defense_soteria_sample_dims',

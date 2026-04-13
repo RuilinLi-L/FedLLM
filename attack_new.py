@@ -8,7 +8,7 @@ from utils.models import ModelWrapper
 from utils.functional import remove_padding
 from utils.data import TextDataset
 from args_factory import get_args
-from utils.defenses import apply_defense, uses_noisy_gradient_decoding
+from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
 import time
 
 from scipy.optimize import linear_sum_assignment
@@ -471,7 +471,7 @@ def reconstruct(args, sample, metric, model_wrapper):
     
     orig_batch = tokenizer(sequences,padding=True, truncation=True, max_length=min(tokenizer.model_max_length, model_wrapper.emb_size - 20),return_tensors='pt').to(args.device)
     
-    if getattr(args, "defense", "none") == "mixup":
+    if requires_gradient_generation_defense(getattr(args, "defense", "none")):
         true_grads = apply_defense(
             None, args, model_wrapper=model_wrapper, batch=orig_batch, labels=true_labels
         )
