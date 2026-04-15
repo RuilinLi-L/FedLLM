@@ -83,6 +83,7 @@ bash scripts/defense_baselines.sh sst2 2 gpt2 100 \
 语义说明：
 - `dpsgd` 现在是标准 DP-SGD 语义：逐样本裁剪，再求平均，再按 `sigma * clip_norm / batch_size` 加高斯噪声。
 - `soteria` 现在按分类头真正使用的 representation 打分，并剪掉**最高分**的那部分维度。
+- `lrb` 现在默认是 `LRB-v2` 风格：用“结构先验 + 当前梯度统计”的混合敏感度校准，并把梯度投影到一个 seeded `signed_pool` 公共子空间，再主要向残差方向加噪。
 - 旧版本 `dpsgd` / `soteria` 结果与当前实现**不可直接横向比较**。
 
 ## 3. 只跑某一个 baseline
@@ -275,8 +276,22 @@ python attack.py --dataset sst2 --split val --n_inputs 10 --batch_size 2 \
   --defense_lrb_sensitive_n_layers 2 \
   --defense_lrb_keep_ratio_sensitive 0.2 \
   --defense_lrb_keep_ratio_other 0.75 \
+  --defense_lrb_empirical_weight 0.6 \
+  --defense_lrb_projection signed_pool \
   --defense_lrb_noise_sensitive 0.03 \
   --defense_lrb_noise_other 0.005
+```
+
+补充说明：
+
+- `--defense_lrb_empirical_weight` 控制 LRB 的混合校准强度：
+  - `0` 表示只用层级启发式先验
+  - `1` 表示只用当前梯度统计
+- `--defense_lrb_projection signed_pool` 是默认推荐设置，它比旧的坐标系 pooling 更接近“公共随机子空间”。
+- 如果你想退回更接近旧版 LRB v1 的行为，可以显式设置：
+
+```bash
+--defense_lrb_empirical_weight 0 --defense_lrb_projection pool
 ```
 
 ## 5. 日志与结果文件说明

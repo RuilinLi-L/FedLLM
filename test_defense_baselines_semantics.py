@@ -21,6 +21,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.defenses import _apply_random_mask, dpsgd_defense, noise_injection, soteria_defense
+from utils.lrb_defense import _estimate_layer_sensitivities, _project_low_resolution
 
 
 def assert_true(condition, message):
@@ -141,12 +142,47 @@ def test_bert_seq_class_structure():
     assert_true("pooled = enc_out.last_hidden_state[:, 0]" not in content, "BERT path should not classify from raw CLS hidden state")
 
 
+def test_lrb_signed_projection_is_reproducible_and_not_plain_pooling():
+    tensor = torch.arange(1, 17, dtype=torch.float32)
+    signed_a = _project_low_resolution(tensor, 0.5, seed=13, mode="signed_pool")
+    signed_b = _project_low_resolution(tensor, 0.5, seed=13, mode="signed_pool")
+    plain = _project_low_resolution(tensor, 0.5, seed=13, mode="pool")
+
+    assert_true(torch.allclose(signed_a, signed_b), "signed-pool projection should be reproducible for a fixed seed")
+    assert_true(not torch.allclose(signed_a, plain), "signed-pool projection should differ from plain coordinate pooling")
+
+
+def test_lrb_hybrid_sensitivity_uses_empirical_calibration():
+    grads = (
+        torch.tensor([10.0, 0.0, 0.0, 0.0], dtype=torch.float32),
+        torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=torch.float32),
+    )
+    layer_names = [
+        "transformer.h.4.attn.c_attn.weight",
+        "transformer.h.5.attn.c_attn.weight",
+    ]
+    scores = _estimate_layer_sensitivities(
+        grads,
+        layer_names=layer_names,
+        sensitive_n_layers=2,
+        empirical_weight=1.0,
+        calibration_keep_ratio=0.5,
+        calibration_samples=16,
+        base_seed=0,
+        projection_mode="signed_pool",
+    )
+
+    assert_true(scores[0] > scores[1], "empirical calibration should score the more concentrated layer as more sensitive")
+
+
 def main():
     tests = [
         test_noise_rng_behavior,
         test_dpsgd_matches_manual_formula,
         test_soteria_masks_representation_during_gradient_generation,
         test_bert_seq_class_structure,
+        test_lrb_signed_projection_is_reproducible_and_not_plain_pooling,
+        test_lrb_hybrid_sensitivity_uses_empirical_calibration,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

@@ -152,6 +152,25 @@ def get_args(argv=None):
         default=0.005,
         help='Orthogonal noise multiplier for less-sensitive layers under LRB.',
     )
+    parser.add_argument(
+        '--defense_lrb_empirical_weight',
+        type=float,
+        default=0.6,
+        help='Blend weight for on-the-fly gradient calibration in LRB (0=rule-only, 1=empirical-only).',
+    )
+    parser.add_argument(
+        '--defense_lrb_calibration_samples',
+        type=int,
+        default=4096,
+        help='Max elements per tensor used by LRB calibration sketches.',
+    )
+    parser.add_argument(
+        '--defense_lrb_projection',
+        type=str,
+        default='signed_pool',
+        choices=['signed_pool', 'pool'],
+        help='Public subspace projection used by LRB; signed_pool is the randomized-basis default.',
+    )
     
     # DAGER-specific defense parameters
     parser.add_argument(
