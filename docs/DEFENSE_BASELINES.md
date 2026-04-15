@@ -13,7 +13,7 @@
 - `mixup`
 - `lrb`
 
-主入口是 [`scripts/defense_baselines.sh`](/D:/code/Projects/FedLLM/scripts/defense_baselines.sh)。
+主入口是 [`scripts/defense_baselines.sh`](../scripts/defense_baselines.sh)。
 
 ## 1. 运行前准备
 
@@ -420,7 +420,7 @@ bash scripts/defense_baselines.sh sst2 2 gpt2 20 \
 
 ## 8. 相关代码入口
 
-- 防御实现入口：[`utils/defenses.py`](/D:/code/Projects/FedLLM/utils/defenses.py)
-- 攻击主脚本：[`attack.py`](/D:/code/Projects/FedLLM/attack.py)
-- baseline 脚本：[`scripts/defense_baselines.sh`](/D:/code/Projects/FedLLM/scripts/defense_baselines.sh)
-- 结果汇总器：[`scripts/collect_experiment_logs.py`](/D:/code/Projects/FedLLM/scripts/collect_experiment_logs.py)
+- 防御实现入口：[`utils/defenses.py`](../utils/defenses.py)
+- 攻击主脚本：[`attack.py`](../attack.py)
+- baseline 脚本：[`scripts/defense_baselines.sh`](../scripts/defense_baselines.sh)
+- 结果汇总器：[`scripts/collect_experiment_logs.py`](../scripts/collect_experiment_logs.py)

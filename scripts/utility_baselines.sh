@@ -1,0 +1,231 @@
+#!/bin/bash
+# Run the two-stage utility pipeline:
+# 1) proxy utility on a clean anchor checkpoint
+# 2) end-to-end training utility with unified defenses
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DAGER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "$DAGER_ROOT" || exit 1
+
+DATASET="${1:-sst2}"
+BATCH="${2:-2}"
+MODEL="${3:-gpt2}"
+EPOCHS="${4:-1}"
+RAW_EXTRA=()
+if [ "$#" -gt 4 ]; then
+  RAW_EXTRA=( "${@:5}" )
+fi
+
+ANCHOR_DIR=""
+PRIVACY_LOGS="log/runs/test"
+INCLUDE_SENSITIVITY=0
+EXTRA=()
+
+parse_script_args() {
+  local idx=0
+  while [ "$idx" -lt "${#RAW_EXTRA[@]}" ]; do
+    local arg="${RAW_EXTRA[$idx]}"
+    case "$arg" in
+      --anchor_dir)
+        ANCHOR_DIR="${RAW_EXTRA[$((idx + 1))]}"
+        idx=$((idx + 2))
+        ;;
+      --anchor_dir=*)
+        ANCHOR_DIR="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --privacy_logs)
+        PRIVACY_LOGS="${RAW_EXTRA[$((idx + 1))]}"
+        idx=$((idx + 2))
+        ;;
+      --privacy_logs=*)
+        PRIVACY_LOGS="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --include_sensitivity)
+        INCLUDE_SENSITIVITY=1
+        idx=$((idx + 1))
+        ;;
+      *)
+        EXTRA+=( "$arg" )
+        idx=$((idx + 1))
+        ;;
+    esac
+  done
+}
+
+slugify() {
+  printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | sed 's/__*/_/g' | sed 's/^_\|_$//g'
+}
+
+is_model_dir() {
+  [ -f "$1/config.json" ]
+}
+
+resolve_existing_anchor() {
+  local safe_model safe_ds candidate
+  safe_model="$(slugify "$(basename "$MODEL")")"
+  safe_ds="$(slugify "$DATASET")"
+  local candidates=(
+    "./models/${safe_model}-ft-clean"
+    "./models/${safe_model}-ft-clean/final"
+    "./models/${safe_model}-ft-rt"
+    "./models/${safe_model}-ft-rt/final"
+  )
+  if [ -n "$ANCHOR_DIR" ]; then
+    candidates=( "$ANCHOR_DIR" "$ANCHOR_DIR/final" "${candidates[@]}" )
+  fi
+  for candidate in "${candidates[@]}"; do
+    if [ -n "$candidate" ] && is_model_dir "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+run_logged() {
+  local label="$1"
+  shift
+  local logfile="${RUN_DIR}/${label}.txt"
+  echo "[utility] running ${label}" >&2
+  set +e
+  "$@" --log_file "$logfile"
+  local rc=$?
+  set -e
+  printf '%s,%s\n' "$label" "$rc" >> "${RUN_DIR}/exit_codes.csv"
+  return 0
+}
+
+parse_script_args
+
+safe_model="$(slugify "$(basename "$MODEL")")"
+safe_ds="$(slugify "$DATASET")"
+stamp="$(date +%Y%m%d_%H%M%S)"
+RUN_DIR="log/runs/utility_baselines_${safe_ds}_b${BATCH}_${safe_model}_${stamp}"
+mkdir -p "$RUN_DIR"
+printf 'label,exit_code\n' > "${RUN_DIR}/exit_codes.csv"
+
+if ! ANCHOR_MODEL_DIR="$(resolve_existing_anchor)"; then
+  if [ -z "$ANCHOR_DIR" ]; then
+    ANCHOR_DIR="./models/${safe_model}_utility_anchor_${safe_ds}"
+  fi
+  echo "[utility] no clean anchor found, training one at ${ANCHOR_DIR}" >&2
+  run_logged \
+    "anchor_train_none" \
+    python3 train.py \
+    --dataset "$DATASET" \
+    --task seq_class \
+    --batch_size "$BATCH" \
+    --num_epochs "$EPOCHS" \
+    --save_every 0 \
+    --model_path "$MODEL" \
+    --train_method full \
+    --defense none \
+    --rng_seed 101 \
+    --output_dir "$ANCHOR_DIR" \
+    "${EXTRA[@]}"
+  ANCHOR_MODEL_DIR="${ANCHOR_DIR}/final"
+fi
+
+echo "[utility] anchor model: ${ANCHOR_MODEL_DIR}" >&2
+
+run_variant() {
+  local defense="$1"
+  local param="$2"
+  local tag="$3"
+  local extra_flag=()
+
+  case "$defense" in
+    none)
+      extra_flag=()
+      ;;
+    noise|dpsgd)
+      extra_flag=( --defense_noise "$param" )
+      ;;
+    topk)
+      extra_flag=( --defense_topk_ratio "$param" )
+      ;;
+    compression)
+      extra_flag=( --defense_n_bits "$param" )
+      ;;
+    soteria)
+      extra_flag=( --defense_soteria_pruning_rate "$param" )
+      ;;
+    mixup)
+      extra_flag=( --defense_mixup_alpha "$param" )
+      ;;
+    lrb)
+      extra_flag=( --defense_lrb_keep_ratio_sensitive "$param" )
+      ;;
+    *)
+      echo "[utility] unsupported defense ${defense}" >&2
+      return 0
+      ;;
+  esac
+
+  run_logged \
+    "proxy_${tag}" \
+    python3 scripts/proxy_utility.py \
+    --dataset "$DATASET" \
+    --task seq_class \
+    --batch_size "$BATCH" \
+    --model_path "$ANCHOR_MODEL_DIR" \
+    --n_train_batches 100 \
+    --val_size 256 \
+    --eval_batch_size 16 \
+    --train_method full \
+    --defense "$defense" \
+    "${extra_flag[@]}" \
+    "${EXTRA[@]}"
+
+  for seed in 101 202 303; do
+    run_logged \
+      "train_${tag}_seed${seed}" \
+      python3 train.py \
+      --dataset "$DATASET" \
+      --task seq_class \
+      --batch_size "$BATCH" \
+      --num_epochs "$EPOCHS" \
+      --save_every 0 \
+      --model_path "$ANCHOR_MODEL_DIR" \
+      --train_method full \
+      --rng_seed "$seed" \
+      --output_dir "${RUN_DIR}/models/${tag}_seed${seed}" \
+      --defense "$defense" \
+      "${extra_flag[@]}" \
+      "${EXTRA[@]}"
+  done
+}
+
+run_variant none n/a none
+run_variant lrb 0.2 lrb_0.2
+run_variant topk 0.1 topk_0.1
+run_variant compression 8 compression_8
+run_variant noise 5e-4 noise_5e-4
+run_variant dpsgd 5e-4 dpsgd_5e-4
+run_variant mixup 0.3 mixup_0.3
+run_variant soteria 30 soteria_30
+
+if [ "$INCLUDE_SENSITIVITY" -eq 1 ]; then
+  run_variant lrb 0.35 lrb_0.35
+  run_variant compression 16 compression_16
+fi
+
+COLLECT_INPUTS=( "$RUN_DIR" )
+if [ -n "$PRIVACY_LOGS" ] && [ -e "$PRIVACY_LOGS" ]; then
+  COLLECT_INPUTS+=( "$PRIVACY_LOGS" )
+fi
+
+python3 scripts/collect_experiment_logs.py \
+  "${COLLECT_INPUTS[@]}" \
+  -o "${RUN_DIR}/results.csv" \
+  --markdown "${RUN_DIR}/results.md" \
+  --utility-output "${RUN_DIR}/utility_results.csv" \
+  --utility-markdown "${RUN_DIR}/utility_results.md" \
+  --tradeoff-output "${RUN_DIR}/privacy_utility_tradeoff.csv" \
+  --tradeoff-markdown "${RUN_DIR}/privacy_utility_tradeoff.md"
+
+echo "[utility] done. outputs live under ${RUN_DIR}" >&2
