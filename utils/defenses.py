@@ -186,8 +186,12 @@ def soteria_defense(model_wrapper, batch, labels, args, create_graph=False):
 
     def sample_grad_fn(sample_batch, sample_labels, sample_idx=0, create_graph=False):
         model_wrapper.model.zero_grad(set_to_none=True)
-        inputs_embeds = model_wrapper._seq_class_input_embeds(sample_batch).detach()
-        inputs_embeds.requires_grad_(True)
+        # Preserve the parameter-to-embedding graph when it exists so proxy
+        # metrics still see the full defended gradient structure.
+        inputs_embeds = model_wrapper._seq_class_input_embeds(sample_batch)
+        if not inputs_embeds.requires_grad:
+            inputs_embeds = inputs_embeds.detach()
+            inputs_embeds.requires_grad_(True)
         _, representation = model_wrapper._seq_class_logits_from_embeds(sample_batch, inputs_embeds)
         representation = representation.squeeze(0)
 
