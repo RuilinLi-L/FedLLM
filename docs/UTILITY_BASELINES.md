@@ -10,6 +10,7 @@
 
 相关脚本还包括：
 
+- [`scripts/proxy_baselines.sh`](../scripts/proxy_baselines.sh)
 - [`scripts/proxy_utility.py`](../scripts/proxy_utility.py)
 - [`train.py`](../train.py)
 - [`scripts/collect_experiment_logs.py`](../scripts/collect_experiment_logs.py)
@@ -137,6 +138,28 @@ bash scripts/utility_baselines.sh sst2 2 gpt2 1 \
 ## 5. 只跑单个 utility 组件
 
 如果你不想一次跑完整流程，也可以单独跑。
+
+### 5.0 一次跑完整套 proxy baselines
+
+如果你现在只想先把所有 defense 的 `proxy utility` 都跑一遍，不想触发训练期 utility，可以直接使用：
+
+```bash
+bash scripts/proxy_baselines.sh sst2 2 gpt2 1 \
+  --anchor_dir ./models/gpt2-ft-rt
+```
+
+如果本地 checkpoint 缺 tokenizer，也可以像完整 utility 流程一样透传：
+
+```bash
+bash scripts/proxy_baselines.sh sst2 2 gpt2 1 \
+  --anchor_dir ./models/gpt2-ft-rt \
+  --tokenizer_path gpt2
+```
+
+说明：
+- 它会自动复用或补训一个 clean anchor。
+- 它只会生成 `proxy_<variant>.txt` 日志，不会启动 `train_<variant>_seed*.txt`。
+- 运行完成后会在 `log/runs/proxy_baselines_*` 下生成 `results.csv` 和 `results.md`。
 
 ### 5.1 只跑 proxy utility
 
