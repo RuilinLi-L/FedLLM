@@ -6,9 +6,14 @@ import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.defense_common import (
     add_shared_defense_args,
@@ -169,6 +174,12 @@ def build_parser():
     parser.add_argument("--dataset", choices=["cola", "sst2", "rte", "rotten_tomatoes"], required=True)
     parser.add_argument("--task", choices=["seq_class"], default="seq_class")
     parser.add_argument("--model_path", type=str, required=True)
+    parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        default=None,
+        help="Optional tokenizer source when model_path points to a checkpoint directory without tokenizer files.",
+    )
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--models_cache", type=str, default="./models_cache")
     parser.add_argument("--train_method", type=str, default="full", choices=["full"])

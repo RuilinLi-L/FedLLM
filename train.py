@@ -202,6 +202,12 @@ def build_parser():
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--model_path", type=str, default="bert-base-uncased")
+    parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        default=None,
+        help="Optional tokenizer source when model_path points to a checkpoint directory without tokenizer files.",
+    )
     parser.add_argument("--train_method", type=str, default="full", choices=["full", "lora"])
     parser.add_argument("--lora_r", type=int, default=None)
     parser.add_argument("--models_cache", type=str, default="./models_cache")

@@ -61,7 +61,17 @@ slugify() {
 }
 
 is_model_dir() {
-  [ -f "$1/config.json" ]
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+  [ -f "$dir/config.json" ] || return 1
+
+  if ! [ -f "$dir/model.safetensors" ] && \
+     ! [ -f "$dir/model.safetensors.index.json" ] && \
+     ! [ -f "$dir/pytorch_model.bin" ] && \
+     ! [ -f "$dir/pytorch_model.bin.index.json" ]; then
+    return 1
+  fi
+  return 0
 }
 
 resolve_existing_anchor() {
@@ -69,13 +79,13 @@ resolve_existing_anchor() {
   safe_model="$(slugify "$(basename "$MODEL")")"
   safe_ds="$(slugify "$DATASET")"
   local candidates=(
-    "./models/${safe_model}-ft-clean"
     "./models/${safe_model}-ft-clean/final"
-    "./models/${safe_model}-ft-rt"
+    "./models/${safe_model}-ft-clean"
     "./models/${safe_model}-ft-rt/final"
+    "./models/${safe_model}-ft-rt"
   )
   if [ -n "$ANCHOR_DIR" ]; then
-    candidates=( "$ANCHOR_DIR" "$ANCHOR_DIR/final" "${candidates[@]}" )
+    candidates=( "$ANCHOR_DIR/final" "$ANCHOR_DIR" "${candidates[@]}" )
   fi
   for candidate in "${candidates[@]}"; do
     if [ -n "$candidate" ] && is_model_dir "$candidate"; then
