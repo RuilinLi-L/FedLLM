@@ -125,6 +125,8 @@ bash scripts/utility_baselines.sh sst2 2 gpt2 1 \
 | `--anchor_dir <path>` | 指定 clean anchor 模型目录 |
 | `--privacy_logs <path>` | 指定 attack 日志目录或文件，用于生成 tradeoff 联表 |
 | `--include_sensitivity` | 额外加入 `lrb@0.35` 和 `compression@16` |
+| `--baseline_defense <name>` | 只跑某一个 utility baseline；非 `none` 时会自动补一份 `none` 对照 |
+| `--baseline_param <value>` | 覆盖该 utility baseline 的默认 operating point |
 
 说明：
 
@@ -134,6 +136,60 @@ bash scripts/utility_baselines.sh sst2 2 gpt2 1 \
   - `202`
   - `303`
 - 最后统一调用 [`scripts/collect_experiment_logs.py`](../scripts/collect_experiment_logs.py) 汇总结果。
+
+### 4.1 只跑某一个 utility baseline
+
+如果你不想一次跑完整套 baselines，而是只想聚焦某一种 defense，可以使用：
+
+- `--baseline_defense <name>`
+- `--baseline_param <value>`
+
+这里的语义和 `defense_baselines.sh` 类似，但更轻量：
+
+- `utility_baselines.sh` 仍然是 **fixed operating point** 脚本，不会因为聚焦某个 defense 就自动跑完整 sweep。
+- 当 `--baseline_defense` 不是 `none` 时，脚本会自动额外跑一份 `none`，这样 `utility_results.csv` 和 `privacy_utility_tradeoff.csv` 仍然可以直接计算 `utility_drop`。
+- 当加上 `--baseline_param` 时，会覆盖该 defense 在 utility 主表里的默认 operating point。
+
+例如只跑 `none`：
+
+```bash
+bash scripts/utility_baselines.sh sst2 2 gpt2 1 \
+  --anchor_dir ./models/gpt2-ft-rt \
+  --baseline_defense none
+```
+
+例如只跑 `dpsgd` 的默认 utility operating point：
+
+```bash
+bash scripts/utility_baselines.sh sst2 2 gpt2 1 \
+  --anchor_dir ./models/gpt2-ft-rt \
+  --baseline_defense dpsgd
+```
+
+这条命令实际会跑：
+
+- `none`
+- `dpsgd@5e-4`
+
+例如只跑 `dpsgd@1e-4`：
+
+```bash
+bash scripts/utility_baselines.sh sst2 2 gpt2 1 \
+  --anchor_dir ./models/gpt2-ft-rt \
+  --baseline_defense dpsgd \
+  --baseline_param 1e-4
+```
+
+这条命令实际会跑：
+
+- `none`
+- `dpsgd@1e-4`
+
+注意：
+
+- `--baseline_param` 必须和 `--baseline_defense` 一起使用。
+- `--baseline_defense none` 不能和 `--baseline_param` 一起使用。
+- `--include_sensitivity` 在 focused 模式下仍然有效，但只会对当前聚焦 defense 追加 utility 脚本已有的敏感性点，例如 `lrb@0.35` 或 `compression@16`。
 
 ## 5. 只跑单个 utility 组件
 
@@ -334,6 +390,13 @@ python3 train.py \
 
 ```text
 log/runs/utility_baselines_sst2_b2_gpt2_YYYYMMDD_HHMMSS/
+```
+
+如果使用 focused utility 模式，目录名会带上 focus 后缀，例如：
+
+```text
+log/runs/utility_baselines_sst2_b2_gpt2_focus_dpsgd_YYYYMMDD_HHMMSS/
+log/runs/utility_baselines_sst2_b2_gpt2_focus_dpsgd_1e-4_YYYYMMDD_HHMMSS/
 ```
 
 目录内常见文件如下：

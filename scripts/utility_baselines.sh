@@ -21,6 +21,8 @@ fi
 ANCHOR_DIR=""
 PRIVACY_LOGS="log/runs/test"
 INCLUDE_SENSITIVITY=0
+BASELINE_DEFENSE=""
+BASELINE_PARAM=""
 EXTRA=()
 
 parse_script_args() {
@@ -48,6 +50,30 @@ parse_script_args() {
         INCLUDE_SENSITIVITY=1
         idx=$((idx + 1))
         ;;
+      --baseline_defense)
+        if [ $((idx + 1)) -ge "${#RAW_EXTRA[@]}" ]; then
+          echo "[utility] --baseline_defense requires a value." >&2
+          exit 2
+        fi
+        BASELINE_DEFENSE="${RAW_EXTRA[$((idx + 1))]}"
+        idx=$((idx + 2))
+        ;;
+      --baseline_defense=*)
+        BASELINE_DEFENSE="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --baseline_param)
+        if [ $((idx + 1)) -ge "${#RAW_EXTRA[@]}" ]; then
+          echo "[utility] --baseline_param requires a value." >&2
+          exit 2
+        fi
+        BASELINE_PARAM="${RAW_EXTRA[$((idx + 1))]}"
+        idx=$((idx + 2))
+        ;;
+      --baseline_param=*)
+        BASELINE_PARAM="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
       *)
         EXTRA+=( "$arg" )
         idx=$((idx + 1))
@@ -58,6 +84,36 @@ parse_script_args() {
 
 slugify() {
   printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | sed 's/__*/_/g' | sed 's/^_\|_$//g'
+}
+
+utility_default_param() {
+  case "$1" in
+    none)
+      printf 'n/a'
+      ;;
+    lrb)
+      printf '0.2'
+      ;;
+    topk)
+      printf '0.1'
+      ;;
+    compression)
+      printf '8'
+      ;;
+    noise|dpsgd)
+      printf '5e-4'
+      ;;
+    mixup)
+      printf '0.3'
+      ;;
+    soteria)
+      printf '30'
+      ;;
+    *)
+      echo "[utility] unsupported defense ${1}" >&2
+      return 1
+      ;;
+  esac
 }
 
 is_model_dir() {
@@ -111,10 +167,38 @@ run_logged() {
 
 parse_script_args
 
+if [ -n "$BASELINE_DEFENSE" ]; then
+  case "$BASELINE_DEFENSE" in
+    none|noise|dpsgd|topk|compression|soteria|mixup|lrb)
+      ;;
+    *)
+      echo "[utility] Unsupported --baseline_defense: ${BASELINE_DEFENSE}" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [ -n "$BASELINE_PARAM" ] && [ -z "$BASELINE_DEFENSE" ]; then
+  echo "[utility] --baseline_param requires --baseline_defense." >&2
+  exit 2
+fi
+
+if [ "$BASELINE_DEFENSE" = "none" ] && [ -n "$BASELINE_PARAM" ]; then
+  echo "[utility] --baseline_defense none cannot be combined with --baseline_param." >&2
+  exit 2
+fi
+
 safe_model="$(slugify "$(basename "$MODEL")")"
 safe_ds="$(slugify "$DATASET")"
 stamp="$(date +%Y%m%d_%H%M%S)"
-RUN_DIR="log/runs/utility_baselines_${safe_ds}_b${BATCH}_${safe_model}_${stamp}"
+focus_suffix=""
+if [ -n "$BASELINE_DEFENSE" ]; then
+  focus_suffix="_focus_${BASELINE_DEFENSE}"
+  if [ -n "$BASELINE_PARAM" ]; then
+    focus_suffix="${focus_suffix}_$(slugify "$BASELINE_PARAM")"
+  fi
+fi
+RUN_DIR="log/runs/utility_baselines_${safe_ds}_b${BATCH}_${safe_model}${focus_suffix}_${stamp}"
 mkdir -p "$RUN_DIR"
 printf 'label,exit_code\n' > "${RUN_DIR}/exit_codes.csv"
 
@@ -210,19 +294,51 @@ run_variant() {
   done
 }
 
-run_variant none n/a none
-run_variant lrb 0.2 lrb_0.2
-run_variant topk 0.1 topk_0.1
-run_variant compression 8 compression_8
-run_variant noise 5e-4 noise_5e-4
-run_variant dpsgd 5e-4 dpsgd_5e-4
-run_variant mixup 0.3 mixup_0.3
-run_variant soteria 30 soteria_30
+run_selected_variants() {
+  if [ -z "$BASELINE_DEFENSE" ]; then
+    run_variant none n/a none
+    run_variant lrb 0.2 lrb_0.2
+    run_variant topk 0.1 topk_0.1
+    run_variant compression 8 compression_8
+    run_variant noise 5e-4 noise_5e-4
+    run_variant dpsgd 5e-4 dpsgd_5e-4
+    run_variant mixup 0.3 mixup_0.3
+    run_variant soteria 30 soteria_30
 
-if [ "$INCLUDE_SENSITIVITY" -eq 1 ]; then
-  run_variant lrb 0.35 lrb_0.35
-  run_variant compression 16 compression_16
-fi
+    if [ "$INCLUDE_SENSITIVITY" -eq 1 ]; then
+      run_variant lrb 0.35 lrb_0.35
+      run_variant compression 16 compression_16
+    fi
+    return 0
+  fi
+
+  run_variant none n/a none
+  if [ "$BASELINE_DEFENSE" = "none" ]; then
+    return 0
+  fi
+
+  local target_param
+  local target_tag
+  target_param="$BASELINE_PARAM"
+  if [ -z "$target_param" ]; then
+    target_param="$(utility_default_param "$BASELINE_DEFENSE")"
+  fi
+  target_tag="$(slugify "${BASELINE_DEFENSE}_${target_param}")"
+  run_variant "$BASELINE_DEFENSE" "$target_param" "$target_tag"
+
+  if [ -z "$BASELINE_PARAM" ] && [ "$INCLUDE_SENSITIVITY" -eq 1 ]; then
+    case "$BASELINE_DEFENSE" in
+      lrb)
+        run_variant lrb 0.35 lrb_0.35
+        ;;
+      compression)
+        run_variant compression 16 compression_16
+        ;;
+    esac
+  fi
+}
+
+run_selected_variants
 
 COLLECT_INPUTS=( "$RUN_DIR" )
 if [ -n "$PRIVACY_LOGS" ] && [ -e "$PRIVACY_LOGS" ]; then
