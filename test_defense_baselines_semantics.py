@@ -21,8 +21,16 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.defense_common import grad_similarity_metrics
-from utils.defenses import _apply_random_mask, dpsgd_defense, noise_injection, soteria_defense
+from utils.defenses import (
+    _apply_random_mask,
+    dpsgd_defense,
+    gradient_compression,
+    noise_injection,
+    soteria_defense,
+    topk_sparsification,
+)
 from utils.lrb_defense import _estimate_layer_sensitivities, _project_low_resolution
+from utils.training_defense_wrapper import TrainingDefenseModelWrapper
 
 
 def assert_true(condition, message):
@@ -64,6 +72,60 @@ def test_dpsgd_matches_manual_formula():
 
     assert_true(torch.allclose(defended[0], expected, atol=1e-5), "dpsgd must clip each example before averaging")
     assert_true(not torch.allclose(defended[0], aggregated_clip, atol=1e-5), "dpsgd must differ from aggregated clipping")
+
+
+def test_topk_keeps_expected_support_and_minimum_one_entry():
+    grads = (torch.tensor([0.1, -3.0, 0.4, 2.0], dtype=torch.float32),)
+    defended = topk_sparsification(grads, keep_ratio=0.5)
+    assert_true(
+        torch.equal(defended[0], torch.tensor([0.0, -3.0, 0.0, 2.0])),
+        "topk should preserve the largest-magnitude entries and zero the rest",
+    )
+
+    tiny_ratio = topk_sparsification(grads, keep_ratio=0.01)
+    assert_true(
+        int((tiny_ratio[0] != 0).sum().item()) == 1,
+        "topk should retain at least one element even for very small keep ratios",
+    )
+
+
+def _manual_qsgd_tensor(tensor: torch.Tensor, n_bits: int, seed: int) -> torch.Tensor:
+    levels = float(2**n_bits - 1)
+    g_f = tensor.detach().float()
+    norm_value = float(g_f.norm().item())
+    if norm_value <= 1e-12:
+        return torch.zeros_like(tensor)
+    scaled = g_f.abs() * (levels / norm_value)
+    lower = torch.floor(scaled).clamp(max=levels)
+    prob = (scaled - lower).clamp(min=0.0, max=1.0)
+    gen = torch.Generator(device=tensor.device)
+    gen.manual_seed(seed)
+    rnd = torch.rand(prob.shape, device=tensor.device, dtype=torch.float32, generator=gen)
+    levels_q = lower + (rnd < prob).to(dtype=torch.float32)
+    levels_q = levels_q.clamp(max=levels)
+    return (g_f.sign() * (norm_value * levels_q / levels)).to(dtype=tensor.dtype)
+
+
+def test_qsgd_compression_matches_seeded_formula_and_bit_granularity():
+    grads = (
+        torch.tensor([1.0, -2.0, 3.0, -4.0], dtype=torch.float32),
+        torch.tensor([0.5, -0.25, 0.75, -1.25], dtype=torch.float32),
+    )
+    defended = gradient_compression(grads, n_bits=2, seed=17)
+    defended_again = gradient_compression(grads, n_bits=2, seed=17)
+    manual_first = _manual_qsgd_tensor(grads[0], n_bits=2, seed=17 + 104729)
+    manual_second = _manual_qsgd_tensor(grads[1], n_bits=2, seed=17 + 104729 * 2)
+
+    assert_true(torch.allclose(defended[0], defended_again[0]), "compression should be reproducible for a fixed seed")
+    assert_true(torch.allclose(defended[1], defended_again[1]), "compression should be reproducible for a fixed seed")
+    assert_true(torch.allclose(defended[0], manual_first), "first tensor should follow the seeded QSGD formula")
+    assert_true(torch.allclose(defended[1], manual_second), "second tensor should follow the seeded QSGD formula")
+
+    coarse = gradient_compression((torch.linspace(-1.0, 1.0, steps=64),), n_bits=2, seed=3)[0]
+    fine = gradient_compression((torch.linspace(-1.0, 1.0, steps=64),), n_bits=4, seed=3)[0]
+    coarse_levels = torch.unique(torch.round(coarse.abs() * 1_000_000) / 1_000_000).numel()
+    fine_levels = torch.unique(torch.round(fine.abs() * 1_000_000) / 1_000_000).numel()
+    assert_true(fine_levels >= coarse_levels, "more bits should allow at least as many quantization levels")
 
 
 class DummySoteriaModel:
@@ -236,11 +298,150 @@ def test_soteria_keeps_embedding_gradients_for_proxy_metrics():
     assert_true(isinstance(norm_retention, float), "proxy norm retention should be computable after soteria")
 
 
+def test_soteria_sample_dims_path_runs():
+    wrapper = DummySoteriaEmbeddingWrapper()
+    args = SimpleNamespace(
+        task="seq_class",
+        train_method="full",
+        defense_soteria_pruning_rate=50.0,
+        defense_soteria_sample_dims=2,
+        rng_seed=5,
+    )
+    batch = {"input_ids": torch.tensor([[1, 2], [3, 4]], dtype=torch.long)}
+    labels = torch.tensor([0, 1], dtype=torch.long)
+    defended = soteria_defense(wrapper, batch, labels, args)
+
+    assert_true(len(defended) == 2, "soteria with sampled dims should still return one gradient per trainable tensor")
+    assert_true(defended[0].shape == wrapper.model.embedding.weight.shape, "embedding gradient shape should remain stable")
+    assert_true(defended[1].shape == wrapper.model.classifier.weight.shape, "classifier gradient shape should remain stable")
+
+
 def test_bert_seq_class_structure():
     content = Path(__file__).with_name("utils").joinpath("models.py").read_text(encoding="utf8")
     assert_true("representation = bert.pooler(sequence_output)" in content, "BERT path should use pooler_output")
-    assert_true("logits = model.classifier(model.dropout(representation))" in content, "BERT path should apply dropout before classifier")
+    assert_true(
+        "return self.model.classifier(self.model.dropout(representation))" in content,
+        "BERT path should apply dropout before classifier",
+    )
     assert_true("pooled = enc_out.last_hidden_state[:, 0]" not in content, "BERT path should not classify from raw CLS hidden state")
+
+
+class DummyMixupModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.encoder = torch.nn.Linear(3, 2, bias=False)
+        self.classifier = torch.nn.Linear(2, 2, bias=False)
+        with torch.no_grad():
+            self.encoder.weight.copy_(
+                torch.tensor(
+                    [
+                        [1.0, -0.5, 0.25],
+                        [-0.25, 0.75, 0.5],
+                    ],
+                    dtype=torch.float32,
+                )
+            )
+            self.classifier.weight.copy_(
+                torch.tensor(
+                    [
+                        [0.8, -0.4],
+                        [-0.3, 0.9],
+                    ],
+                    dtype=torch.float32,
+                )
+            )
+
+
+class DummyMixupWrapper(TrainingDefenseModelWrapper):
+    def __init__(self, *, task="seq_class", alpha=0.7):
+        self.model = DummyMixupModel()
+        self.args = SimpleNamespace(task=task, defense_mixup_alpha=alpha)
+        self._trainable_params = tuple(self.model.parameters())
+
+    def _seq_class_input_embeds(self, batch):
+        return batch["features"]
+
+    def _seq_class_representation_from_embeds(self, batch, inputs_embeds, representation_mask=None):
+        representation = self.model.encoder(inputs_embeds)
+        if representation_mask is not None:
+            representation = representation * representation_mask
+        return representation
+
+    def _seq_class_logits_from_representation(self, representation):
+        return self.model.classifier(representation)
+
+    def _compute_standard_grads(self, batch, labels, create_graph=False):
+        self.model.zero_grad(set_to_none=True)
+        emb = self._seq_class_input_embeds(batch)
+        representation = self._seq_class_representation_from_embeds(batch, emb)
+        logits = self._seq_class_logits_from_representation(representation)
+        loss = torch.nn.functional.cross_entropy(logits, labels.view(-1).long())
+        return torch.autograd.grad(
+            loss,
+            self.trainable_parameters(),
+            create_graph=create_graph,
+            allow_unused=True,
+        )
+
+
+def test_mixup_changes_gradients_via_representation_mixing():
+    wrapper = DummyMixupWrapper()
+    batch = {
+        "input_ids": torch.tensor([[0], [1]], dtype=torch.long),
+        "features": torch.tensor(
+            [
+                [1.0, 2.0, -1.0],
+                [0.5, -0.5, 1.0],
+            ],
+            dtype=torch.float32,
+        ),
+    }
+    labels = torch.tensor([0, 1], dtype=torch.long)
+
+    torch.manual_seed(9)
+    mixed = wrapper.compute_grads_mixup(batch, labels)
+    raw = wrapper._compute_standard_grads(batch, labels)
+
+    assert_true(mixed[0].shape == raw[0].shape, "mixup should preserve parameter gradient shapes")
+    assert_true(mixed[1].shape == raw[1].shape, "mixup should preserve parameter gradient shapes")
+    assert_true(
+        any(not torch.allclose(mg, rg) for mg, rg in zip(mixed, raw) if mg is not None and rg is not None),
+        "representation-level mixup should change at least one parameter gradient",
+    )
+
+
+def test_mixup_falls_back_for_small_batches_and_non_seq_class():
+    small_wrapper = DummyMixupWrapper(task="seq_class")
+    small_batch = {
+        "input_ids": torch.tensor([[0]], dtype=torch.long),
+        "features": torch.tensor([[1.0, 2.0, -1.0]], dtype=torch.float32),
+    }
+    small_labels = torch.tensor([0], dtype=torch.long)
+    small_mixed = small_wrapper.compute_grads_mixup(small_batch, small_labels)
+    small_raw = small_wrapper._compute_standard_grads(small_batch, small_labels)
+    assert_true(
+        all(torch.allclose(mg, rg) for mg, rg in zip(small_mixed, small_raw) if mg is not None and rg is not None),
+        "mixup should fall back to standard gradients when batch_size < 2",
+    )
+
+    non_seq_wrapper = DummyMixupWrapper(task="next_token_pred")
+    batch = {
+        "input_ids": torch.tensor([[0], [1]], dtype=torch.long),
+        "features": torch.tensor(
+            [
+                [1.0, 2.0, -1.0],
+                [0.5, -0.5, 1.0],
+            ],
+            dtype=torch.float32,
+        ),
+    }
+    labels = torch.tensor([0, 1], dtype=torch.long)
+    non_seq_mixed = non_seq_wrapper.compute_grads_mixup(batch, labels)
+    non_seq_raw = non_seq_wrapper._compute_standard_grads(batch, labels)
+    assert_true(
+        all(torch.allclose(mg, rg) for mg, rg in zip(non_seq_mixed, non_seq_raw) if mg is not None and rg is not None),
+        "mixup should fall back to standard gradients for non-seq_class tasks",
+    )
 
 
 def test_lrb_signed_projection_is_reproducible_and_not_plain_pooling():
@@ -280,9 +481,14 @@ def main():
     tests = [
         test_noise_rng_behavior,
         test_dpsgd_matches_manual_formula,
+        test_topk_keeps_expected_support_and_minimum_one_entry,
+        test_qsgd_compression_matches_seeded_formula_and_bit_granularity,
         test_soteria_masks_representation_during_gradient_generation,
         test_soteria_keeps_embedding_gradients_for_proxy_metrics,
+        test_soteria_sample_dims_path_runs,
         test_bert_seq_class_structure,
+        test_mixup_changes_gradients_via_representation_mixing,
+        test_mixup_falls_back_for_small_batches_and_non_seq_class,
         test_lrb_signed_projection_is_reproducible_and_not_plain_pooling,
         test_lrb_hybrid_sensitivity_uses_empirical_calibration,
     ]

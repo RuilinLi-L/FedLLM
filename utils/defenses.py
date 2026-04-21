@@ -143,21 +143,35 @@ def topk_sparsification(grads, keep_ratio: float):
     return tuple(out)
 
 
-def gradient_compression(grads, n_bits: int):
-    """Per-tensor uniform quantization to n_bits (symmetric around zero)."""
+def gradient_compression(grads, n_bits: int, seed: int = 0):
+    """Per-tensor QSGD-style stochastic quantization with L2-norm scaling."""
     if n_bits < 1:
         raise ValueError("defense_n_bits must be >= 1")
-    levels = 2**n_bits - 1
+
+    levels = float(2**n_bits - 1)
     out = []
-    for g in grads:
+    for idx, g in enumerate(grads):
         if g is None:
             out.append(None)
             continue
-        g_f = g.float()
-        max_abs = g_f.abs().max().clamp(min=1e-12)
-        scaled = g_f / max_abs
-        q = torch.round((scaled + 1.0) * 0.5 * levels) / levels * 2.0 - 1.0
-        q = q * max_abs
+
+        g_f = g.detach().float()
+        norm = g_f.norm()
+        norm_value = float(norm.item())
+        if norm_value <= 1e-12:
+            out.append(torch.zeros_like(g))
+            continue
+
+        abs_scaled = g_f.abs() * (levels / norm_value)
+        lower = torch.floor(abs_scaled)
+        lower = lower.clamp(max=levels)
+        prob = (abs_scaled - lower).clamp(min=0.0, max=1.0)
+
+        gen = _make_generator(seed + 104729 * (idx + 1), g.device)
+        rnd = torch.rand(prob.shape, device=g.device, dtype=torch.float32, generator=gen)
+        quantized_levels = lower + (rnd < prob).to(dtype=torch.float32)
+        quantized_levels = quantized_levels.clamp(max=levels)
+        q = g_f.sign() * (norm_value * quantized_levels / levels)
         out.append(q.to(dtype=g.dtype))
     return tuple(out)
 
@@ -300,7 +314,7 @@ def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
     elif defense == "topk":
         g = topk_sparsification(g, float(args.defense_topk_ratio))
     elif defense == "compression":
-        g = gradient_compression(g, int(args.defense_n_bits))
+        g = gradient_compression(g, int(args.defense_n_bits), seed=seed)
     elif defense == "dager":
         if model_wrapper is None or batch is None or labels is None:
             raise ValueError("dager defense requires model_wrapper, batch, labels")

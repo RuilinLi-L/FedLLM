@@ -49,7 +49,7 @@ class TrainingDefenseModelWrapper:
             return self.model.model.embed_tokens(batch["input_ids"])
         raise AssertionError("Unreachable model family")
 
-    def _seq_class_logits_from_embeds(self, batch, inputs_embeds, representation_mask=None):
+    def _seq_class_representation_from_embeds(self, batch, inputs_embeds, representation_mask=None):
         family = self._model_family()
         attn = batch.get("attention_mask")
 
@@ -77,8 +77,7 @@ class TrainingDefenseModelWrapper:
             representation = hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
             if representation_mask is not None:
                 representation = representation * representation_mask
-            logits = self.model.score(representation)
-            return logits, representation
+            return representation
 
         if family == "bert":
             bert = self.model.bert
@@ -97,8 +96,7 @@ class TrainingDefenseModelWrapper:
                 representation = sequence_output[:, 0]
             if representation_mask is not None:
                 representation = representation * representation_mask
-            logits = self.model.classifier(self.model.dropout(representation))
-            return logits, representation
+            return representation
 
         if family == "llama":
             position_ids = torch.arange(
@@ -124,10 +122,42 @@ class TrainingDefenseModelWrapper:
             representation = hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
             if representation_mask is not None:
                 representation = representation * representation_mask
-            logits = self.model.score(representation)
-            return logits, representation
+            return representation
 
         raise AssertionError("Unreachable model family")
+
+    def _seq_class_logits_from_representation(self, representation):
+        family = self._model_family()
+
+        if family == "gpt2":
+            return self.model.score(representation)
+        if family == "bert":
+            return self.model.classifier(self.model.dropout(representation))
+        if family == "llama":
+            return self.model.score(representation)
+        raise AssertionError("Unreachable model family")
+
+    def _seq_class_logits_from_embeds(self, batch, inputs_embeds, representation_mask=None):
+        representation = self._seq_class_representation_from_embeds(
+            batch,
+            inputs_embeds,
+            representation_mask=representation_mask,
+        )
+        logits = self._seq_class_logits_from_representation(representation)
+        return logits, representation
+
+    def _compute_standard_grads(self, batch, labels, create_graph=False):
+        self.model.zero_grad(set_to_none=True)
+        outputs = self.model(
+            **{k: v for k, v in batch.items() if k != "labels"},
+            labels=labels.view(-1).long(),
+        )
+        return torch.autograd.grad(
+            outputs.loss,
+            self.trainable_parameters(),
+            create_graph=create_graph,
+            allow_unused=True,
+        )
 
     def compute_per_example_grads(self, batch, labels, create_graph=False, sample_grad_fn=None):
         flat_labels = labels.view(-1).long()
@@ -136,13 +166,10 @@ class TrainingDefenseModelWrapper:
             sample_batch = {k: v[idx:idx + 1] for k, v in batch.items() if k != "labels"}
             sample_labels = flat_labels[idx:idx + 1]
             if sample_grad_fn is None:
-                self.model.zero_grad(set_to_none=True)
-                outputs = self.model(**sample_batch, labels=sample_labels)
-                grad = torch.autograd.grad(
-                    outputs.loss,
-                    self.trainable_parameters(),
+                grad = self._compute_standard_grads(
+                    sample_batch,
+                    sample_labels,
                     create_graph=create_graph,
-                    allow_unused=True,
                 )
             else:
                 grad = sample_grad_fn(
@@ -157,23 +184,19 @@ class TrainingDefenseModelWrapper:
         return grad_list
 
     def compute_grads_mixup(self, batch, labels, create_graph=False):
+        if getattr(self.args, "task", "seq_class") != "seq_class":
+            return self._compute_standard_grads(batch, labels, create_graph=create_graph)
         if batch["input_ids"].shape[0] < 2:
-            self.model.zero_grad(set_to_none=True)
-            outputs = self.model(**{k: v for k, v in batch.items() if k != "labels"}, labels=labels.view(-1).long())
-            return torch.autograd.grad(
-                outputs.loss,
-                self.trainable_parameters(),
-                create_graph=create_graph,
-                allow_unused=True,
-            )
+            return self._compute_standard_grads(batch, labels, create_graph=create_graph)
 
         alpha = float(getattr(self.args, "defense_mixup_alpha", 1.0))
         lam = float(torch.distributions.Beta(alpha, alpha).sample().item())
         labels = labels.view(-1).long()
         perm = torch.randperm(batch["input_ids"].shape[0], device=batch["input_ids"].device)
         emb = self._seq_class_input_embeds(batch)
-        emb_mixed = lam * emb + (1.0 - lam) * emb[perm]
-        logits, _ = self._seq_class_logits_from_embeds(batch, emb_mixed)
+        representation = self._seq_class_representation_from_embeds(batch, emb)
+        representation_mixed = lam * representation + (1.0 - lam) * representation[perm]
+        logits = self._seq_class_logits_from_representation(representation_mixed)
         loss = lam * F.cross_entropy(logits, labels) + (1.0 - lam) * F.cross_entropy(logits, labels[perm])
         self.model.zero_grad(set_to_none=True)
         return torch.autograd.grad(

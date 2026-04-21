@@ -247,7 +247,7 @@ class ModelWrapper():
 
         raise NotImplementedError(f'Seq-class embeddings not implemented for {self.args.model_path}')
 
-    def _seq_class_logits_from_embeds(self, batch, inputs_embeds, representation_mask=None):
+    def _seq_class_representation_from_embeds(self, batch, inputs_embeds, representation_mask=None):
         model = self.model
         attn = batch.get('attention_mask')
 
@@ -275,8 +275,7 @@ class ModelWrapper():
             representation = hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
             if representation_mask is not None:
                 representation = representation * representation_mask
-            logits = model.score(representation)
-            return logits, representation
+            return representation
 
         if self.args.model_path in ['bert-base-uncased']:
             bert = model.bert
@@ -291,8 +290,7 @@ class ModelWrapper():
                 representation = sequence_output[:, 0]
             if representation_mask is not None:
                 representation = representation * representation_mask
-            logits = model.classifier(model.dropout(representation))
-            return logits, representation
+            return representation
 
         if self.args.model_path in [
             'meta-llama/Llama-2-7b-hf',
@@ -326,10 +324,36 @@ class ModelWrapper():
             representation = hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
             if representation_mask is not None:
                 representation = representation * representation_mask
-            logits = model.score(representation)
-            return logits, representation
+            return representation
 
         raise NotImplementedError(f'Seq-class forward not implemented for {self.args.model_path}')
+
+    def _seq_class_logits_from_representation(self, representation):
+        if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
+            return self.model.score(representation)
+
+        if self.args.model_path in ['bert-base-uncased']:
+            return self.model.classifier(self.model.dropout(representation))
+
+        if self.args.model_path in [
+            'meta-llama/Llama-2-7b-hf',
+            'meta-llama/Llama-2-70b-hf',
+            'meta-llama/Meta-Llama-3-8B',
+            'meta-llama/Meta-Llama-3.1-8B',
+            'meta-llama/Meta-Llama-3-70B',
+        ]:
+            return self.model.score(representation)
+
+        raise NotImplementedError(f'Seq-class classifier head not implemented for {self.args.model_path}')
+
+    def _seq_class_logits_from_embeds(self, batch, inputs_embeds, representation_mask=None):
+        representation = self._seq_class_representation_from_embeds(
+            batch,
+            inputs_embeds,
+            representation_mask=representation_mask,
+        )
+        logits = self._seq_class_logits_from_representation(representation)
+        return logits, representation
 
     def compute_per_example_grads(self, batch, y_labels, create_graph=False, sample_grad_fn=None):
         if self.args.algo == 'fedavg':
@@ -410,8 +434,9 @@ class ModelWrapper():
 
     def compute_grads_mixup(self, batch, y_labels, create_graph=False):
         """
-        Embedding-level MixUp for seq_class: mixed embeddings and mixed CE loss.
-        Falls back to standard gradients for next_token_pred or batch_size < 2.
+        Representation-level manifold MixUp for seq_class.
+
+        Falls back to standard gradients for non-seq_class tasks or batch_size < 2.
         """
         batch, y_labels, dev = self._prepare_grad_context(batch, y_labels)
         try:
@@ -427,8 +452,9 @@ class ModelWrapper():
             perm = torch.randperm(batch_size, device=batch['input_ids'].device)
             lam = float(torch.distributions.Beta(alpha, alpha).sample().item())
             emb = self._seq_class_input_embeds(batch)
-            emb_mixed = lam * emb + (1.0 - lam) * emb[perm]
-            logits, _ = self._seq_class_logits_from_embeds(batch, emb_mixed)
+            representation = self._seq_class_representation_from_embeds(batch, emb)
+            representation_mixed = lam * representation + (1.0 - lam) * representation[perm]
+            logits = self._seq_class_logits_from_representation(representation_mixed)
             loss = lam * F.cross_entropy(logits, labels) + (1.0 - lam) * F.cross_entropy(logits, labels[perm])
             self.model.zero_grad(set_to_none=True)
             return torch.autograd.grad(
