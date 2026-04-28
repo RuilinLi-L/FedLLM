@@ -9,6 +9,7 @@ from utils.functional import remove_padding
 from utils.data import TextDataset
 from args_factory import get_args
 from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
+from utils.gpu import resolve_cuda_device
 import time
 
 from scipy.optimize import linear_sum_assignment
@@ -17,6 +18,8 @@ import itertools
 from tqdm import tqdm
 # old seed: 100
 args = get_args()
+args.device = resolve_cuda_device(args.device)
+print(f"[dager] Using device: {args.device}", flush=True)
 np.random.seed(args.rng_seed)
 torch.manual_seed(args.rng_seed)
 

@@ -8,6 +8,7 @@ from utils.filtering_encoder import filter_encoder
 from utils.filtering_decoder import filter_decoder
 from utils.functional import get_top_B_in_span, check_if_in_span, remove_padding, filter_outliers, get_span_dists
 from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
+from utils.gpu import resolve_cuda_device
 from args_factory import get_args
 import time
 
@@ -15,6 +16,8 @@ from scipy.optimize import linear_sum_assignment
 
 # old seed: 100
 args = get_args()
+args.device = resolve_cuda_device(args.device)
+print(f"[dager] Using device: {args.device}", flush=True)
 np.random.seed(args.rng_seed)
 torch.manual_seed(args.rng_seed)
 

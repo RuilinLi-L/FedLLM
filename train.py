@@ -22,6 +22,7 @@ from utils.defense_common import (
     overwrite_gradients,
 )
 from utils.defenses import apply_defense, requires_gradient_generation_defense
+from utils.gpu import resolve_cuda_device
 from utils.seq_class_utils import (
     classification_metrics,
     load_seq_class_datasets,
@@ -232,7 +233,8 @@ def build_parser():
 
 def run_training(args, tracker: dict) -> None:
     set_random_seed(args.rng_seed)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_cuda_device("cuda") if torch.cuda.is_available() else "cpu"
+    print(f"[dager] Using device: {device}", flush=True)
     output_dir = resolve_default_output_dir(args)
     output_dir.mkdir(parents=True, exist_ok=True)
 
