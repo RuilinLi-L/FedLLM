@@ -214,6 +214,7 @@ def build_parser():
     parser.add_argument("--train_method", type=str, default="full", choices=["full", "lora"])
     parser.add_argument("--lora_r", type=int, default=None)
     parser.add_argument("--models_cache", type=str, default="./models_cache")
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -233,7 +234,7 @@ def build_parser():
 
 def run_training(args, tracker: dict) -> None:
     set_random_seed(args.rng_seed)
-    device = resolve_cuda_device("cuda") if torch.cuda.is_available() else "cpu"
+    device = resolve_cuda_device(args.device) if torch.cuda.is_available() else "cpu"
     print(f"[dager] Using device: {device}", flush=True)
     output_dir = resolve_default_output_dir(args)
     output_dir.mkdir(parents=True, exist_ok=True)

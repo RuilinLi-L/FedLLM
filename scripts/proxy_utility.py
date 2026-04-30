@@ -24,6 +24,7 @@ from utils.defense_common import (
     normalize_legacy_training_defense_args,
 )
 from utils.defenses import apply_defense, requires_gradient_generation_defense
+from utils.gpu import resolve_cuda_device
 from utils.seq_class_utils import (
     load_seq_class_datasets,
     load_seq_class_model_and_tokenizer,
@@ -187,6 +188,7 @@ def build_parser():
     parser.add_argument("--val_size", type=int, default=256)
     parser.add_argument("--eval_batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--noise", type=float, default=None)
     parser.add_argument("--pct_mask", type=float, default=None)
     parser.add_argument(
@@ -211,7 +213,11 @@ def main():
 
     try:
         set_random_seed(args.rng_seed)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            device = resolve_cuda_device(args.device)
+        else:
+            device = "cpu"
+        print(f"[dager] Using device: {device}", flush=True)
         model, tokenizer = load_seq_class_model_and_tokenizer(args)
         model = model.to(device)
         train_dataset, eval_dataset, data_collator = load_seq_class_datasets(args, tokenizer)

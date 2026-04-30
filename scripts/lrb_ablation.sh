@@ -79,7 +79,7 @@ Execution control:
   --dry_run                   Print commands without running
   --no_collect                Do not collect/summarize logs at the end
   --fail_fast                 Stop at the first failed command
-  --device DEVICE             Device for attack.py, default: cuda
+  --device DEVICE             Device for Python stages, default: cuda. Bare cuda auto-selects an idle visible GPU.
 
 Recommended formal run:
   tmux new -s lrb_ablation
@@ -661,6 +661,7 @@ for variant in "${SELECTED_VARIANTS[@]}"; do
           --batch_size "$BATCH_SIZE" \
           --model_path "$FINETUNED_PATH" \
           "${TOKENIZER_ARGS[@]}" \
+          --device "$DEVICE" \
           --models_cache "$CACHE_DIR" \
           --n_train_batches 100 \
           --val_size 256 \
@@ -683,6 +684,7 @@ for variant in "${SELECTED_VARIANTS[@]}"; do
           --save_every 0 \
           --model_path "$FINETUNED_PATH" \
           "${TOKENIZER_ARGS[@]}" \
+          --device "$DEVICE" \
           --models_cache "$CACHE_DIR" \
           --train_method full \
           --rng_seed "$seed" \
