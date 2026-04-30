@@ -81,9 +81,12 @@ def _visible_physical_indices(device_count: int) -> list[str] | None:
     return None
 
 
-def _torch_memory_mb(visible_index: int) -> tuple[int, int]:
-    with torch.cuda.device(visible_index):
-        free_bytes, total_bytes = torch.cuda.mem_get_info()
+def _torch_memory_mb(visible_index: int) -> tuple[int, int] | None:
+    try:
+        with torch.cuda.device(visible_index):
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+    except (RuntimeError, OSError):
+        return None
     return int(free_bytes // _MIB), int(total_bytes // _MIB)
 
 
@@ -94,7 +97,8 @@ def _gpu_snapshots() -> list[_GpuSnapshot]:
 
     snapshots: list[_GpuSnapshot] = []
     for visible_index in range(device_count):
-        free_mb, total_mb = _torch_memory_mb(visible_index)
+        free_mb = None
+        total_mb = None
         utilization = None
 
         if physical_indices is not None:
@@ -105,6 +109,16 @@ def _gpu_snapshots() -> list[_GpuSnapshot]:
                     free_mb = smi_free_mb
                 if smi_total_mb is not None:
                     total_mb = smi_total_mb
+
+        if free_mb is None or total_mb is None:
+            torch_memory = _torch_memory_mb(visible_index)
+            if torch_memory is None:
+                continue
+            torch_free_mb, torch_total_mb = torch_memory
+            if free_mb is None:
+                free_mb = torch_free_mb
+            if total_mb is None:
+                total_mb = torch_total_mb
 
         snapshots.append(
             _GpuSnapshot(
