@@ -1075,3 +1075,126 @@ In the current SST2/GPT2 full-gradient DAGER setting, the ablation shows that th
 3. full_lrb 当前过防御；
 4. Projection-LRB 是新的主方法候选；
 5. LoRA/PEFT 与 partial-gradient 是下一阶段最关键验证。
+
+## 13. 代码入口与运行命令
+
+本轮代码推进后，LRB 不再需要在脚本里手写一长串底层参数。统一入口是：
+
+```bash
+--defense lrb \
+--defense_lrb_preset proj_only \
+--defense_lrb_keep_ratio_sensitive 0.5
+```
+
+其中 `--defense_lrb_preset custom` 是默认值，表示完全保留旧行为：用户直接指定 `keep_ratio / clip_scale / noise / empirical_weight / projection` 等底层参数，代码不会自动覆盖。只要 `--defense lrb` 且 preset 不是 `custom`，preset 会覆盖对应 LRB 参数；`--defense_lrb_keep_ratio_sensitive` 作为主 keep ratio，也就是文档里记作 `k` 的低分辨率保留比例。
+
+### 13.1 已支持的 preset
+
+当前入口支持：
+
+```text
+identity_lrb
+clip_only
+proj_only
+proj_clip
+full_lrb
+pool_full
+rule_only
+empirical_only
+uniform_all_sensitive
+proj_rule_only
+proj_empirical_only
+proj_uniform
+proj_no_empirical
+```
+
+推荐把 `proj_only@0.5` 作为下一轮主候选，但 PEFT/LoRA 下必须同时跑 `proj_clip` 和 `full_lrb`，不能直接假设 projection-only 仍然最好。
+
+### 13.2 P0：proj_only keep-ratio sweep
+
+目标是验证 `proj_only` 不是只在 `k=0.5` 单点偶然有效，并找 privacy-utility Pareto 边界。
+
+```bash
+bash scripts/lrb_ablation.sh \
+  --mode all \
+  --variants proj_only \
+  --lrb_main_k 0.5 \
+  --n_inputs 100 \
+  --skip_existing
+```
+
+建议分别跑：
+
+```text
+k = 0.5 / 0.65 / 0.75 / 0.9
+```
+
+如果算力紧张，先用 `--mode privacy,train` 跑主指标；proxy 可以随后补。
+
+### 13.3 P0：projection-only 细消融
+
+目标是拆开 projection-only 中的 sensitivity 分配来源：结构规则、经验校准、全层统一 keep ratio。
+
+```bash
+bash scripts/lrb_ablation.sh \
+  --mode all \
+  --variants proj_only,proj_rule_only,proj_empirical_only,proj_uniform,proj_no_empirical \
+  --lrb_main_k 0.5 \
+  --n_inputs 100 \
+  --skip_existing
+```
+
+如果 `proj_no_empirical` 或 `proj_rule_only` 接近 `proj_only`，说明 empirical calibration 可以弱化或去掉，方法会更简单、运行也更轻。如果 `proj_uniform` 明显变差，则继续保留 layer-wise sensitivity allocation。
+
+### 13.4 P1：LoRA/PEFT 对照
+
+目标是回答关键边界问题：`proj_only` 在 full-gradient DAGER 下最好，不代表 LoRA/PEFT 下也必然最好。LoRA 梯度空间更低秩、更结构化，`full_lrb` 的 clipping 或 residual-space noise 有可能重新变得有价值。
+
+推荐命令：
+
+```bash
+bash scripts/peft_baselines.sh sst2 2 gpt2 100 \
+  --finetuned_path path/to/lora_checkpoint.pt \
+  --lora_r 8 \
+  --baseline_defense lrb \
+  --lrb_variants proj_only,proj_clip,full_lrb \
+  --lrb_main_k 0.5
+```
+
+为了和强 baseline 公平比较，还需要分别跑：
+
+```bash
+bash scripts/peft_baselines.sh sst2 2 gpt2 100 \
+  --finetuned_path path/to/lora_checkpoint.pt \
+  --lora_r 8 \
+  --baseline_defense topk \
+  --baseline_param 0.1
+
+bash scripts/peft_baselines.sh sst2 2 gpt2 100 \
+  --finetuned_path path/to/lora_checkpoint.pt \
+  --lora_r 8 \
+  --baseline_defense compression \
+  --baseline_param 8
+```
+
+这里的 PEFT/LoRA 仍然是 eval-first 攻击评估入口，不等价于“训练期 LoRA defense 已经完整支持所有 variant”。当前代码目标是先把 `none / proj_only / proj_clip / full_lrb / topk@0.1 / compression@8` 的 LoRA 对照跑通。
+
+### 13.5 Dry-run 与回归检查命令
+
+正式跑长实验前，建议先做 dry-run：
+
+```bash
+bash scripts/lrb_ablation.sh \
+  --mode privacy \
+  --n_inputs 1 \
+  --variants proj_only,proj_rule_only,proj_empirical_only \
+  --dry_run
+```
+
+同时检查旧入口仍可用：
+
+```bash
+bash scripts/lrb_ablation.sh --variants full_lrb --dry_run
+```
+
+预期 dry-run 命令里应出现 `--defense_lrb_preset <variant>` 和 `--defense_lrb_keep_ratio_sensitive <k>`。旧的直接底层参数命令仍可以通过 `--defense_lrb_preset custom` 或不传 preset 保持兼容。

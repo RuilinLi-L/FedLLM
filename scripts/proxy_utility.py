@@ -25,6 +25,7 @@ from utils.defense_common import (
 )
 from utils.defenses import apply_defense, requires_gradient_generation_defense
 from utils.gpu import resolve_cuda_device
+from utils.lrb_presets import apply_lrb_preset
 from utils.seq_class_utils import (
     load_seq_class_datasets,
     load_seq_class_model_and_tokenizer,
@@ -208,6 +209,7 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     normalize_legacy_training_defense_args(args)
+    apply_lrb_preset(args)
     install_terminal_logging(args)
     tracker = init_tracker(args)
 

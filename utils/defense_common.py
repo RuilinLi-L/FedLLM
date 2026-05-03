@@ -5,6 +5,8 @@ from typing import Sequence
 
 import torch
 
+from utils.lrb_presets import LRB_PRESET_CHOICES, lrb_preset_param_value
+
 
 DEFENSE_CHOICES = [
     "none",
@@ -77,6 +79,13 @@ def add_shared_defense_args(parser: ArgumentParser, *, default_grad_mode: str = 
         type=float,
         default=None,
         help="Optional element-wise random mask applied after the main defense.",
+    )
+    parser.add_argument(
+        "--defense_lrb_preset",
+        type=str,
+        default="custom",
+        choices=LRB_PRESET_CHOICES,
+        help="Named LRB preset. custom preserves the explicit low-level LRB arguments.",
     )
     parser.add_argument(
         "--defense_lrb_sensitive_n_layers",
@@ -226,6 +235,7 @@ def normalize_legacy_training_defense_args(args):
 
 def defense_param_spec(args) -> tuple[str, object]:
     defense = getattr(args, "defense", "none")
+    preset_value = lrb_preset_param_value(args)
     mapping = {
         "noise": ("defense_noise", getattr(args, "defense_noise", None)),
         "dpsgd": ("defense_noise", getattr(args, "defense_noise", None)),
@@ -237,8 +247,8 @@ def defense_param_spec(args) -> tuple[str, object]:
         ),
         "mixup": ("defense_mixup_alpha", getattr(args, "defense_mixup_alpha", None)),
         "lrb": (
-            "defense_lrb_keep_ratio_sensitive",
-            getattr(args, "defense_lrb_keep_ratio_sensitive", None),
+            "defense_lrb_preset" if preset_value is not None else "defense_lrb_keep_ratio_sensitive",
+            preset_value if preset_value is not None else getattr(args, "defense_lrb_keep_ratio_sensitive", None),
         ),
     }
     if defense == "none":

@@ -122,6 +122,40 @@ Treat local bash syntax validation as unavailable in this desktop environment an
 - Related Files: scripts/proxy_baselines.sh
 
 ---
+## [ERR-20260504-001] bash_startup_access_denied
+
+**Logged**: 2026-05-04T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: config
+
+### Summary
+Both the Windows `bash.exe` WSL shim and Git Bash fail before script execution in this Codex desktop sandbox, so `bash -n` and shell dry-runs cannot be completed locally.
+
+### Error
+```
+C:\Windows\system32\bash.exe
+Bash/Service/CreateInstance/E_ACCESSDENIED
+
+C:\Program Files\Git\bin\bash.exe
+fatal error - couldn't create signal pipe, Win32 error 5
+fatal error - CreateFileMapping ..., Win32 error 5
+```
+
+### Context
+- Commands attempted: `bash -n scripts/lrb_ablation.sh`, `bash -n scripts/peft_baselines.sh`, and Git Bash equivalents
+- Workspace: `D:\code\Projects\FedLLM`
+- Impact: Python syntax and preset parser checks were run with the workspace Python, but shell-script syntax and dry-run checks must be repeated in a Linux/Git Bash environment with process permissions.
+
+### Suggested Fix
+Run shell-script validation on the server or in an unsandboxed terminal: `bash -n scripts/lrb_ablation.sh`, `bash -n scripts/peft_baselines.sh`, then the documented `--dry_run` commands.
+
+### Metadata
+- Reproducible: yes
+- Related Files: scripts/lrb_ablation.sh, scripts/peft_baselines.sh
+- See Also: ERR-20260410-003, ERR-20260416-001
+
+---
 ## [ERR-20260416-002] codex-skill-install-home-write-denied
 
 **Logged**: 2026-04-16T20:20:00+08:00

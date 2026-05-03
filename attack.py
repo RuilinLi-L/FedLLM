@@ -9,6 +9,7 @@ from utils.filtering_decoder import filter_decoder
 from utils.functional import get_top_B_in_span, check_if_in_span, remove_padding, filter_outliers, get_span_dists
 from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
 from utils.gpu import resolve_cuda_device
+from utils.lrb_presets import lrb_preset_param_value
 from args_factory import get_args
 import time
 
@@ -83,6 +84,7 @@ def _record_rec_metrics(args, rec_status, rec_l1, rec_l1_maxB, rec_l2, rec_maxb_
 
 def _defense_param_spec(args):
     defense = getattr(args, 'defense', 'none')
+    preset_value = lrb_preset_param_value(args)
     mapping = {
         'noise': ('defense_noise', getattr(args, 'defense_noise', None)),
         'dpsgd': ('defense_noise', getattr(args, 'defense_noise', None)),
@@ -94,8 +96,8 @@ def _defense_param_spec(args):
         ),
         'mixup': ('defense_mixup_alpha', getattr(args, 'defense_mixup_alpha', None)),
         'lrb': (
-            'defense_lrb_keep_ratio_sensitive',
-            getattr(args, 'defense_lrb_keep_ratio_sensitive', None),
+            'defense_lrb_preset' if preset_value is not None else 'defense_lrb_keep_ratio_sensitive',
+            preset_value if preset_value is not None else getattr(args, 'defense_lrb_keep_ratio_sensitive', None),
         ),
     }
     if defense == 'none':

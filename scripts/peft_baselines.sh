@@ -20,10 +20,27 @@ fi
 
 BASELINE_DEFENSE=""
 BASELINE_PARAM=""
+LRB_VARIANTS_RAW=""
+LRB_MAIN_K="0.5"
 EXTRA=()
 
 ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup dager lrb )
 SUPPORTED_LORA_DEFENSES=( none noise topk compression lrb )
+KNOWN_LRB_PRESETS=(
+  identity_lrb
+  clip_only
+  proj_only
+  proj_clip
+  full_lrb
+  pool_full
+  rule_only
+  empirical_only
+  uniform_all_sensitive
+  proj_rule_only
+  proj_empirical_only
+  proj_uniform
+  proj_no_empirical
+)
 
 parse_script_args() {
   local idx=0
@@ -52,6 +69,30 @@ parse_script_args() {
         ;;
       --baseline_param=*)
         BASELINE_PARAM="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --lrb_variants)
+        if [ $((idx + 1)) -ge "${#RAW_EXTRA[@]}" ]; then
+          echo "[dager] --lrb_variants requires a value." >&2
+          exit 2
+        fi
+        LRB_VARIANTS_RAW="${RAW_EXTRA[$((idx + 1))]}"
+        idx=$((idx + 2))
+        ;;
+      --lrb_variants=*)
+        LRB_VARIANTS_RAW="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --lrb_main_k)
+        if [ $((idx + 1)) -ge "${#RAW_EXTRA[@]}" ]; then
+          echo "[dager] --lrb_main_k requires a value." >&2
+          exit 2
+        fi
+        LRB_MAIN_K="${RAW_EXTRA[$((idx + 1))]}"
+        idx=$((idx + 2))
+        ;;
+      --lrb_main_k=*)
+        LRB_MAIN_K="${arg#*=}"
         idx=$((idx + 1))
         ;;
       *)
@@ -102,6 +143,17 @@ is_supported_lora_defense() {
   return 1
 }
 
+is_known_lrb_variant() {
+  local variant="$1"
+  local item
+  for item in "${KNOWN_LRB_PRESETS[@]}"; do
+    if [ "$item" = "$variant" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 dager_param_slug() {
   printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | sed 's/__*/_/g' | sed 's/^_\|_$//g'
 }
@@ -124,7 +176,11 @@ dager_param_name() {
       printf 'defense_mixup_alpha'
       ;;
     lrb)
-      printf 'defense_lrb_keep_ratio_sensitive'
+      if [ -n "$LRB_VARIANTS_RAW" ]; then
+        printf 'defense_lrb_preset'
+      else
+        printf 'defense_lrb_keep_ratio_sensitive'
+      fi
       ;;
     *)
       printf 'n/a'
@@ -338,6 +394,27 @@ if [ "$BASELINE_DEFENSE" = "dager" ] && [ -n "$BASELINE_PARAM" ]; then
   exit 2
 fi
 
+if [ -n "$LRB_VARIANTS_RAW" ] && [ "$BASELINE_DEFENSE" != "lrb" ]; then
+  echo "[dager] --lrb_variants can only be used with --baseline_defense lrb." >&2
+  exit 2
+fi
+
+if [ -n "$LRB_VARIANTS_RAW" ] && [ -n "$BASELINE_PARAM" ]; then
+  echo "[dager] --lrb_variants cannot be combined with --baseline_param." >&2
+  exit 2
+fi
+
+LRB_VARIANTS=()
+if [ -n "$LRB_VARIANTS_RAW" ]; then
+  IFS=',' read -r -a LRB_VARIANTS <<< "$LRB_VARIANTS_RAW"
+  for variant in "${LRB_VARIANTS[@]}"; do
+    if ! is_known_lrb_variant "$variant"; then
+      echo "[dager] unknown LRB variant: ${variant}" >&2
+      exit 2
+    fi
+  done
+fi
+
 if ! has_attack_extra_flag "--finetuned_path"; then
   echo "[dager] peft_baselines.sh requires --finetuned_path PATH to a LoRA .pt/.pth checkpoint." >&2
   exit 2
@@ -385,6 +462,8 @@ header_line="===== run start $(date '+%Y-%m-%d %H:%M:%S') tag=peft_baselines arg
   echo "$header_line"
   echo "focus_baseline_defense=${BASELINE_DEFENSE:-all}"
   echo "focus_baseline_param=${BASELINE_PARAM:-all}"
+  echo "lrb_variants=${LRB_VARIANTS_RAW:-none}"
+  echo "lrb_main_k=${LRB_MAIN_K}"
   echo "selected_defenses=${selected_defenses[*]}"
   echo "train_method=lora"
   echo "supported_lora_defenses=${SUPPORTED_LORA_DEFENSES[*]}"
@@ -471,6 +550,19 @@ for defense in "${selected_defenses[@]}"; do
     echo "========== defense=${defense} (focused) =========="
   else
     echo "========== defense=${defense} (sweep) =========="
+  fi
+
+  if [ "$defense" = "lrb" ] && [ "${#LRB_VARIANTS[@]}" -gt 0 ]; then
+    for variant in "${LRB_VARIANTS[@]}"; do
+      log_base="lrb_${variant}_k$(dager_param_slug "$LRB_MAIN_K")"
+      param="${variant}@k=${LRB_MAIN_K}"
+      DEF_EXTRA=(
+        --defense_lrb_preset "$variant"
+        --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"
+      )
+      run_variant "$defense" "$log_base" "$param" "${DEF_EXTRA[@]}"
+    done
+    continue
   fi
 
   if [ "$defense" = "none" ]; then

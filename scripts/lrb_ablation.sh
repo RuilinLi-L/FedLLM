@@ -48,6 +48,10 @@ ALL_VARIANTS=(
   rule_only
   empirical_only
   uniform_all_sensitive
+  proj_rule_only
+  proj_empirical_only
+  proj_uniform
+  proj_no_empirical
 )
 
 usage() {
@@ -74,7 +78,8 @@ Execution control:
   --variants LIST             Comma-separated variants, or all. Default: all
                               Variants: none,identity_lrb,clip_only,proj_only,proj_clip,
                                         full_lrb,pool_full,rule_only,empirical_only,
-                                        uniform_all_sensitive
+                                        uniform_all_sensitive,proj_rule_only,
+                                        proj_empirical_only,proj_uniform,proj_no_empirical
   --skip_existing             Skip a log if it already contains a result summary
   --dry_run                   Print commands without running
   --no_collect                Do not collect/summarize logs at the end
@@ -231,112 +236,10 @@ variant_args() {
       DEFENSE="none"
       DEF_EXTRA=()
       ;;
-    identity_lrb)
+    identity_lrb|clip_only|proj_only|proj_clip|full_lrb|pool_full|rule_only|empirical_only|uniform_all_sensitive|proj_rule_only|proj_empirical_only|proj_uniform|proj_no_empirical)
       DEF_EXTRA=(
-        --defense_lrb_keep_ratio_sensitive 1.0
-        --defense_lrb_keep_ratio_other 1.0
-        --defense_lrb_clip_scale_sensitive 1000000
-        --defense_lrb_clip_scale_other 1000000
-        --defense_lrb_noise_sensitive 0
-        --defense_lrb_noise_other 0
-        --defense_lrb_empirical_weight 0
-        --defense_lrb_projection signed_pool
-      )
-      ;;
-    clip_only)
-      DEF_EXTRA=(
-        --defense_lrb_keep_ratio_sensitive 1.0
-        --defense_lrb_keep_ratio_other 1.0
-        --defense_lrb_clip_scale_sensitive 0.5
-        --defense_lrb_clip_scale_other 1.0
-        --defense_lrb_noise_sensitive 0
-        --defense_lrb_noise_other 0
-        --defense_lrb_empirical_weight 0.6
-        --defense_lrb_projection signed_pool
-      )
-      ;;
-    proj_only)
-      DEF_EXTRA=(
+        --defense_lrb_preset "$variant"
         --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"
-        --defense_lrb_keep_ratio_other 0.75
-        --defense_lrb_clip_scale_sensitive 1000000
-        --defense_lrb_clip_scale_other 1000000
-        --defense_lrb_noise_sensitive 0
-        --defense_lrb_noise_other 0
-        --defense_lrb_empirical_weight 0.6
-        --defense_lrb_projection signed_pool
-      )
-      ;;
-    proj_clip)
-      DEF_EXTRA=(
-        --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"
-        --defense_lrb_keep_ratio_other 0.75
-        --defense_lrb_clip_scale_sensitive 0.5
-        --defense_lrb_clip_scale_other 1.0
-        --defense_lrb_noise_sensitive 0
-        --defense_lrb_noise_other 0
-        --defense_lrb_empirical_weight 0.6
-        --defense_lrb_projection signed_pool
-      )
-      ;;
-    full_lrb)
-      DEF_EXTRA=(
-        --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"
-        --defense_lrb_keep_ratio_other 0.75
-        --defense_lrb_clip_scale_sensitive 0.5
-        --defense_lrb_clip_scale_other 1.0
-        --defense_lrb_noise_sensitive 0.03
-        --defense_lrb_noise_other 0.005
-        --defense_lrb_empirical_weight 0.6
-        --defense_lrb_projection signed_pool
-      )
-      ;;
-    pool_full)
-      DEF_EXTRA=(
-        --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"
-        --defense_lrb_keep_ratio_other 0.75
-        --defense_lrb_clip_scale_sensitive 0.5
-        --defense_lrb_clip_scale_other 1.0
-        --defense_lrb_noise_sensitive 0.03
-        --defense_lrb_noise_other 0.005
-        --defense_lrb_empirical_weight 0.6
-        --defense_lrb_projection pool
-      )
-      ;;
-    rule_only)
-      DEF_EXTRA=(
-        --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"
-        --defense_lrb_keep_ratio_other 0.75
-        --defense_lrb_clip_scale_sensitive 0.5
-        --defense_lrb_clip_scale_other 1.0
-        --defense_lrb_noise_sensitive 0.03
-        --defense_lrb_noise_other 0.005
-        --defense_lrb_empirical_weight 0
-        --defense_lrb_projection signed_pool
-      )
-      ;;
-    empirical_only)
-      DEF_EXTRA=(
-        --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"
-        --defense_lrb_keep_ratio_other 0.75
-        --defense_lrb_clip_scale_sensitive 0.5
-        --defense_lrb_clip_scale_other 1.0
-        --defense_lrb_noise_sensitive 0.03
-        --defense_lrb_noise_other 0.005
-        --defense_lrb_empirical_weight 1
-        --defense_lrb_projection signed_pool
-      )
-      ;;
-    uniform_all_sensitive)
-      DEF_EXTRA=(
-        --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"
-        --defense_lrb_keep_ratio_other "$LRB_MAIN_K"
-        --defense_lrb_clip_scale_sensitive 0.5
-        --defense_lrb_clip_scale_other 0.5
-        --defense_lrb_noise_sensitive 0.03
-        --defense_lrb_noise_other 0.03
-        --defense_lrb_empirical_weight 0
-        --defense_lrb_projection signed_pool
       )
       ;;
     *)

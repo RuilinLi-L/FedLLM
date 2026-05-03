@@ -2,6 +2,7 @@ import argparse
 import time
 import sys
 
+from utils.lrb_presets import LRB_PRESET_CHOICES, apply_lrb_preset
 from utils.peft_utils import validate_lora_eval_args
 
 def get_args(argv=None):
@@ -111,6 +112,13 @@ def get_args(argv=None):
         type=float,
         default=1.0,
         help='Beta(alpha, alpha) for MixUp mixing coefficient.',
+    )
+    parser.add_argument(
+        '--defense_lrb_preset',
+        type=str,
+        default='custom',
+        choices=LRB_PRESET_CHOICES,
+        help='Named LRB preset. custom preserves the explicit low-level LRB arguments.',
     )
     parser.add_argument(
         '--defense_lrb_sensitive_n_layers',
@@ -256,6 +264,7 @@ def get_args(argv=None):
     if argv is None:
        argv = sys.argv[1:]
     args=parser.parse_args(argv)
+    apply_lrb_preset(args)
 
     if args.log_file:
         from utils.terminal_log import install_terminal_log
