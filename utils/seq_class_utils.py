@@ -5,7 +5,6 @@ import warnings
 from pathlib import Path
 
 import numpy as np
-import peft
 import torch
 from datasets import load_dataset
 from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef
@@ -14,6 +13,8 @@ from transformers import (
     AutoTokenizer,
     DataCollatorWithPadding,
 )
+
+from .peft_utils import apply_lora_adapter
 
 
 def set_random_seed(seed: int) -> None:
@@ -164,8 +165,13 @@ def load_seq_class_model_and_tokenizer(args):
         model.config.pad_token_id = tokenizer.pad_token_id
 
     if getattr(args, "train_method", "full") == "lora":
-        lora_cfg = peft.LoraConfig(r=args.lora_r, target_modules=["q_proj"])
-        model = peft.LoraModel(model, lora_cfg, "default")
+        model = apply_lora_adapter(
+            model,
+            model_path=args.model_path,
+            lora_r=args.lora_r,
+            checkpoint_path=getattr(args, "finetuned_path", None),
+            unwrap_base_model=False,
+        )
 
     tokenizer.model_max_length = 512
     return model, tokenizer

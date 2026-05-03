@@ -1,11 +1,11 @@
 import os
 import torch
 import torch.nn.functional as F
-import peft
 import numpy as np
 import warnings
 from utils.ext import update_causal_mask
 from utils.partial_models import add_partial_forward_gpt2, add_partial_forward_bert, add_partial_forward_llama
+from utils.peft_utils import apply_lora_adapter
 from constants import config
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
 from utils.functional import get_layer_decomp
@@ -14,7 +14,7 @@ class ModelWrapper():
     def __init__(self, args):
         assert (args.model_path in ['bert-base-uncased', 'gpt2', 'openai-community/gpt2-large', 'meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-70b-hf', 'meta-llama/Meta-Llama-3-8B', 'meta-llama/Meta-Llama-3.1-8B', 'meta-llama/Meta-Llama-3-70B']),\
             'Model is not yet supported - add it to assertion list and specify implementation details'
-        access_token = os.environ['HF_TOKEN']
+        access_token = os.environ.get('HF_TOKEN')
         self.args = args
         model_kwargs = {'cache_dir': args.cache_dir} if args.cache_dir is not None else {}
 
@@ -50,7 +50,10 @@ class ModelWrapper():
         g_cpu = torch.Generator(device=self.model.device)
         g_cpu.manual_seed(0)
         self.model.eval()
-        self.tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=True, token=access_token, cache_dir = args.cache_dir)
+        tokenizer_kwargs = {"use_fast": True, "cache_dir": args.cache_dir}
+        if access_token:
+            tokenizer_kwargs["token"] = access_token
+        self.tokenizer = AutoTokenizer.from_pretrained(args.model_path, **tokenizer_kwargs)
         self.tokenizer.model_max_length = 512
         
         if args.pad == 'left':
@@ -69,6 +72,15 @@ class ModelWrapper():
             self.pad_token = self.model.config.eos_token_id
             self.tokenizer.add_special_tokens({'pad_token': self.tokenizer.eos_token})
             self.embeddings_weight_nopos = self.model.transformer.wte.weight.unsqueeze(0)
+
+            if args.train_method == 'lora':
+                self.model = apply_lora_adapter(
+                    self.model,
+                    model_path=args.model_path,
+                    lora_r=args.lora_r,
+                    checkpoint_path=args.finetuned_path,
+                    unwrap_base_model=True,
+                )
             
             self.emb_size = self.model.config.n_embd
             add_partial_forward_gpt2(self.model.transformer)
@@ -101,10 +113,13 @@ class ModelWrapper():
                 self.model.config.pad_token_id = self.tokenizer.eos_token_id
             
             if args.train_method == 'lora' and args.finetuned_path is not None:
-                lora_cfg = peft.LoraConfig(r=args.lora_r,target_modules=['q_proj'])
-                self.model = peft.LoraModel(self.model, lora_cfg, 'default')
-                self.model.load_state_dict(torch.load(args.finetuned_path, map_location=torch.device('cpu')))
-                self.model = self.model.model
+                self.model = apply_lora_adapter(
+                    self.model,
+                    model_path=args.model_path,
+                    lora_r=args.lora_r,
+                    checkpoint_path=args.finetuned_path,
+                    unwrap_base_model=True,
+                )
                 self.layer_ids = list(range(0,64,2))
             else:
                 if args.task == 'seq_class' and args.finetuned_path is None:
@@ -113,8 +128,13 @@ class ModelWrapper():
                     #self.model.lm_head.weight.data.normal_(mean=0.0, std=1e-6)
                     
                 if args.train_method == 'lora':
-                    lora_cfg = peft.LoraConfig(r=args.lora_r,target_modules=['q_proj'])
-                    self.full_model = peft.LoraModel(self.model, lora_cfg, "default")
+                    self.full_model = apply_lora_adapter(
+                        self.model,
+                        model_path=args.model_path,
+                        lora_r=args.lora_r,
+                        checkpoint_path=None,
+                        unwrap_base_model=False,
+                    )
                     self.model = self.full_model.model
                     self.layer_ids = list(range(1,64,2))
                     

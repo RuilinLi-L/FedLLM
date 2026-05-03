@@ -88,6 +88,14 @@ To run BERT (with heuristics disabled):
 To run DAGER on GPT-2 under LoRA finetuning (by default run at rank $r=256$):
 > ./scripts/lora.sh DATASET BATCH\_SIZE <--rank\_tol RANK\_TOL>
 
+For the general PEFT/LoRA evaluation entrypoint (GPT-2 and Llama families):
+> ./scripts/peft_eval.sh DATASET BATCH\_SIZE MODEL\_PATH N\_INPUTS --finetuned_path PATH --lora_r R [extra args...]
+
+For the PEFT/LoRA baseline sweep entrypoint:
+> ./scripts/peft\_baselines.sh DATASET BATCH\_SIZE MODEL\_PATH N\_INPUTS --finetuned_path PATH --lora_r R [extra args...]
+
+*NOTE*: `./scripts/lora.sh` is kept as a compatibility wrapper around the new PEFT entrypoint and still uses the historical default Llama setup.
+
 *NOTE*: for the experiment on LLaMa-2 on Rotten Tomatoes for batch size 128, it is recommended to use the following command for speed up and numerical stability:
 > ./llama.sh rotten\_tomatoes 128 --rank\_tol 1e-11 --l1\_span\_thresh 1e-4 --l2\_span_thresh 5e-10
 

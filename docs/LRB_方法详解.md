@@ -26,12 +26,13 @@
 - 统一防御入口在 `utils/defenses.py`，当 `defense == "lrb"` 时会调用 `apply_lrb_defense(...)`。
 - 参数定义在 `args_factory.py`。
 - baseline 语义说明在 `DEFENSE_BASELINES.md`。
-- `LRB_EXPERIMENT_RUNBOOK.md` 明确写了：当前 `train.py` 还没有 `--defense lrb` 的训练时 hook。
+- 训练期 full fine-tuning 路径已经通过 `train.py` / `scripts/utility_baselines.sh` 接通 `--defense lrb`。
 
 所以当前版本的准确定位是：
 
 - 它已经能在现有攻击/评估流程里对梯度做防御变换。
-- 但它还不是一个已经完整接入训练主循环的“训练时 LRB”版本。
+- 它已经能在 `train_method=full` 的完整训练 utility 流程里作为训练期 defense 使用。
+- 但它还没有接通 LoRA/PEFT 训练期 defense，也还不是包含 forward-side representation bottleneck 的完整 HLRB 版本。
 
 这点很重要。严谨地说，当前仓库里的 `LRB` 是：
 

@@ -375,6 +375,7 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "model_path",
         "batch_size",
         "train_method",
+        "lora_r",
         "num_epochs",
         "seed",
         "defense",
@@ -514,6 +515,8 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
         key = (
             row.get("dataset", ""),
             row.get("batch_size", row.get("train_batch_size", "")),
+            row.get("train_method", row.get("train_train_method", "full")),
+            row.get("lora_r", row.get("train_lora_r", "")),
             row.get("defense", row.get("train_defense", "none")),
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
@@ -522,11 +525,13 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
 
     out: list[dict] = []
     for key, items in sorted(grouped.items()):
-        dataset, batch_size, defense, param_name, param_value = key
+        dataset, batch_size, train_method, lora_r, defense, param_name, param_value = key
         row = {
             "log_kind": "utility_summary",
             "dataset": dataset,
             "batch_size": batch_size,
+            "train_method": train_method,
+            "lora_r": lora_r,
             "defense": defense,
             "defense_param_name": param_name,
             "defense_param_value": param_value,
@@ -573,6 +578,8 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
         key = (
             row.get("dataset", row.get("dataset_guess", "")),
             row.get("batch_size", row.get("batch_size_guess", "")),
+            row.get("train_method", "full"),
+            row.get("lora_r", ""),
             row.get("defense", "none"),
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
@@ -581,10 +588,12 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
 
     out: list[dict] = []
     for key, items in sorted(grouped.items()):
-        dataset, batch_size, defense, param_name, param_value = key
+        dataset, batch_size, train_method, lora_r, defense, param_name, param_value = key
         row = {
             "dataset": dataset,
             "batch_size": batch_size,
+            "train_method": train_method,
+            "lora_r": lora_r,
             "defense": defense,
             "defense_param_name": param_name,
             "defense_param_value": param_value,
@@ -630,13 +639,20 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         (
             row.get("dataset", ""),
             row.get("batch_size", ""),
+            row.get("train_method", "full"),
+            row.get("lora_r", ""),
             row.get("defense", ""),
             row.get("defense_param_value", ""),
         ): row
         for row in attack_rows
     }
     none_index = {
-        (row.get("dataset", ""), row.get("batch_size", "")): row
+        (
+            row.get("dataset", ""),
+            row.get("batch_size", ""),
+            row.get("train_method", "full"),
+            row.get("lora_r", ""),
+        ): row
         for row in utility_rows
         if row.get("defense") == "none"
     }
@@ -645,11 +661,13 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
     for utility in utility_rows:
         dataset = utility.get("dataset", "")
         batch_size = utility.get("batch_size", "")
+        train_method = utility.get("train_method", "full")
+        lora_r = utility.get("lora_r", "")
         defense = utility.get("defense", "")
         param_value = utility.get("defense_param_value", "")
 
         row = dict(utility)
-        attack = attack_index.get((dataset, batch_size, defense, param_value))
+        attack = attack_index.get((dataset, batch_size, train_method, lora_r, defense, param_value))
         if attack is not None:
             row["rec_token_mean"] = attack.get("rec_token_mean", "")
             row["agg_rouge1_fm"] = attack.get("agg_rouge1_fm", "")
@@ -657,7 +675,9 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row["agg_r1fm_r2fm"] = attack.get("agg_r1fm_r2fm", "")
 
         acc = _to_float(row.get("eval_accuracy"))
-        none_acc = _to_float(none_index.get((dataset, batch_size), {}).get("eval_accuracy"))
+        none_acc = _to_float(
+            none_index.get((dataset, batch_size, train_method, lora_r), {}).get("eval_accuracy")
+        )
         rec_token = _to_float(row.get("rec_token_mean"))
         row["utility_drop"] = f"{(none_acc - acc):.6f}" if acc is not None and none_acc is not None else ""
         row["privacy_score"] = f"{(1.0 - rec_token):.6f}" if rec_token is not None else ""

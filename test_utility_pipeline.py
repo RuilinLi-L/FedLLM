@@ -44,6 +44,8 @@ def test_collect_parser_splits_multi_variant_attack_summaries():
 ===== RESULT SUMMARY START =====
 dataset=sst2
 batch_size=2
+train_method=lora
+lora_r=16
 defense=lrb
 defense_param_name=defense_lrb_keep_ratio_sensitive
 defense_param_value=0.200000
@@ -54,6 +56,8 @@ agg_rouge2_fm=0.000000
 ===== RESULT SUMMARY START =====
 dataset=sst2
 batch_size=2
+train_method=lora
+lora_r=16
 defense=lrb
 defense_param_name=defense_lrb_keep_ratio_sensitive
 defense_param_value=0.350000
@@ -66,6 +70,8 @@ agg_rouge2_fm=0.500000
     assert_true(len(rows) == 2, "collector should emit one row per summary block")
     assert_true(rows[0]["defense_param_value"] == "0.200000", "first variant should be preserved")
     assert_true(rows[1]["defense_param_value"] == "0.350000", "second variant should be preserved")
+    assert_true(rows[0]["train_method"] == "lora", "attack summary should preserve train_method")
+    assert_true(rows[0]["lora_r"] == "16", "attack summary should preserve lora_r")
 
 
 def test_collect_parser_reads_train_and_proxy_summaries():
@@ -73,6 +79,8 @@ def test_collect_parser_reads_train_and_proxy_summaries():
 ===== TRAIN RESULT SUMMARY START =====
 dataset=sst2
 batch_size=2
+train_method=lora
+lora_r=16
 defense=lrb
 defense_param_name=defense_lrb_keep_ratio_sensitive
 defense_param_value=0.200000
@@ -102,6 +110,8 @@ delta_val_accuracy_mean=-0.020000
     assert_true(proxy_rows[0]["log_kind"] == "proxy_utility", "proxy summary should classify as proxy_utility")
     assert_true(train_rows[0]["eval_accuracy"] == "0.850000", "train eval accuracy should come from summary block")
     assert_true(proxy_rows[0]["grad_cosine_mean"] == "0.750000", "proxy metrics should come from summary block")
+    assert_true(train_rows[0]["train_method"] == "lora", "train summary should preserve train_method")
+    assert_true(train_rows[0]["lora_r"] == "16", "train summary should preserve lora_r")
 
 
 def test_tradeoff_join_uses_none_as_utility_anchor():
@@ -110,6 +120,8 @@ def test_tradeoff_join_uses_none_as_utility_anchor():
             "log_kind": "train",
             "dataset": "sst2",
             "batch_size": "2",
+            "train_method": "full",
+            "lora_r": "",
             "defense": "none",
             "defense_param_name": "n/a",
             "defense_param_value": "n/a",
@@ -124,6 +136,24 @@ def test_tradeoff_join_uses_none_as_utility_anchor():
             "log_kind": "train",
             "dataset": "sst2",
             "batch_size": "2",
+            "train_method": "lora",
+            "lora_r": "16",
+            "defense": "none",
+            "defense_param_name": "n/a",
+            "defense_param_value": "n/a",
+            "seed": "101",
+            "result_status": "ok",
+            "eval_accuracy": "0.900000",
+            "eval_macro_f1": "0.900000",
+            "final_train_loss": "0.400000",
+            "total_train_time": "00:01:00",
+        },
+        {
+            "log_kind": "train",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "lora",
+            "lora_r": "16",
             "defense": "lrb",
             "defense_param_name": "defense_lrb_keep_ratio_sensitive",
             "defense_param_value": "0.200000",
@@ -138,6 +168,8 @@ def test_tradeoff_join_uses_none_as_utility_anchor():
             "log_kind": "attack_dager",
             "dataset": "sst2",
             "batch_size": "2",
+            "train_method": "full",
+            "lora_r": "",
             "defense": "none",
             "defense_param_name": "n/a",
             "defense_param_value": "n/a",
@@ -149,6 +181,21 @@ def test_tradeoff_join_uses_none_as_utility_anchor():
             "log_kind": "attack_dager",
             "dataset": "sst2",
             "batch_size": "2",
+            "train_method": "lora",
+            "lora_r": "16",
+            "defense": "none",
+            "defense_param_name": "n/a",
+            "defense_param_value": "n/a",
+            "rec_token_mean": "0.900000",
+            "agg_rouge1_fm": "80.000000",
+            "agg_rouge2_fm": "70.000000",
+        },
+        {
+            "log_kind": "attack_dager",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "lora",
+            "lora_r": "16",
             "defense": "lrb",
             "defense_param_name": "defense_lrb_keep_ratio_sensitive",
             "defense_param_value": "0.200000",
@@ -161,6 +208,8 @@ def test_tradeoff_join_uses_none_as_utility_anchor():
     lrb_row = next(row for row in tradeoff if row.get("defense") == "lrb")
     assert_true(lrb_row["utility_drop"] == "0.020000", "utility drop should be none_accuracy - method_accuracy")
     assert_true(lrb_row["privacy_score"] == "1.000000", "privacy score should be 1 - rec_token_mean")
+    assert_true(lrb_row["train_method"] == "lora", "tradeoff rows should keep train_method as a primary key")
+    assert_true(lrb_row["lora_r"] == "16", "tradeoff rows should keep lora_r as a distinguishing field")
 
 
 def main():

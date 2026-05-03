@@ -129,6 +129,8 @@ def _emit_result_summary(args):
         ('model_path', args.model_path),
         ('finetuned_path', args.finetuned_path if args.finetuned_path is not None else 'n/a'),
         ('batch_size', args.batch_size),
+        ('train_method', getattr(args, 'train_method', 'full')),
+        ('lora_r', getattr(args, 'lora_r', None)),
         ('defense', getattr(args, 'defense', 'none')),
         ('defense_param_name', defense_param_name),
         ('defense_param_value', defense_param_value),

@@ -2,6 +2,8 @@
 
 本文说明如何测试 `LRB` 和各类 defense baselines 对 utility 的影响，并统一汇总出：
 
+最新分析见 [DEFENSE_BASELINES_N100_ANALYSIS_20260502.md](./DEFENSE_BASELINES_N100_ANALYSIS_20260502.md)。截至 2026-05-02，`lrb@0.35/0.5`、`topk@0.3`、`compression@16` 已有 utility 结果；其中 `lrb@0.5` 是当前 LRB utility 最好的点，但在 full-gradient DAGER 的 privacy-utility tradeoff 上仍弱于 `topk@0.1` 和 `compression@8`。
+
 - `proxy utility` 快速对照结果
 - 训练期 `end-to-end utility` 结果
 - `privacy-utility tradeoff` 联表

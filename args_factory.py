@@ -2,6 +2,8 @@ import argparse
 import time
 import sys
 
+from utils.peft_utils import validate_lora_eval_args
+
 def get_args(argv=None):
     parser = argparse.ArgumentParser(description='DAGER attack')
 
@@ -284,4 +286,5 @@ def get_args(argv=None):
             print('waited: ',time.time()-start_wait)
             args.neptune_id = args.neptune['sys/id'].fetch()
         print( '\n\n\nArgs:', *argv, '\n\n\n' ) 
+    validate_lora_eval_args(args)
     return args

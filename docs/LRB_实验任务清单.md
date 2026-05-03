@@ -1,5 +1,7 @@
 # LRB 实验任务清单与运行手册
 
+> 2026-05-02 更新：`n_inputs=100` defense sweep 和后续 utility 点已补齐，详见 [DEFENSE_BASELINES_N100_ANALYSIS_20260502.md](./DEFENSE_BASELINES_N100_ANALYSIS_20260502.md)。`lrb@0.5` 是当前 LRB utility 最好的 operating point（`acc=0.892584`, drop `0.020642`），更适合作为消融和论文主配置；`lrb@0.2` 只应作为 privacy 强但过防御的历史/对照点。`topk@0.3` 与 `compression@16` 已完成 utility，下一步应优先做 LRB 机制消融、PEFT/LoRA 和 partial-gradient，而不是继续把这些点列为待补。
+
 这份文档把前面讨论过的路线整理成一个可直接执行的实验 runbook，目标是把当前 `LRB` 从“在 DAGER 下表现很强”推进成“结论更稳、证据更完整、可以扩展到 PEFT 与其他场景”的主方法。
 
 相关背景材料：
@@ -41,14 +43,14 @@
 - 主模型：`gpt2`
 - 任务：`seq_class`
 - batch size：`2`
-- 第一阶段优先比较的 `LRB` 主参数：
-  - `defense_lrb_keep_ratio_sensitive=0.2`
-  - 备选：`defense_lrb_keep_ratio_sensitive=0.35`
+- 第一阶段论文/消融主参数：
+  - `defense_lrb_keep_ratio_sensitive=0.5`
+  - `0.2 / 0.35` 保留为过防御历史点和 sensitivity 对照
 
 当前 strongest baselines 的参考档位可先固定为：
 
-- `topk=0.1`
-- `compression=8` 或 `16`
+- `topk=0.1`，并在 Pareto 表中保留 `topk=0.3`
+- `compression=8`，并在 Pareto 表中保留 `compression=16`
 - `mixup=0.3`
 - `noise=5e-4`
 - `dpsgd=5e-4`
@@ -69,8 +71,13 @@
 | A4 | 扩展到更多 dataset / backbone | 验证不是单一 setting 偶然结果 | 是 | 跨数据/模型结果 |
 | B1 | 进入 PEFT / LoRA 场景 | 对齐 PEFT leakage 威胁模型 | 是 | `LRB` 在 PEFT 下的结果 |
 | B2 | 测 partial-gradient / layer-level 泄露 | 对齐更一般的攻击面 | 否，需先补入口 | layer-level leakage 结果 |
-| C1 | 做 utility 评估 | 证明不是只会“打断攻击” | 否，需先补训练时 hook | accuracy / F1 / loss 表 |
+| C1 | 做 utility 评估 | 证明不是只会“打断攻击” | 部分可直接执行：proxy / train hook 已就绪，但完整全表成本高 | accuracy / F1 / loss 表 |
 | C2 | 汇总结论与论文叙事 | 把阶段结论固化成可写文稿的结果 | 是 | 一段可进论文的结论 |
+
+补充说明：
+
+- 当前仓库里 `train.py` 已支持统一的 `--defense` 训练期入口，`scripts/utility_baselines.sh` 和 `scripts/proxy_baselines.sh` 也已经打通了 utility 流程。
+- 因此 `C1` 的主要瓶颈不再是“没有训练 hook”，而是 `LRB` 训练期开销较大，实际推进时更适合先跑 focused utility（例如 `none + lrb` 或 `none + topk/compression`），再决定是否补完整主表。
 
 ## 4. A1 锁定 LRB 默认配置
 
@@ -81,7 +88,11 @@
 - 一个主配置
 - 一个备选配置
 
-建议第一轮只比较两个关键值：
+当前已完成 utility 结果显示，主配置应优先锁定：
+
+- `keep_ratio_sensitive=0.5`
+
+同时保留两个历史/敏感性对照：
 
 - `keep_ratio_sensitive=0.2`
 - `keep_ratio_sensitive=0.35`
@@ -93,7 +104,7 @@
 ```bash
 --defense lrb \
 --defense_lrb_sensitive_n_layers 2 \
---defense_lrb_keep_ratio_sensitive 0.2 \
+--defense_lrb_keep_ratio_sensitive 0.5 \
 --defense_lrb_keep_ratio_other 0.75 \
 --defense_lrb_clip_scale_sensitive 0.5 \
 --defense_lrb_clip_scale_other 1.0 \
@@ -105,16 +116,16 @@
 
 ### 4.3 命令
 
-#### A1-1 主配置候选：0.2
+#### A1-1 主配置候选：0.5
 
 ```bash
 bash scripts/defense_baselines.sh sst2 2 gpt2 100 \
   --baseline_defense lrb \
-  --baseline_param 0.2 \
+  --baseline_param 0.5 \
   --finetuned_path ./models/gpt2-ft-rt
 ```
 
-#### A1-2 备选配置候选：0.35
+#### A1-2 历史/敏感性对照：0.35
 
 ```bash
 bash scripts/defense_baselines.sh sst2 2 gpt2 100 \
@@ -125,8 +136,8 @@ bash scripts/defense_baselines.sh sst2 2 gpt2 100 \
 
 ### 4.4 预期产出
 
-- 一个主配置，例如 `LRB@0.2`
-- 一个备选配置，例如 `LRB@0.35`
+- 一个主配置，例如 `LRB@0.5`
+- 历史/敏感性对照，例如 `LRB@0.2`、`LRB@0.35`
 - 对应的关键指标：
   - `rec_token_mean`
   - `agg_rouge1_fm`
@@ -153,7 +164,7 @@ bash scripts/defense_baselines.sh sst2 2 gpt2 100 \
 ```bash
 bash scripts/defense_baselines.sh sst2 2 gpt2 100 \
   --baseline_defense lrb \
-  --baseline_param 0.2 \
+  --baseline_param 0.5 \
   --finetuned_path ./models/gpt2-ft-rt
 ```
 
@@ -290,7 +301,7 @@ python attack.py --dataset sst2 --split val --n_inputs 100 --batch_size 2 \
   --finetuned_path ./models/gpt2-ft-rt \
   --defense lrb \
   --defense_lrb_sensitive_n_layers 2 \
-  --defense_lrb_keep_ratio_sensitive 0.2 \
+  --defense_lrb_keep_ratio_sensitive 0.5 \
   --defense_lrb_keep_ratio_other 0.75 \
   --defense_lrb_clip_scale_sensitive 1000000 \
   --defense_lrb_clip_scale_other 1000000 \
@@ -330,7 +341,7 @@ python attack.py --dataset sst2 --split val --n_inputs 100 --batch_size 2 \
   --finetuned_path ./models/gpt2-ft-rt \
   --defense lrb \
   --defense_lrb_sensitive_n_layers 2 \
-  --defense_lrb_keep_ratio_sensitive 0.2 \
+  --defense_lrb_keep_ratio_sensitive 0.5 \
   --defense_lrb_keep_ratio_other 0.75 \
   --defense_lrb_clip_scale_sensitive 0.5 \
   --defense_lrb_clip_scale_other 1.0 \
@@ -350,7 +361,7 @@ python attack.py --dataset sst2 --split val --n_inputs 100 --batch_size 2 \
   --finetuned_path ./models/gpt2-ft-rt \
   --defense lrb \
   --defense_lrb_sensitive_n_layers 2 \
-  --defense_lrb_keep_ratio_sensitive 0.2 \
+  --defense_lrb_keep_ratio_sensitive 0.5 \
   --defense_lrb_keep_ratio_other 0.75 \
   --defense_lrb_clip_scale_sensitive 0.5 \
   --defense_lrb_clip_scale_other 1.0 \
@@ -391,7 +402,7 @@ python attack.py --dataset sst2 --split val --n_inputs 100 --batch_size 2 \
 ```bash
 bash scripts/defense_baselines.sh cola 2 gpt2 100 \
   --baseline_defense lrb \
-  --baseline_param 0.2 \
+  --baseline_param 0.5 \
   --finetuned_path ./models/gpt2-ft-rt
 ```
 
@@ -400,7 +411,7 @@ bash scripts/defense_baselines.sh cola 2 gpt2 100 \
 ```bash
 bash scripts/defense_baselines.sh rte 2 gpt2 100 \
   --baseline_defense lrb \
-  --baseline_param 0.2 \
+  --baseline_param 0.5 \
   --finetuned_path ./models/gpt2-ft-rt
 ```
 
@@ -409,7 +420,7 @@ bash scripts/defense_baselines.sh rte 2 gpt2 100 \
 ```bash
 bash scripts/defense_baselines.sh sst2 2 bert-base-uncased 100 \
   --baseline_defense lrb \
-  --baseline_param 0.2 \
+  --baseline_param 0.5 \
   --finetuned_path ./models/bert-base-uncased-ft-rt
 ```
 
@@ -442,7 +453,7 @@ bash scripts/lora.sh sst2 2 gpt2 100 none 0
 如果 `scripts/lora.sh` 已支持透传当前 defense 参数，可以直接跑：
 
 ```bash
-bash scripts/lora.sh sst2 2 gpt2 100 lrb 0.2
+bash scripts/lora.sh sst2 2 gpt2 100 lrb 0.5
 ```
 
 如果 `scripts/lora.sh` 还没有透传全部 `LRB` 细参数，则建议直接改成显式命令，确保下面这些参数能传进去：
@@ -455,7 +466,7 @@ python attack.py --dataset sst2 --split val --n_inputs 100 --batch_size 2 \
   --finetuned_path ./models/gpt2-lora-ft-rt \
   --defense lrb \
   --defense_lrb_sensitive_n_layers 2 \
-  --defense_lrb_keep_ratio_sensitive 0.2 \
+  --defense_lrb_keep_ratio_sensitive 0.5 \
   --defense_lrb_keep_ratio_other 0.75 \
   --defense_lrb_clip_scale_sensitive 0.5 \
   --defense_lrb_clip_scale_other 1.0 \
@@ -513,7 +524,7 @@ python attack.py --dataset sst2 --split val --n_inputs 100 --batch_size 2 \
   --finetuned_path ./models/gpt2-ft-rt \
   --gradient_layer_subset last2 \
   --defense lrb \
-  --defense_lrb_keep_ratio_sensitive 0.2
+  --defense_lrb_keep_ratio_sensitive 0.5
 ```
 
 ### 9.4 预期产出
@@ -538,20 +549,20 @@ python attack.py --dataset sst2 --split val --n_inputs 100 --batch_size 2 \
 
 ```bash
 python train.py --dataset sst2 --model_path gpt2 --task seq_class \
-  --train_method full --epochs 3 --batch_size 8 \
+  --train_method full --num_epochs 3 --batch_size 8 \
   --output_dir ./models/gpt2-ft-clean
 ```
 
-### 10.3 训练时 LRB hook 完成后的目标命令
+### 10.3 当前可直接运行的训练时 LRB 命令
 
-等训练阶段支持 `LRB` 后，再做：
+当前 `train_method=full` 已支持 `--defense lrb`，可以直接做：
 
 ```bash
 python train.py --dataset sst2 --model_path gpt2 --task seq_class \
-  --train_method full --epochs 3 --batch_size 8 \
+  --train_method full --num_epochs 3 --batch_size 8 \
   --defense lrb \
   --defense_lrb_sensitive_n_layers 2 \
-  --defense_lrb_keep_ratio_sensitive 0.2 \
+  --defense_lrb_keep_ratio_sensitive 0.5 \
   --defense_lrb_keep_ratio_other 0.75 \
   --defense_lrb_clip_scale_sensitive 0.5 \
   --defense_lrb_clip_scale_other 1.0 \
@@ -600,7 +611,7 @@ python scripts/collect_experiment_logs.py log/runs \
 | soteria | 30 |  |  |  |  |
 | topk | 0.1 |  |  |  |  |
 | compression | 8/16 |  |  |  |  |
-| lrb | 0.2 |  |  |  |  |
+| lrb | 0.5 |  |  |  |  |
 
 #### 表 2：LRB ablations
 

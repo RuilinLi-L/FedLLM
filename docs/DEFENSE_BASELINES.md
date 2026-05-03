@@ -2,6 +2,8 @@
 
 本文说明如何在 DAGER 攻击框架下测试防御 baselines，并统一查看结果日志。
 
+最新 `n_inputs=100` 结果分析见 [DEFENSE_BASELINES_N100_ANALYSIS_20260502.md](./DEFENSE_BASELINES_N100_ANALYSIS_20260502.md)。其中需要注意：`compression@2` 在该 run 中只完成 `56/100` 后因 SVD 不收敛失败，因此正式结论里不要把它和 `compression@4/8/16` 一起算作稳定成功点。
+
 当前支持的 baseline 为：
 
 - `none`
