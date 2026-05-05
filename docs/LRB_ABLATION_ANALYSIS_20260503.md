@@ -1150,12 +1150,42 @@ bash scripts/lrb_ablation.sh \
 
 目标是回答关键边界问题：`proj_only` 在 full-gradient DAGER 下最好，不代表 LoRA/PEFT 下也必然最好。LoRA 梯度空间更低秩、更结构化，`full_lrb` 的 clipping 或 residual-space noise 有可能重新变得有价值。
 
-推荐命令：
+第一步先准备真实的 LoRA checkpoint。不要直接使用 `path/to/lora_checkpoint.pt` 这类占位符；当前 `attack.py` 会在参数解析阶段检查文件是否存在，路径不存在会直接失败。GPT-2 + SST2 推荐先用：
+
+```bash
+python train.py \
+  --dataset sst2 \
+  --task seq_class \
+  --model_path gpt2 \
+  --train_method lora \
+  --lora_r 16 \
+  --batch_size 2 \
+  --num_epochs 1 \
+  --models_cache ./models_cache \
+  --output_dir ./models/gpt2_sst2_lora_r16
+```
+
+训练结束后使用最终保存的 `.pt` 文件：
+
+```bash
+export LORA_CKPT=./models/gpt2_sst2_lora_r16/final.pt
+```
+
+这里的 `--lora_r` 必须和训练时一致。上面训练用的是 `16`，下面评测也统一用 `16`。正式长跑前先做一次 smoke test：
+
+```bash
+bash scripts/peft_eval.sh sst2 2 gpt2 1 \
+  --finetuned_path "$LORA_CKPT" \
+  --lora_r 16 \
+  --defense none
+```
+
+smoke test 通过后，再跑 LoRA/PEFT 的 LRB variant 对照：
 
 ```bash
 bash scripts/peft_baselines.sh sst2 2 gpt2 100 \
-  --finetuned_path path/to/lora_checkpoint.pt \
-  --lora_r 8 \
+  --finetuned_path "$LORA_CKPT" \
+  --lora_r 16 \
   --baseline_defense lrb \
   --lrb_variants proj_only,proj_clip,full_lrb \
   --lrb_main_k 0.5
@@ -1165,19 +1195,19 @@ bash scripts/peft_baselines.sh sst2 2 gpt2 100 \
 
 ```bash
 bash scripts/peft_baselines.sh sst2 2 gpt2 100 \
-  --finetuned_path path/to/lora_checkpoint.pt \
-  --lora_r 8 \
+  --finetuned_path "$LORA_CKPT" \
+  --lora_r 16 \
   --baseline_defense topk \
   --baseline_param 0.1
 
 bash scripts/peft_baselines.sh sst2 2 gpt2 100 \
-  --finetuned_path path/to/lora_checkpoint.pt \
-  --lora_r 8 \
+  --finetuned_path "$LORA_CKPT" \
+  --lora_r 16 \
   --baseline_defense compression \
   --baseline_param 8
 ```
 
-这里的 PEFT/LoRA 仍然是 eval-first 攻击评估入口，不等价于“训练期 LoRA defense 已经完整支持所有 variant”。当前代码目标是先把 `none / proj_only / proj_clip / full_lrb / topk@0.1 / compression@8` 的 LoRA 对照跑通。
+这里的 PEFT/LoRA 仍然是 eval-first 攻击评估入口，不等价于“训练期 LoRA defense 已经完整支持所有 variant”。当前代码目标是先把 `none / proj_only / proj_clip / full_lrb / topk@0.1 / compression@8` 的 LoRA 对照跑通。完整的 LoRA 使用细节以 `docs/PEFT_EVAL.md` 为准。
 
 ### 13.5 Dry-run 与回归检查命令
 

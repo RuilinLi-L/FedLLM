@@ -137,3 +137,16 @@ HLRB 可以分成两个层面：
 **工作性质判断**
 
 整体来看，这项工作是一个以**实践和问题为导向的研究型工作**，而不是偏理论研究。主要关注点在于真实联邦大模型训练场景下隐私风险是否存在、风险有多严重，以及在现实算力和系统约束下能否有效缓解这些风险。理论分析更多作为对实验现象和防御机制的解释和支撑，而不是核心目标。
+
+**当前实验落地口径（2026-05）**
+
+当前代码已经形成三条可执行主线：
+
+1. **full-gradient DAGER baseline / defense**
+   用 `scripts/defense_baselines.sh` 和 `scripts/lrb_ablation.sh` 跑 `none / topk / compression / lrb` 等 full-gradient 攻击评测与 LRB 消融。最新消融结论是：`proj_only@0.5` 是当前 `SST2 + GPT2 + batch=2` full-gradient DAGER 下最重要的 LRB 主候选，`full_lrb@0.5` 保留为完整强防御对照。
+
+2. **LoRA / PEFT eval-first 攻击面**
+   先用 `train.py --train_method lora` 训练并保存真实的 LoRA `.pt` checkpoint，例如 `./models/gpt2_sst2_lora_r16/final.pt`；再用 `scripts/peft_eval.sh` 或 `scripts/peft_baselines.sh` 评估 LoRA 更新下的 `none / proj_only / proj_clip / full_lrb / topk@0.1 / compression@8`。当前 eval 只支持本地 `.pt/.pth` LoRA `state_dict`，不能直接传 PEFT adapter 目录。
+
+3. **下一阶段泛化验证**
+   LoRA/PEFT 和 partial-gradient 是验证 LRB 是否具有跨攻击面结构性价值的关键。文档执行入口以 `docs/PEFT_EVAL.md` 和 `docs/LRB_ABLATION_ANALYSIS_20260503.md` 的第 13 节为准，避免继续使用 `path/to/lora_checkpoint.pt` 这类占位符路径。
