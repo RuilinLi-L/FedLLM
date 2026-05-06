@@ -42,7 +42,7 @@ has_extra_flag() {
 }
 
 if ! has_extra_flag "--finetuned_path"; then
-  echo "[dager] peft_eval.sh requires --finetuned_path PATH to a LoRA .pt/.pth checkpoint." >&2
+  echo "[dager] peft_eval.sh requires --finetuned_path PATH to a PEFT adapter directory or LoRA .pt/.pth checkpoint." >&2
   exit 2
 fi
 

@@ -416,7 +416,7 @@ if [ -n "$LRB_VARIANTS_RAW" ]; then
 fi
 
 if ! has_attack_extra_flag "--finetuned_path"; then
-  echo "[dager] peft_baselines.sh requires --finetuned_path PATH to a LoRA .pt/.pth checkpoint." >&2
+  echo "[dager] peft_baselines.sh requires --finetuned_path PATH to a PEFT adapter directory or LoRA .pt/.pth checkpoint." >&2
   exit 2
 fi
 

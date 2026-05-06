@@ -24,6 +24,7 @@ from utils.defense_common import (
 from utils.defenses import apply_defense, requires_gradient_generation_defense
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import apply_lrb_preset
+from utils.peft_utils import save_lora_checkpoint
 from utils.seq_class_utils import (
     classification_metrics,
     load_seq_class_datasets,
@@ -72,11 +73,13 @@ def save_model(model, tokenizer, save_path: Path, train_method: str) -> str:
         tokenizer.save_pretrained(str(save_path))
         return str(save_path)
 
-    torch.save(model.state_dict(), str(save_path))
-    tokenizer_dir = save_path.parent / f"{save_path.stem}_tokenizer"
-    tokenizer_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer.save_pretrained(str(tokenizer_dir))
-    return str(save_path)
+    saved = save_lora_checkpoint(model, tokenizer, save_path)
+    print(
+        "[dager] Saved LoRA adapter to "
+        f"{saved['adapter_path']} and legacy state_dict to {saved['legacy_state_dict_path']}",
+        flush=True,
+    )
+    return saved["primary_path"]
 
 
 def init_result_tracker(args) -> dict:
@@ -165,13 +168,11 @@ def evaluate_model(model, eval_loader, device, dataset_name: str) -> dict[str, f
 
 
 def prepare_training_defense(model, args, trainable_params):
-    if args.train_method == "full":
-        return TrainingDefenseModelWrapper(model, args, trainable_params)
-    if args.defense in {"dpsgd", "mixup", "soteria", "lrb", "dager"}:
+    if args.train_method == "lora" and args.defense in {"dpsgd", "mixup", "soteria", "dager"}:
         raise NotImplementedError(
             f"train_method={args.train_method} does not currently support --defense {args.defense!r}."
         )
-    return None
+    return TrainingDefenseModelWrapper(model, args, trainable_params)
 
 
 def apply_training_defense(model, wrapper, trainable_params, batch, labels, loss, args):
@@ -321,7 +322,7 @@ def run_training(args, tracker: dict) -> None:
         print("metric eval: ", eval_metrics)
 
     tracker["total_train_time"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - train_start))
-    final_path = output_dir / ("final" if args.train_method != "lora" else "final.pt")
+    final_path = output_dir / ("final" if args.train_method != "lora" else "final_adapter")
     tracker["final_model_path"] = save_model(model, tokenizer, final_path, args.train_method)
     print("END")
 

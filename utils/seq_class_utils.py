@@ -171,6 +171,7 @@ def load_seq_class_model_and_tokenizer(args):
             lora_r=args.lora_r,
             checkpoint_path=getattr(args, "finetuned_path", None),
             unwrap_base_model=False,
+            task=getattr(args, "task", "seq_class"),
         )
 
     tokenizer.model_max_length = 512

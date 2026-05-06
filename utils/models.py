@@ -80,6 +80,7 @@ class ModelWrapper():
                     lora_r=args.lora_r,
                     checkpoint_path=args.finetuned_path,
                     unwrap_base_model=True,
+                    task=args.task,
                 )
             
             self.emb_size = self.model.config.n_embd
@@ -119,6 +120,7 @@ class ModelWrapper():
                     lora_r=args.lora_r,
                     checkpoint_path=args.finetuned_path,
                     unwrap_base_model=True,
+                    task=args.task,
                 )
                 self.layer_ids = list(range(0,64,2))
             else:
@@ -134,6 +136,7 @@ class ModelWrapper():
                         lora_r=args.lora_r,
                         checkpoint_path=None,
                         unwrap_base_model=False,
+                        task=args.task,
                     )
                     self.model = self.full_model.model
                     self.layer_ids = list(range(1,64,2))
