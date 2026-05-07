@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run a single PEFT/LoRA evaluation through attack.py.
 # Usage:
-#   ./scripts/peft_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --finetuned_path PATH --lora_r R [extra attack args...]
+#   ./scripts/peft_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --finetuned_path PATH [--lora_r R] [extra attack args...]
 
 set -euo pipefail
 
@@ -16,7 +16,7 @@ dager_auto_log_enable "peft_eval" "$@"
 if [ "$#" -lt 4 ]; then
   cat >&2 <<EOF
 [dager] Usage:
-[dager]   ./scripts/peft_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --finetuned_path PATH --lora_r R [extra attack args...]
+[dager]   ./scripts/peft_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --finetuned_path PATH [--lora_r R] [extra attack args...]
 EOF
   exit 2
 fi
@@ -43,11 +43,6 @@ has_extra_flag() {
 
 if ! has_extra_flag "--finetuned_path"; then
   echo "[dager] peft_eval.sh requires --finetuned_path PATH to a PEFT adapter directory or LoRA .pt/.pth checkpoint." >&2
-  exit 2
-fi
-
-if ! has_extra_flag "--lora_r"; then
-  echo "[dager] peft_eval.sh requires --lora_r R." >&2
   exit 2
 fi
 

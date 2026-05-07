@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run PEFT/LoRA baseline sweeps through attack.py while recording unsupported variants.
 # Usage:
-#   ./scripts/peft_baselines.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --finetuned_path PATH --lora_r R [extra attack args...]
+#   ./scripts/peft_baselines.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --finetuned_path PATH [--lora_r R] [extra attack args...]
 
 set -euo pipefail
 
@@ -275,7 +275,7 @@ dager_fallback_summary_block() {
   local t_end="$6"
   cat <<EOF
 ===== RESULT SUMMARY START =====
-summary_version=1
+summary_version=2
 result_status=failed
 dataset=${DATASET}
 split=val
@@ -285,6 +285,13 @@ finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
 train_method=lora
 lora_r=$(attack_extra_value --lora_r || printf 'n/a')
+lora_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
+lora_checkpoint_type=n/a
+lora_adapter_r=n/a
+lora_adapter_target_modules=n/a
+lora_adapter_task_type=n/a
+lora_adapter_base_model=n/a
+lora_adapter_peft_type=n/a
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -314,7 +321,7 @@ dager_unsupported_summary_block() {
   local param="$2"
   cat <<EOF
 ===== RESULT SUMMARY START =====
-summary_version=1
+summary_version=2
 result_status=unsupported
 dataset=${DATASET}
 split=val
@@ -324,6 +331,13 @@ finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
 train_method=lora
 lora_r=$(attack_extra_value --lora_r || printf 'n/a')
+lora_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
+lora_checkpoint_type=n/a
+lora_adapter_r=n/a
+lora_adapter_target_modules=n/a
+lora_adapter_task_type=n/a
+lora_adapter_base_model=n/a
+lora_adapter_peft_type=n/a
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -417,11 +431,6 @@ fi
 
 if ! has_attack_extra_flag "--finetuned_path"; then
   echo "[dager] peft_baselines.sh requires --finetuned_path PATH to a PEFT adapter directory or LoRA .pt/.pth checkpoint." >&2
-  exit 2
-fi
-
-if ! has_attack_extra_flag "--lora_r"; then
-  echo "[dager] peft_baselines.sh requires --lora_r R." >&2
   exit 2
 fi
 

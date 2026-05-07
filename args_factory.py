@@ -260,6 +260,12 @@ def get_args(argv=None):
     #LoRA
     parser.add_argument('--train_method', type=str, default='full', choices=['full', 'lora'])
     parser.add_argument('--lora_r', type=int, default=None)
+    parser.add_argument(
+        '--lora_target_modules',
+        type=str,
+        default=None,
+        help='LoRA target module preset or comma-separated list. Defaults preserve the model-family baseline.',
+    )
 
     if argv is None:
        argv = sys.argv[1:]
@@ -275,6 +281,8 @@ def get_args(argv=None):
 
     if args.n_incorrect is None:
         args.n_incorrect = args.batch_size
+
+    validate_lora_eval_args(args)
 
     if args.neptune is not None:
         import neptune.new as neptune
@@ -295,5 +303,4 @@ def get_args(argv=None):
             print('waited: ',time.time()-start_wait)
             args.neptune_id = args.neptune['sys/id'].fetch()
         print( '\n\n\nArgs:', *argv, '\n\n\n' ) 
-    validate_lora_eval_args(args)
     return args

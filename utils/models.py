@@ -10,12 +10,59 @@ from constants import config
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
 from utils.functional import get_layer_decomp
 
+def select_lora_gradient_indices(parameter_names, target_modules=None, preferred_modules=None):
+    target_parts = []
+    if target_modules and target_modules != 'n/a':
+        target_parts = [
+            part.strip().lower()
+            for part in str(target_modules).split(',')
+            if part.strip() and part.strip() != 'all-linear'
+        ]
+    preferred_parts = [
+        part.strip().lower()
+        for part in (preferred_modules or [])
+        if str(part).strip()
+    ]
+
+    def is_adapter_name(name, *, prefer_a=False, preferred_only=False):
+        lower = name.lower()
+        if 'modules_to_save' in lower:
+            return False
+        if 'lora_' not in lower:
+            return False
+        if prefer_a and 'lora_a' not in lower:
+            return False
+        if target_parts and not any(part in lower for part in target_parts):
+            return False
+        if preferred_only and preferred_parts and not any(part in lower for part in preferred_parts):
+            return False
+        return True
+
+    for prefer_a, preferred_only in (
+        (True, True),
+        (True, False),
+        (False, True),
+        (False, False),
+    ):
+        selected = [
+            (idx, name)
+            for idx, name in enumerate(parameter_names)
+            if is_adapter_name(name, prefer_a=prefer_a, preferred_only=preferred_only)
+        ]
+        if selected:
+            return selected
+    return []
+
+
 class ModelWrapper():
     def __init__(self, args):
         assert (args.model_path in ['bert-base-uncased', 'gpt2', 'openai-community/gpt2-large', 'meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-70b-hf', 'meta-llama/Meta-Llama-3-8B', 'meta-llama/Meta-Llama-3.1-8B', 'meta-llama/Meta-Llama-3-70B']),\
             'Model is not yet supported - add it to assertion list and specify implementation details'
         access_token = os.environ.get('HF_TOKEN')
         self.args = args
+        self.full_model = None
+        self.lora_gradient_indices = []
+        self.lora_gradient_names = []
         model_kwargs = {'cache_dir': args.cache_dir} if args.cache_dir is not None else {}
 
         model_kwargs['pretrained_model_name_or_path'] = args.model_path if args.finetuned_path is None or args.train_method == 'lora' else args.finetuned_path
@@ -71,23 +118,27 @@ class ModelWrapper():
             self.model.config.pad_token_id = self.model.config.eos_token_id
             self.pad_token = self.model.config.eos_token_id
             self.tokenizer.add_special_tokens({'pad_token': self.tokenizer.eos_token})
-            self.embeddings_weight_nopos = self.model.transformer.wte.weight.unsqueeze(0)
-
             if args.train_method == 'lora':
                 self.model = apply_lora_adapter(
                     self.model,
                     model_path=args.model_path,
                     lora_r=args.lora_r,
                     checkpoint_path=args.finetuned_path,
-                    unwrap_base_model=True,
+                    unwrap_base_model=False,
                     task=args.task,
+                    target_modules=getattr(args, 'lora_target_modules', None),
                 )
-            
-            self.emb_size = self.model.config.n_embd
-            add_partial_forward_gpt2(self.model.transformer)
+                self.full_model = self.model
+                self.base_model = self._unwrap_model_for_attack(self.model)
+            else:
+                self.base_model = self.model
+
+            self.embeddings_weight_nopos = self.base_model.transformer.wte.weight.unsqueeze(0)
+            self.emb_size = self.base_model.config.n_embd
+            add_partial_forward_gpt2(self.base_model.transformer)
 
         elif args.model_path in ['bert-base-uncased']:
-          
+            self.base_model = self.model
             self.start_token = 101
             self.eos_token = 102
             self.pad_token = 0
@@ -119,9 +170,12 @@ class ModelWrapper():
                     model_path=args.model_path,
                     lora_r=args.lora_r,
                     checkpoint_path=args.finetuned_path,
-                    unwrap_base_model=True,
+                    unwrap_base_model=False,
                     task=args.task,
+                    target_modules=getattr(args, 'lora_target_modules', None),
                 )
+                self.full_model = self.model
+                self.base_model = self._unwrap_model_for_attack(self.model)
                 self.layer_ids = list(range(0,64,2))
             else:
                 if args.task == 'seq_class' and args.finetuned_path is None:
@@ -137,28 +191,80 @@ class ModelWrapper():
                         checkpoint_path=None,
                         unwrap_base_model=False,
                         task=args.task,
+                        target_modules=getattr(args, 'lora_target_modules', None),
                     )
-                    self.model = self.full_model.model
+                    self.model = self.full_model
+                    self.base_model = self._unwrap_model_for_attack(self.model)
                     self.layer_ids = list(range(1,64,2))
-                    
+
                 else:
+                    self.base_model = self.model
                     self.layer_ids = list(range(1,281,9))
-            
-            self.emb_size = self.model.config.hidden_size
-            self.embeddings_weight_nopos = self.model.model.embed_tokens.weight.unsqueeze(0)
-            add_partial_forward_llama(self.model.model)
-        
+
+            self.emb_size = self.base_model.config.hidden_size
+            self.embeddings_weight_nopos = self.base_model.model.embed_tokens.weight.unsqueeze(0)
+            add_partial_forward_llama(self.base_model.model)
+
         self.trainable_parameters = lambda: (param for param in self.model.parameters() if param.requires_grad)
+        self.trainable_parameter_names = self._trainable_parameter_names
+        if args.train_method == 'lora':
+            self._refresh_lora_gradient_inventory()
         config['START_TOKEN'] = self.start_token
         config['EOS_TOKEN'] = self.eos_token
         config['PAD_TOKEN'] = self.pad_token
         self.set_model_device(args.device)
+
+    def _unwrap_model_for_attack(self, model):
+        if hasattr(model, 'base_model') and hasattr(model.base_model, 'model'):
+            return model.base_model.model
+        if hasattr(model, 'model') and not hasattr(model, 'transformer'):
+            return model.model
+        return model
+
+    def _trainable_parameter_names(self):
+        return [name for name, param in self.model.named_parameters() if param.requires_grad]
+
+    def _refresh_lora_gradient_inventory(self):
+        names = self._trainable_parameter_names()
+        selected = select_lora_gradient_indices(
+            names,
+            getattr(self.args, 'lora_target_modules', None),
+            preferred_modules=self._lora_span_preferred_modules(),
+        )
+        adapter_indices = [idx for idx, _ in selected]
+        adapter_names = [name for _, name in selected]
+        if not adapter_indices:
+            raise ValueError(
+                'LoRA trainable parameter inventory is empty. Expected lora_A/lora_B adapter '
+                'parameters, excluding modules_to_save classifier heads.'
+            )
+        self.lora_gradient_indices = adapter_indices
+        self.lora_gradient_names = adapter_names
+
+    def _lora_span_preferred_modules(self):
+        if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
+            return ['c_attn']
+        if self.args.model_path in [
+            'meta-llama/Llama-2-7b-hf',
+            'meta-llama/Llama-2-70b-hf',
+            'meta-llama/Meta-Llama-3-8B',
+            'meta-llama/Meta-Llama-3.1-8B',
+            'meta-llama/Meta-Llama-3-70B',
+        ]:
+            return ['q_proj']
+        return []
+
+    def _classifier_model(self):
+        if self.args.train_method == 'lora' and hasattr(self.model, 'score'):
+            return self.model
+        return self.base_model
         
     def compute_grads_fed_avg(self, batch, labels, create_graph=False):
-        og_weights = [param.data.clone() for param in self.model.parameters()]
+        trainable_params = list(self.trainable_parameters())
+        og_weights = [param.data.clone() for param in trainable_params]
 
         self.model.eval()
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=self.args.avg_lr)
+        optimizer = torch.optim.SGD(trainable_params, lr=self.args.avg_lr)
 
         n_minib = batch['input_ids'].shape[0] // self.args.b_mini
         print(n_minib)
@@ -173,8 +279,8 @@ class ModelWrapper():
                 outs.loss.backward()
                 optimizer.step()
            
-        grad = [-(param.data.detach() - og_weights[i])/n_minib/self.args.avg_lr/self.args.avg_epochs for i, param in enumerate(self.model.parameters())]
-        for i, param in enumerate(self.model.parameters()):
+        grad = [-(param.data.detach() - og_weights[i])/n_minib/self.args.avg_lr/self.args.avg_epochs for i, param in enumerate(trainable_params)]
+        for i, param in enumerate(trainable_params):
             param.data = og_weights[i]
         self.model.eval()
         return grad
@@ -243,7 +349,7 @@ class ModelWrapper():
 
     def _seq_class_input_embeds(self, batch):
         if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
-            return self.model.transformer.wte(batch['input_ids'])
+            return self.base_model.transformer.wte(batch['input_ids'])
 
         if self.args.model_path in ['bert-base-uncased']:
             bert = self.model.bert
@@ -266,12 +372,12 @@ class ModelWrapper():
             'meta-llama/Meta-Llama-3.1-8B',
             'meta-llama/Meta-Llama-3-70B',
         ]:
-            return self.model.model.embed_tokens(batch['input_ids'])
+            return self.base_model.model.embed_tokens(batch['input_ids'])
 
         raise NotImplementedError(f'Seq-class embeddings not implemented for {self.args.model_path}')
 
     def _seq_class_representation_from_embeds(self, batch, inputs_embeds, representation_mask=None):
-        model = self.model
+        model = self.base_model
         attn = batch.get('attention_mask')
 
         if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
@@ -353,7 +459,7 @@ class ModelWrapper():
 
     def _seq_class_logits_from_representation(self, representation):
         if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
-            return self.model.score(representation)
+            return self._classifier_model().score(representation)
 
         if self.args.model_path in ['bert-base-uncased']:
             return self.model.classifier(self.model.dropout(representation))
@@ -365,7 +471,7 @@ class ModelWrapper():
             'meta-llama/Meta-Llama-3.1-8B',
             'meta-llama/Meta-Llama-3-70B',
         ]:
-            return self.model.score(representation)
+            return self._classifier_model().score(representation)
 
         raise NotImplementedError(f'Seq-class classifier head not implemented for {self.args.model_path}')
 
@@ -449,7 +555,7 @@ class ModelWrapper():
                         outs.loss.backward()
                 grad = tuple([
                     param.grad.detach().cpu() / self.args.grad_b
-                    for param in self.model.parameters()
+                    for param in self.trainable_parameters()
                 ])
             return grad
         finally:
@@ -493,20 +599,51 @@ class ModelWrapper():
         if self.args.precision == '8bit':
             return
         if self.args.model_path in ['meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-70b-hf', 'meta-llama/Meta-Llama-3-8B', 'meta-llama/Meta-Llama-3.1-8B', 'meta-llama/Meta-Llama-3-70B'] and device!='cpu':
-            self.model.model.embed_tokens.to(device)
-            self.model.model.rotary_emb.to(device)
+            if self.args.train_method == 'lora':
+                self.model.to(device)
+                return
+            self.base_model.model.embed_tokens.to(device)
+            self.base_model.model.rotary_emb.to(device)
             for i in range(self.args.n_layers):
-                self.model.model.layers[i].to(device)
+                self.base_model.model.layers[i].to(device)
         else:
             self.model.to(device)
 
     def get_matrices_expansions(self, true_grads, B=None, tol=None):
+        if self.args.train_method == 'lora':
+            grad_indices = self.lora_gradient_indices
+            grad_names = self.lora_gradient_names
+            if len(grad_indices) < self.args.n_layers:
+                raise ValueError(
+                    'LoRA DAGER span check needs at least args.n_layers adapter tensors; '
+                    f'found {len(grad_indices)} tensor(s): {grad_names}. '
+                    'Check --lora_target_modules and adapter_config.json.'
+                )
+        else:
+            grad_indices = self.layer_ids
+            grad_names = [str(idx) for idx in grad_indices]
+
+        rank_cap = None
+        for idx, name in zip(grad_indices[:self.args.n_layers], grad_names[:self.args.n_layers]):
+            if idx >= len(true_grads):
+                raise ValueError(
+                    f'Gradient index {idx} for {name} is outside true_grads '
+                    f'length {len(true_grads)}.'
+                )
+            grad = true_grads[idx]
+            if grad is None:
+                raise ValueError(f'Gradient tensor for {name} is None; cannot build DAGER span.')
+            if grad.ndim < 2:
+                raise ValueError(f'Gradient tensor for {name} must be matrix-like; got shape {tuple(grad.shape)}.')
+            current_cap = min(int(grad.shape[-2]), int(grad.shape[-1]))
+            rank_cap = current_cap if rank_cap is None else min(rank_cap, current_cap)
+        if rank_cap is None or rank_cap <= 0:
+            raise ValueError('No matrix-like gradients available for DAGER span decomposition.')
+
         if B is None:
             max_rank = 0
-            for i in self.layer_ids[:10]:
+            for i in grad_indices[:10]:
                 grad = true_grads[i]
-                if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
-                    grad = grad.T
                 if self.args.precision == 'half':
                     B = np.linalg.matrix_rank( grad.float().cpu() , tol=tol)
                 else:
@@ -516,13 +653,18 @@ class ModelWrapper():
             B = max_rank
         if self.args.algo == 'fedavg':
             B += 60
-        B = min(B, self.emb_size - self.args.rank_cutoff)
+        B = min(B, self.emb_size - self.args.rank_cutoff, rank_cap)
+        if B <= 0:
+            raise ValueError(
+                f'DAGER span rank must be positive after clipping; got B={B}, '
+                f'rank_cap={rank_cap}, emb_size={self.emb_size}, rank_cutoff={self.args.rank_cutoff}.'
+            )
         
         R_Qs = []
         
         for i in range(self.args.n_layers):
-            grad_Q = true_grads[self.layer_ids[i]]
-            if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
+            grad_Q = true_grads[grad_indices[i]]
+            if self.args.train_method != 'lora' and self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
                 grad_Q = grad_Q.T
             _, R_Q = get_layer_decomp(grad_Q, B=B, tol=tol, upcast=(self.args.precision=='half'))
             R_Q = R_Q.to(self.args.device)
@@ -537,13 +679,13 @@ class ModelWrapper():
             return emb
         
         elif self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
-            gpt_embeddings_weight_position = self.model.transformer.wpe.weight.unsqueeze(0)
+            gpt_embeddings_weight_position = self.base_model.transformer.wpe.weight.unsqueeze(0)
             emb = self.embeddings_weight_nopos.to(self.args.device) + gpt_embeddings_weight_position[0][pos:pos+1,None,:]
-            emb = self.model.transformer.h[0].ln_1(emb)
+            emb = self.base_model.transformer.h[0].ln_1(emb)
             return emb
         elif self.args.model_path in ['meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-70b-hf', 'meta-llama/Meta-Llama-3-8B', 'meta-llama/Meta-Llama-3.1-8B', 'meta-llama/Meta-Llama-3-70B']:
             emb = self.embeddings_weight_nopos.to(self.args.device)
-            return self.model.model.layers[0].input_layernorm(emb)
+            return self.base_model.model.layers[0].input_layernorm(emb)
         
     def get_layer_inputs(self, sentences, token_type_ids=None, attention_mask=None, layers=1):
         if self.args.model_path in ['bert-base-uncased']:
@@ -558,7 +700,7 @@ class ModelWrapper():
             return self.model.bert.get_hidden_states(input_ids=sentences, token_type_ids=token_type_ids, n_layers=layers)
         
         elif self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
-            return self.model.transformer.get_hidden_states(input_ids=sentences, attention_mask=attention_mask, n_layers=layers)
+            return self.base_model.transformer.get_hidden_states(input_ids=sentences, attention_mask=attention_mask, n_layers=layers)
         
         elif self.args.model_path in ['meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-70b-hf', 'meta-llama/Meta-Llama-3-8B', 'meta-llama/Meta-Llama-3.1-8B', 'meta-llama/Meta-Llama-3-70B']:
             position_ids = torch.arange(sentences.size(1)).unsqueeze(0).repeat(sentences.size(0), 1).to(self.args.device)
@@ -572,7 +714,7 @@ class ModelWrapper():
             #     emb = self.model.model.layers[i](emb, attention_mask=attention_mask, position_ids=position_ids)[0]# As end of sentence tokens have little gradient they are unreliable measures for sentence inclusion
             #     layer_inputs.append(self.model.model.layers[i+1].input_layernorm(emb))
             # return layer_inputs
-            return self.model.model.get_hidden_states(input_ids=sentences, position_ids=position_ids,attention_mask=attention_mask, n_layers=layers)
+            return self.base_model.model.get_hidden_states(input_ids=sentences, position_ids=position_ids,attention_mask=attention_mask, n_layers=layers)
         
     def is_bert(self):
         return self.args.model_path in ['bert-base-uncased']

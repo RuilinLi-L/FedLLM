@@ -278,6 +278,7 @@ def parse_train(text: str, meta: dict) -> list[dict]:
             "model_path",
             "train_method",
             "lora_r",
+            "lora_target_modules",
             "defense",
             "defense_noise",
         ):
@@ -376,6 +377,13 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "batch_size",
         "train_method",
         "lora_r",
+        "lora_target_modules",
+        "lora_checkpoint_type",
+        "lora_adapter_r",
+        "lora_adapter_target_modules",
+        "lora_adapter_task_type",
+        "lora_adapter_base_model",
+        "lora_adapter_peft_type",
         "num_epochs",
         "seed",
         "defense",
@@ -517,6 +525,7 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
             row.get("batch_size", row.get("train_batch_size", "")),
             row.get("train_method", row.get("train_train_method", "full")),
             row.get("lora_r", row.get("train_lora_r", "")),
+            row.get("lora_target_modules", row.get("train_lora_target_modules", "")),
             row.get("defense", row.get("train_defense", "none")),
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
@@ -525,13 +534,14 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
 
     out: list[dict] = []
     for key, items in sorted(grouped.items()):
-        dataset, batch_size, train_method, lora_r, defense, param_name, param_value = key
+        dataset, batch_size, train_method, lora_r, lora_target_modules, defense, param_name, param_value = key
         row = {
             "log_kind": "utility_summary",
             "dataset": dataset,
             "batch_size": batch_size,
             "train_method": train_method,
             "lora_r": lora_r,
+            "lora_target_modules": lora_target_modules,
             "defense": defense,
             "defense_param_name": param_name,
             "defense_param_value": param_value,
@@ -580,6 +590,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             row.get("batch_size", row.get("batch_size_guess", "")),
             row.get("train_method", "full"),
             row.get("lora_r", ""),
+            row.get("lora_target_modules", ""),
             row.get("defense", "none"),
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
@@ -588,12 +599,13 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
 
     out: list[dict] = []
     for key, items in sorted(grouped.items()):
-        dataset, batch_size, train_method, lora_r, defense, param_name, param_value = key
+        dataset, batch_size, train_method, lora_r, lora_target_modules, defense, param_name, param_value = key
         row = {
             "dataset": dataset,
             "batch_size": batch_size,
             "train_method": train_method,
             "lora_r": lora_r,
+            "lora_target_modules": lora_target_modules,
             "defense": defense,
             "defense_param_name": param_name,
             "defense_param_value": param_value,
@@ -641,6 +653,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("batch_size", ""),
             row.get("train_method", "full"),
             row.get("lora_r", ""),
+            row.get("lora_target_modules", ""),
             row.get("defense", ""),
             row.get("defense_param_value", ""),
         ): row
@@ -652,6 +665,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("batch_size", ""),
             row.get("train_method", "full"),
             row.get("lora_r", ""),
+            row.get("lora_target_modules", ""),
         ): row
         for row in utility_rows
         if row.get("defense") == "none"
@@ -663,11 +677,14 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         batch_size = utility.get("batch_size", "")
         train_method = utility.get("train_method", "full")
         lora_r = utility.get("lora_r", "")
+        lora_target_modules = utility.get("lora_target_modules", "")
         defense = utility.get("defense", "")
         param_value = utility.get("defense_param_value", "")
 
         row = dict(utility)
-        attack = attack_index.get((dataset, batch_size, train_method, lora_r, defense, param_value))
+        attack = attack_index.get(
+            (dataset, batch_size, train_method, lora_r, lora_target_modules, defense, param_value)
+        )
         if attack is not None:
             row["rec_token_mean"] = attack.get("rec_token_mean", "")
             row["agg_rouge1_fm"] = attack.get("agg_rouge1_fm", "")
@@ -676,7 +693,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
 
         acc = _to_float(row.get("eval_accuracy"))
         none_acc = _to_float(
-            none_index.get((dataset, batch_size, train_method, lora_r), {}).get("eval_accuracy")
+            none_index.get((dataset, batch_size, train_method, lora_r, lora_target_modules), {}).get("eval_accuracy")
         )
         rec_token = _to_float(row.get("rec_token_mean"))
         row["utility_drop"] = f"{(none_acc - acc):.6f}" if acc is not None and none_acc is not None else ""

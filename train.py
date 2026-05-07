@@ -24,7 +24,7 @@ from utils.defense_common import (
 from utils.defenses import apply_defense, requires_gradient_generation_defense
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import apply_lrb_preset
-from utils.peft_utils import save_lora_checkpoint
+from utils.peft_utils import apply_lora_config_to_args, save_lora_checkpoint
 from utils.seq_class_utils import (
     classification_metrics,
     load_seq_class_datasets,
@@ -85,13 +85,15 @@ def save_model(model, tokenizer, save_path: Path, train_method: str) -> str:
 def init_result_tracker(args) -> dict:
     return {
         "summary_emitted": False,
-        "summary_version": 1,
+        "summary_version": 2,
         "result_status": "ok",
         "dataset": args.dataset,
         "task": args.task,
         "model_path": args.model_path,
         "batch_size": args.batch_size,
         "train_method": args.train_method,
+        "lora_r": getattr(args, "lora_r", None),
+        "lora_target_modules": getattr(args, "lora_target_modules", None),
         "num_epochs": args.num_epochs,
         "seed": args.rng_seed,
         "output_dir": str(resolve_default_output_dir(args)),
@@ -118,6 +120,14 @@ def emit_train_result_summary(args, tracker: dict) -> None:
         ("model_path", tracker.get("model_path")),
         ("batch_size", tracker.get("batch_size")),
         ("train_method", tracker.get("train_method")),
+        ("lora_r", tracker.get("lora_r")),
+        ("lora_target_modules", tracker.get("lora_target_modules")),
+        ("lora_checkpoint_type", getattr(args, "lora_checkpoint_type", None)),
+        ("lora_adapter_r", getattr(args, "lora_adapter_r", None)),
+        ("lora_adapter_target_modules", getattr(args, "lora_adapter_target_modules", None)),
+        ("lora_adapter_task_type", getattr(args, "lora_adapter_task_type", None)),
+        ("lora_adapter_base_model", getattr(args, "lora_adapter_base_model", None)),
+        ("lora_adapter_peft_type", getattr(args, "lora_adapter_peft_type", None)),
         ("num_epochs", tracker.get("num_epochs")),
         ("seed", tracker.get("seed")),
         ("defense", getattr(args, "defense", "none")),
@@ -215,6 +225,12 @@ def build_parser():
     )
     parser.add_argument("--train_method", type=str, default="full", choices=["full", "lora"])
     parser.add_argument("--lora_r", type=int, default=None)
+    parser.add_argument(
+        "--lora_target_modules",
+        type=str,
+        default=None,
+        help="LoRA target module preset or comma-separated list. Defaults preserve the model-family baseline.",
+    )
     parser.add_argument("--models_cache", type=str, default="./models_cache")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
@@ -332,6 +348,7 @@ def main():
     args = parser.parse_args()
     normalize_legacy_training_defense_args(args)
     apply_lrb_preset(args)
+    apply_lora_config_to_args(args, require_checkpoint=False)
     install_terminal_logging(args)
     tracker = init_result_tracker(args)
 

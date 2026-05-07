@@ -51,7 +51,7 @@ def _init_result_tracker(args):
     requested = max(0, min(args.n_inputs, args.end_input) - args.start_input)
     return {
         'summary_emitted': False,
-        'summary_version': 1,
+        'summary_version': 2,
         'result_status': 'ok',
         'n_inputs_requested': requested,
         'n_inputs_completed': 0,
@@ -133,6 +133,13 @@ def _emit_result_summary(args):
         ('batch_size', args.batch_size),
         ('train_method', getattr(args, 'train_method', 'full')),
         ('lora_r', getattr(args, 'lora_r', None)),
+        ('lora_target_modules', getattr(args, 'lora_target_modules', None)),
+        ('lora_checkpoint_type', getattr(args, 'lora_checkpoint_type', None)),
+        ('lora_adapter_r', getattr(args, 'lora_adapter_r', None)),
+        ('lora_adapter_target_modules', getattr(args, 'lora_adapter_target_modules', None)),
+        ('lora_adapter_task_type', getattr(args, 'lora_adapter_task_type', None)),
+        ('lora_adapter_base_model', getattr(args, 'lora_adapter_base_model', None)),
+        ('lora_adapter_peft_type', getattr(args, 'lora_adapter_peft_type', None)),
         ('defense', getattr(args, 'defense', 'none')),
         ('defense_param_name', defense_param_name),
         ('defense_param_value', defense_param_value),

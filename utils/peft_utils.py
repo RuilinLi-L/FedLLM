@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import peft
 import torch
@@ -34,6 +37,26 @@ PEFT_ADAPTER_WEIGHT_FILES = frozenset(
     }
 )
 
+LORA_TARGET_PRESETS = frozenset({"default", "c_attn", "q_proj", "qv", "qkvo", "all-linear"})
+
+
+@dataclass(frozen=True)
+class LoraCheckpointMetadata:
+    path: Path | None
+    checkpoint_type: str
+    adapter_r: int | None = None
+    adapter_target_modules: tuple[str, ...] | None = None
+    adapter_task_type: str | None = None
+    adapter_base_model_name_or_path: str | None = None
+    adapter_peft_type: str | None = None
+
+
+@dataclass(frozen=True)
+class LoraResolvedConfig:
+    lora_r: int | None
+    target_modules: tuple[str, ...]
+    metadata: LoraCheckpointMetadata
+
 
 def is_gpt2_lora_model(model_path: str) -> bool:
     return model_path in GPT2_LORA_MODELS
@@ -47,7 +70,71 @@ def is_supported_lora_model(model_path: str) -> bool:
     return model_path in SUPPORTED_LORA_MODELS
 
 
-def lora_target_modules(model_path: str) -> list[str]:
+def _as_tuple(value) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return (stripped,) if stripped else None
+    if isinstance(value, (list, tuple, set)):
+        out = tuple(str(item).strip() for item in value if str(item).strip())
+        return out or None
+    return None
+
+
+def parse_lora_target_modules(raw: str | None) -> tuple[str, ...] | None:
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value or value == "default":
+        return None
+    if "," in value:
+        modules = tuple(part.strip() for part in value.split(",") if part.strip())
+        if not modules:
+            raise ValueError("--lora_target_modules cannot be empty.")
+        return modules
+    if value == "all-linear":
+        return ("all-linear",)
+    if value == "qv":
+        return ("q_proj", "v_proj")
+    if value == "qkvo":
+        return ("q_proj", "k_proj", "v_proj", "o_proj")
+    if value in {"c_attn", "q_proj"}:
+        return (value,)
+    raise ValueError(
+        "Unsupported --lora_target_modules value. Use one of: "
+        f"{', '.join(sorted(LORA_TARGET_PRESETS))}, or a comma-separated module list."
+    )
+
+
+def _validate_lora_target_modules_for_model(model_path: str, modules: tuple[str, ...]) -> None:
+    if modules == ("all-linear",):
+        return
+    if is_gpt2_lora_model(model_path):
+        unsupported = [module for module in modules if module != "c_attn"]
+        if unsupported:
+            raise ValueError(
+                "GPT-2 LoRA target modules currently support c_attn or all-linear; "
+                f"got {format_lora_target_modules(modules)!r}."
+            )
+        return
+    if is_llama_lora_model(model_path):
+        unsupported = [module for module in modules if module not in {"q_proj", "k_proj", "v_proj", "o_proj"}]
+        if unsupported:
+            raise ValueError(
+                "Llama LoRA target modules currently support q_proj, qv, qkvo, or all-linear; "
+                f"got {format_lora_target_modules(modules)!r}."
+            )
+        return
+
+
+def lora_target_modules(model_path: str, target_modules: str | None = None) -> list[str]:
+    parsed = parse_lora_target_modules(target_modules)
+    if parsed is not None:
+        _validate_lora_target_modules_for_model(model_path, parsed)
+        if parsed == ("all-linear",):
+            return ["all-linear"]
+        return list(parsed)
     if is_gpt2_lora_model(model_path):
         return ["c_attn"]
     if is_llama_lora_model(model_path):
@@ -66,12 +153,24 @@ def format_lora_supported_defenses() -> str:
     return ", ".join(sorted(SUPPORTED_LORA_DEFENSES))
 
 
+def format_lora_target_modules(target_modules: tuple[str, ...] | list[str] | None) -> str:
+    if not target_modules:
+        return "n/a"
+    return ",".join(target_modules)
+
+
 def lora_task_type(task: str | None):
     if task == "seq_class":
         return peft.TaskType.SEQ_CLS
     if task == "next_token_pred":
         return peft.TaskType.CAUSAL_LM
     return None
+
+
+def _task_type_name(task_type) -> str | None:
+    if task_type is None:
+        return None
+    return str(getattr(task_type, "value", task_type)).upper()
 
 
 def lora_modules_to_save(model, task: str | None) -> list[str] | None:
@@ -92,6 +191,45 @@ def is_peft_adapter_dir(path: str | Path) -> bool:
     if not (checkpoint_path / PEFT_ADAPTER_CONFIG).is_file():
         return False
     return any((checkpoint_path / weight_file).is_file() for weight_file in PEFT_ADAPTER_WEIGHT_FILES)
+
+
+def read_peft_adapter_config(path: str | Path) -> dict[str, Any]:
+    adapter_dir = Path(path).expanduser()
+    config_path = adapter_dir / PEFT_ADAPTER_CONFIG
+    try:
+        return json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"PEFT adapter config does not exist: {config_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid PEFT adapter config JSON: {config_path}") from exc
+
+
+def lora_checkpoint_metadata(path: str | None) -> LoraCheckpointMetadata:
+    if path is None:
+        return LoraCheckpointMetadata(path=None, checkpoint_type="new")
+    checkpoint_path = resolve_lora_checkpoint_path(path)
+    if not checkpoint_path.is_dir():
+        return LoraCheckpointMetadata(path=checkpoint_path, checkpoint_type="legacy_state_dict")
+
+    config = read_peft_adapter_config(checkpoint_path)
+    target_modules = _as_tuple(config.get("target_modules"))
+    peft_type = config.get("peft_type")
+    if peft_type is not None and str(peft_type).upper() != "LORA":
+        raise ValueError(
+            "Only LoRA PEFT adapter directories are supported in this path; "
+            f"got peft_type={peft_type!r}."
+        )
+    r = config.get("r")
+    adapter_r = int(r) if r is not None else None
+    return LoraCheckpointMetadata(
+        path=checkpoint_path,
+        checkpoint_type="adapter_dir",
+        adapter_r=adapter_r,
+        adapter_target_modules=target_modules,
+        adapter_task_type=config.get("task_type"),
+        adapter_base_model_name_or_path=config.get("base_model_name_or_path"),
+        adapter_peft_type=peft_type,
+    )
 
 
 def resolve_lora_checkpoint_path(path: str) -> Path:
@@ -120,11 +258,121 @@ def load_lora_checkpoint(path: str):
     return torch.load(checkpoint_path, map_location=torch.device("cpu"))
 
 
-def build_lora_config(model, *, model_path: str, lora_r: int, task: str | None = None):
+def resolve_lora_config(
+    *,
+    model_path: str,
+    lora_r: int | None,
+    checkpoint_path: str | None = None,
+    task: str | None = None,
+    target_modules: str | None = None,
+    require_checkpoint: bool = False,
+) -> LoraResolvedConfig:
+    if not is_supported_lora_model(model_path):
+        raise ValueError(
+            "LoRA/PEFT eval currently supports GPT-2 and Llama model families only. "
+            f"Supported model_path values: {format_lora_supported_models()}."
+        )
+
+    if require_checkpoint and checkpoint_path is None:
+        raise ValueError(
+            "--train_method lora requires --finetuned_path PATH to an existing "
+            "PEFT adapter directory or LoRA .pt/.pth checkpoint."
+        )
+
+    metadata = lora_checkpoint_metadata(checkpoint_path)
+    adapter_modules = metadata.adapter_target_modules
+    explicit_modules = parse_lora_target_modules(target_modules)
+
+    expected_task_type = _task_type_name(lora_task_type(task))
+    adapter_task_type = _task_type_name(metadata.adapter_task_type)
+    if metadata.checkpoint_type == "adapter_dir" and expected_task_type and adapter_task_type:
+        if adapter_task_type != expected_task_type:
+            raise ValueError(
+                "--task does not match PEFT adapter config task_type: "
+                f"cli={expected_task_type!r}, adapter={adapter_task_type!r}."
+            )
+
+    adapter_base_model = metadata.adapter_base_model_name_or_path
+    if (
+        metadata.checkpoint_type == "adapter_dir"
+        and adapter_base_model in SUPPORTED_LORA_MODELS
+        and adapter_base_model != model_path
+    ):
+        raise ValueError(
+            "--model_path does not match PEFT adapter config base_model_name_or_path: "
+            f"cli={model_path!r}, adapter={adapter_base_model!r}."
+        )
+
+    resolved_r = lora_r
+    if metadata.checkpoint_type == "adapter_dir":
+        if metadata.adapter_r is not None:
+            if resolved_r is not None and int(resolved_r) != int(metadata.adapter_r):
+                raise ValueError(
+                    "--lora_r does not match PEFT adapter config: "
+                    f"cli={resolved_r!r}, adapter r={metadata.adapter_r!r}."
+                )
+            resolved_r = int(metadata.adapter_r)
+        if adapter_modules is not None:
+            _validate_lora_target_modules_for_model(model_path, tuple(adapter_modules))
+            if explicit_modules is not None and tuple(explicit_modules) != tuple(adapter_modules):
+                raise ValueError(
+                    "--lora_target_modules does not match PEFT adapter config: "
+                    f"cli={format_lora_target_modules(explicit_modules)!r}, "
+                    f"adapter={format_lora_target_modules(adapter_modules)!r}."
+                )
+            explicit_modules = tuple(adapter_modules)
+    elif metadata.checkpoint_type == "legacy_state_dict" and resolved_r is None:
+        raise ValueError("--train_method lora with a .pt/.pth checkpoint requires --lora_r R.")
+
+    if resolved_r is None:
+        raise ValueError("--train_method lora requires --lora_r R.")
+    if int(resolved_r) <= 0:
+        raise ValueError(f"--lora_r must be a positive integer; got {resolved_r!r}.")
+
+    modules = explicit_modules or tuple(lora_target_modules(model_path))
+    _validate_lora_target_modules_for_model(model_path, tuple(modules))
+    return LoraResolvedConfig(
+        lora_r=int(resolved_r),
+        target_modules=tuple(modules),
+        metadata=metadata,
+    )
+
+
+def apply_lora_config_to_args(args, *, require_checkpoint: bool = False):
+    if getattr(args, "train_method", "full") != "lora":
+        return args
+    resolved = resolve_lora_config(
+        model_path=getattr(args, "model_path", ""),
+        lora_r=getattr(args, "lora_r", None),
+        checkpoint_path=getattr(args, "finetuned_path", None),
+        task=getattr(args, "task", None),
+        target_modules=getattr(args, "lora_target_modules", None),
+        require_checkpoint=require_checkpoint,
+    )
+    args.lora_r = resolved.lora_r
+    args.lora_target_modules = format_lora_target_modules(resolved.target_modules)
+    args.lora_checkpoint_type = resolved.metadata.checkpoint_type
+    args.lora_adapter_r = resolved.metadata.adapter_r
+    args.lora_adapter_target_modules = format_lora_target_modules(resolved.metadata.adapter_target_modules)
+    args.lora_adapter_task_type = resolved.metadata.adapter_task_type
+    args.lora_adapter_base_model = resolved.metadata.adapter_base_model_name_or_path
+    args.lora_adapter_peft_type = resolved.metadata.adapter_peft_type
+    return args
+
+
+def build_lora_config(
+    model,
+    *,
+    model_path: str,
+    lora_r: int,
+    task: str | None = None,
+    target_modules: str | None = None,
+):
     kwargs = {
         "r": int(lora_r),
-        "target_modules": lora_target_modules(model_path),
     }
+    target = lora_target_modules(model_path, target_modules)
+    kwargs["target_modules"] = "all-linear" if target == ["all-linear"] else target
     task_type = lora_task_type(task)
     if task_type is not None:
         kwargs["task_type"] = task_type
@@ -167,10 +415,16 @@ def apply_lora_adapter(
     checkpoint_path: str | None = None,
     unwrap_base_model: bool = False,
     task: str | None = None,
+    target_modules: str | None = None,
 ):
-    if lora_r is None or int(lora_r) <= 0:
-        raise ValueError(f"LoRA rank must be a positive integer; got {lora_r!r}.")
-
+    resolved = resolve_lora_config(
+        model_path=model_path,
+        lora_r=lora_r,
+        checkpoint_path=checkpoint_path,
+        task=task,
+        target_modules=target_modules,
+        require_checkpoint=False,
+    )
     resolved_checkpoint = resolve_lora_checkpoint_path(checkpoint_path) if checkpoint_path is not None else None
     if resolved_checkpoint is not None and resolved_checkpoint.is_dir():
         lora_model = peft.PeftModel.from_pretrained(
@@ -182,8 +436,9 @@ def apply_lora_adapter(
         lora_cfg = build_lora_config(
             model,
             model_path=model_path,
-            lora_r=lora_r,
+            lora_r=resolved.lora_r,
             task=task,
+            target_modules=format_lora_target_modules(resolved.target_modules),
         )
         lora_model = peft.get_peft_model(model, lora_cfg)
         if resolved_checkpoint is not None:
@@ -235,23 +490,7 @@ def validate_lora_eval_args(args):
     if getattr(args, "train_method", "full") != "lora":
         return args
 
-    if not is_supported_lora_model(getattr(args, "model_path", "")):
-        raise ValueError(
-            "LoRA/PEFT eval currently supports GPT-2 and Llama model families only. "
-            f"Supported model_path values: {format_lora_supported_models()}."
-        )
-
-    if getattr(args, "finetuned_path", None) is None:
-        raise ValueError(
-            "--train_method lora requires --finetuned_path PATH to an existing "
-            "PEFT adapter directory or LoRA .pt/.pth checkpoint."
-        )
-    resolve_lora_checkpoint_path(args.finetuned_path)
-
-    if getattr(args, "lora_r", None) is None:
-        raise ValueError("--train_method lora requires --lora_r R.")
-    if int(args.lora_r) <= 0:
-        raise ValueError(f"--lora_r must be a positive integer; got {args.lora_r!r}.")
+    apply_lora_config_to_args(args, require_checkpoint=True)
 
     defense = getattr(args, "defense", "none")
     if defense not in SUPPORTED_LORA_DEFENSES:
