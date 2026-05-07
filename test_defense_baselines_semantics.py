@@ -29,7 +29,12 @@ from utils.defenses import (
     soteria_defense,
     topk_sparsification,
 )
-from utils.lrb_defense import _estimate_layer_sensitivities, _project_low_resolution
+from utils.lrb_defense import (
+    _adaptive_avg_pool2d_manual,
+    _adaptive_bin_bounds,
+    _estimate_layer_sensitivities,
+    _project_low_resolution,
+)
 from utils.training_defense_wrapper import TrainingDefenseModelWrapper
 
 
@@ -454,6 +459,40 @@ def test_lrb_signed_projection_is_reproducible_and_not_plain_pooling():
     assert_true(not torch.allclose(signed_a, plain), "signed-pool projection should differ from plain coordinate pooling")
 
 
+def test_lrb_matrix_projection_path_matches_cpu_reference():
+    cases = [
+        (torch.arange(1, 13, dtype=torch.float32).view(3, 4), (2, 3)),
+        (torch.arange(1, 36, dtype=torch.float32).view(5, 7), (4, 6)),
+        (torch.arange(1, 64, dtype=torch.float32).view(7, 9), (5, 4)),
+    ]
+
+    for matrix, output_size in cases:
+        pooled = _adaptive_avg_pool2d_manual(matrix, output_size)
+        reference = torch.nn.functional.adaptive_avg_pool2d(
+            matrix.view(1, 1, *matrix.shape),
+            output_size,
+        ).view(*output_size)
+
+        assert_true(torch.allclose(pooled, reference), "manual 2D pooling should match torch's CPU reference")
+
+    matrix = cases[0][0]
+    projected = _project_low_resolution(matrix, 0.5, seed=13, mode="signed_pool")
+    assert_true(projected.shape == matrix.shape, "signed-pool projection should preserve matrix shape")
+    assert_true(torch.isfinite(projected).all(), "signed-pool projection should stay finite")
+
+
+def test_lrb_adaptive_bin_bounds_use_exact_integer_math():
+    input_size = 50257
+    output_size = 45231
+    starts, ends = _adaptive_bin_bounds(input_size, output_size, device=torch.device("cpu"))
+
+    for idx in (0, 1, 14903, 37341, output_size - 1):
+        expected_start = (idx * input_size) // output_size
+        expected_end = ((idx + 1) * input_size + output_size - 1) // output_size
+        assert_true(int(starts[idx].item()) == expected_start, "adaptive bin start should use exact integer floor")
+        assert_true(int(ends[idx].item()) == expected_end, "adaptive bin end should use exact integer ceil")
+
+
 def test_lrb_hybrid_sensitivity_uses_empirical_calibration():
     grads = (
         torch.tensor([10.0, 0.0, 0.0, 0.0], dtype=torch.float32),
@@ -490,6 +529,8 @@ def main():
         test_mixup_changes_gradients_via_representation_mixing,
         test_mixup_falls_back_for_small_batches_and_non_seq_class,
         test_lrb_signed_projection_is_reproducible_and_not_plain_pooling,
+        test_lrb_matrix_projection_path_matches_cpu_reference,
+        test_lrb_adaptive_bin_bounds_use_exact_integer_math,
         test_lrb_hybrid_sensitivity_uses_empirical_calibration,
     ]
     for test in tests:

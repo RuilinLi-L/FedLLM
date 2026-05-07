@@ -27,6 +27,87 @@ def _make_generator(seed: int, device: torch.device) -> torch.Generator:
     return gen
 
 
+def _adaptive_bin_bounds(input_size: int, output_size: int, *, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    if input_size <= 0:
+        raise ValueError("input_size must be positive")
+    if output_size <= 0:
+        raise ValueError("output_size must be positive")
+
+    positions = torch.arange(output_size, device=device, dtype=torch.long)
+    starts = (positions * input_size) // output_size
+    ends = ((positions + 1) * input_size + output_size - 1) // output_size
+    starts = starts.clamp(min=0, max=input_size - 1)
+    ends = torch.maximum(ends, starts + 1)
+    ends = ends.clamp(max=input_size)
+    return starts, ends
+
+
+def _adaptive_avg_pool_along_dim_manual(
+    tensor: torch.Tensor,
+    output_size: int,
+    dim: int,
+    *,
+    max_chunk_elements: int = 1_048_576,
+) -> torch.Tensor:
+    dim = dim % tensor.dim()
+    input_size = tensor.shape[dim]
+    if output_size == input_size:
+        return tensor.clone()
+
+    starts, ends = _adaptive_bin_bounds(input_size, output_size, device=tensor.device)
+    moved = tensor.movedim(dim, 0)
+    trailing_shape = tuple(moved.shape[1:])
+    trailing_numel = max(1, math.prod(trailing_shape))
+    chunk_size = max(1, min(output_size, max_chunk_elements // trailing_numel))
+
+    prefix = moved.new_zeros((input_size + 1,) + trailing_shape)
+    prefix[1:] = moved.cumsum(dim=0)
+    out = moved.new_empty((output_size,) + trailing_shape)
+
+    for offset in range(0, output_size, chunk_size):
+        next_offset = min(offset + chunk_size, output_size)
+        chunk_starts = starts[offset:next_offset]
+        chunk_ends = ends[offset:next_offset]
+        sums = prefix[chunk_ends] - prefix[chunk_starts]
+        count_shape = (next_offset - offset,) + (1,) * len(trailing_shape)
+        counts = (chunk_ends - chunk_starts).to(dtype=moved.dtype).reshape(count_shape)
+        out[offset:next_offset] = sums / counts
+
+    return out.movedim(0, dim)
+
+
+def _adaptive_avg_pool1d_manual(flat: torch.Tensor, out_size: int) -> torch.Tensor:
+    return _adaptive_avg_pool_along_dim_manual(flat.reshape(-1), out_size, dim=0)
+
+
+def _adaptive_avg_pool2d_manual(matrix: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
+    m, n = matrix.shape
+    km, kn = output_size
+    if km == m and kn == n:
+        return matrix.clone()
+    if km == m:
+        return _adaptive_avg_pool_along_dim_manual(matrix, kn, dim=1)
+    if kn == n:
+        return _adaptive_avg_pool_along_dim_manual(matrix, km, dim=0)
+
+    row_starts, row_ends = _adaptive_bin_bounds(m, km, device=matrix.device)
+    row_prefix = matrix.new_zeros(m + 1, n)
+    row_prefix[1:] = matrix.cumsum(dim=0)
+    out = matrix.new_empty(km, kn)
+
+    row_chunk_size = max(1, min(km, 1_048_576 // max(1, n)))
+    for offset in range(0, km, row_chunk_size):
+        next_offset = min(offset + row_chunk_size, km)
+        chunk_starts = row_starts[offset:next_offset]
+        chunk_ends = row_ends[offset:next_offset]
+        row_sums = row_prefix[chunk_ends] - row_prefix[chunk_starts]
+        row_counts = (chunk_ends - chunk_starts).to(dtype=matrix.dtype).reshape(-1, 1)
+        row_means = row_sums / row_counts
+        out[offset:next_offset] = _adaptive_avg_pool_along_dim_manual(row_means, kn, dim=1)
+
+    return out
+
+
 def _extract_layer_index(name: str) -> int | None:
     patterns = (
         r"\.h\.(\d+)\.",
@@ -110,14 +191,13 @@ def _clip_tensor(tensor: torch.Tensor, max_norm: float) -> torch.Tensor:
 def _rademacher(shape, *, device: torch.device, generator: torch.Generator) -> torch.Tensor:
     out = torch.empty(shape, device=device, dtype=torch.float32)
     out.bernoulli_(0.5, generator=generator)
-    out.mul_(2.0).sub_(1.0)
-    return out
+    return out.mul_(2.0).sub_(1.0)
 
 
 def _pool_interpolate_flat(flat: torch.Tensor, keep_ratio: float) -> torch.Tensor:
     n = flat.shape[0]
     k = max(1, int(round(n * keep_ratio)))
-    pooled = F.adaptive_avg_pool1d(flat.view(1, 1, n), k)
+    pooled = _adaptive_avg_pool1d_manual(flat.reshape(-1), k).reshape(1, 1, k)
     projected = F.interpolate(pooled, size=n, mode="linear", align_corners=False)
     return projected.view_as(flat)
 
@@ -126,7 +206,7 @@ def _pool_interpolate_matrix(matrix: torch.Tensor, keep_ratio: float) -> torch.T
     m, n = matrix.shape
     km = max(1, int(round(m * keep_ratio)))
     kn = max(1, int(round(n * keep_ratio)))
-    pooled = F.adaptive_avg_pool2d(matrix.view(1, 1, m, n), (km, kn))
+    pooled = _adaptive_avg_pool2d_manual(matrix.reshape(m, n), (km, kn)).reshape(1, 1, km, kn)
     projected = F.interpolate(pooled, size=(m, n), mode="bilinear", align_corners=False)
     return projected.view_as(matrix)
 
@@ -149,7 +229,7 @@ def _project_low_resolution(
 
     if tensor.dim() == 1:
         if mode == "pool":
-            projected = _pool_interpolate_flat(x.view(-1), keep_ratio)
+            projected = _pool_interpolate_flat(x.reshape(-1), keep_ratio)
         else:
             gen = _make_generator(seed, tensor.device)
             signs = _rademacher(x.shape, device=tensor.device, generator=gen)
@@ -167,7 +247,7 @@ def _project_low_resolution(
             projected = projected * row_signs * col_signs
         return projected.view_as(x).to(dtype=tensor.dtype)
 
-    flat = x.view(-1)
+    flat = x.reshape(-1)
     if mode == "pool":
         projected = _pool_interpolate_flat(flat, keep_ratio)
     else:
