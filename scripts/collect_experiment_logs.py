@@ -204,6 +204,9 @@ def _meta_from_text(path: Path, text: str) -> dict[str, str]:
         if "rank_tol" in flags:
             meta["rank_tol"] = flags["rank_tol"]
         meta["model_path_guess"] = flags.get("model_path", "")
+        meta["train_method_guess"] = flags.get("train_method", "")
+        meta["lora_r_guess"] = flags.get("lora_r", "")
+        meta["lora_target_modules_guess"] = flags.get("lora_target_modules", "")
     else:
         meta.update(
             {
@@ -216,6 +219,9 @@ def _meta_from_text(path: Path, text: str) -> dict[str, str]:
                 "defense_noise": "",
                 "rank_tol": "",
                 "model_path_guess": "",
+                "train_method_guess": "",
+                "lora_r_guess": "",
+                "lora_target_modules_guess": "",
             }
         )
     return meta
@@ -516,6 +522,53 @@ def _stats(values: list[float]) -> tuple[str, str]:
     return f"{mean:.6f}", f"{std:.6f}"
 
 
+def _row_value(row: dict, key: str, fallback_key: str | None = None, default: str = "") -> str:
+    value = row.get(key)
+    if value in (None, "") and fallback_key is not None:
+        value = row.get(fallback_key)
+    if value is None:
+        return default
+    return str(value)
+
+
+def _model_default_lora_target_modules(model_path: str) -> str:
+    if model_path in {"gpt2", "openai-community/gpt2-large"}:
+        return "c_attn"
+    if model_path in {
+        "meta-llama/Llama-2-7b-hf",
+        "meta-llama/Llama-2-70b-hf",
+        "meta-llama/Meta-Llama-3-8B",
+        "meta-llama/Meta-Llama-3.1-8B",
+        "meta-llama/Meta-Llama-3-70B",
+    }:
+        return "q_proj"
+    return "n/a"
+
+
+def _normalized_lora_target_modules(
+    row: dict,
+    *,
+    value_key: str = "lora_target_modules",
+    fallback_key: str | None = None,
+) -> str:
+    train_method = _row_value(row, "train_method", "train_train_method")
+    if not train_method:
+        train_method = _row_value(row, "train_method_guess", default="full")
+    if train_method != "lora":
+        return "n/a"
+
+    value = _row_value(row, value_key, fallback_key).strip()
+    if not value:
+        value = _row_value(row, "lora_target_modules_guess").strip()
+    if value and value.lower() not in {"n/a", "default"}:
+        return value
+
+    model_path = _row_value(row, "model_path", "train_model_path")
+    if not model_path:
+        model_path = _row_value(row, "model_path_guess")
+    return _model_default_lora_target_modules(model_path)
+
+
 def build_utility_results(rows: list[dict]) -> list[dict]:
     train_rows = [row for row in rows if row.get("log_kind") == "train"]
     grouped: dict[tuple[str, ...], list[dict]] = {}
@@ -525,7 +578,7 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
             row.get("batch_size", row.get("train_batch_size", "")),
             row.get("train_method", row.get("train_train_method", "full")),
             row.get("lora_r", row.get("train_lora_r", "")),
-            row.get("lora_target_modules", row.get("train_lora_target_modules", "")),
+            _normalized_lora_target_modules(row, fallback_key="train_lora_target_modules"),
             row.get("defense", row.get("train_defense", "none")),
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
@@ -588,9 +641,9 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
         key = (
             row.get("dataset", row.get("dataset_guess", "")),
             row.get("batch_size", row.get("batch_size_guess", "")),
-            row.get("train_method", "full"),
-            row.get("lora_r", ""),
-            row.get("lora_target_modules", ""),
+            row.get("train_method", row.get("train_method_guess", "full")),
+            row.get("lora_r", row.get("lora_r_guess", "")),
+            _normalized_lora_target_modules(row),
             row.get("defense", "none"),
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
@@ -653,7 +706,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("batch_size", ""),
             row.get("train_method", "full"),
             row.get("lora_r", ""),
-            row.get("lora_target_modules", ""),
+            _normalized_lora_target_modules(row),
             row.get("defense", ""),
             row.get("defense_param_value", ""),
         ): row
@@ -665,7 +718,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("batch_size", ""),
             row.get("train_method", "full"),
             row.get("lora_r", ""),
-            row.get("lora_target_modules", ""),
+            _normalized_lora_target_modules(row),
         ): row
         for row in utility_rows
         if row.get("defense") == "none"
@@ -677,7 +730,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         batch_size = utility.get("batch_size", "")
         train_method = utility.get("train_method", "full")
         lora_r = utility.get("lora_r", "")
-        lora_target_modules = utility.get("lora_target_modules", "")
+        lora_target_modules = _normalized_lora_target_modules(utility)
         defense = utility.get("defense", "")
         param_value = utility.get("defense_param_value", "")
 

@@ -599,9 +599,6 @@ class ModelWrapper():
         if self.args.precision == '8bit':
             return
         if self.args.model_path in ['meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-70b-hf', 'meta-llama/Meta-Llama-3-8B', 'meta-llama/Meta-Llama-3.1-8B', 'meta-llama/Meta-Llama-3-70B'] and device!='cpu':
-            if self.args.train_method == 'lora':
-                self.model.to(device)
-                return
             self.base_model.model.embed_tokens.to(device)
             self.base_model.model.rotary_emb.to(device)
             for i in range(self.args.n_layers):
