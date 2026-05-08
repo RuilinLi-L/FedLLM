@@ -255,6 +255,7 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
     sequences, true_labels = sample
     
     orig_batch = tokenizer(sequences,padding=True, truncation=True, max_length=min(tokenizer.model_max_length, model_wrapper.emb_size - 20),return_tensors='pt').to(args.device)
+    args.defense_rng_step = int(args.result_tracker.get('n_inputs_completed', 0))
     
     if requires_gradient_generation_defense(getattr(args, "defense", "none")):
         true_grads = apply_defense(

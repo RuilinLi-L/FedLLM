@@ -269,6 +269,7 @@ def main():
                     for param in trainable_params
                 )
                 model.zero_grad(set_to_none=True)
+                args.defense_rng_step = batch_idx
                 defended_grads = apply_defense(
                     None,
                     args,
@@ -282,6 +283,7 @@ def main():
                     None if param.grad is None else param.grad.detach().clone()
                     for param in trainable_params
                 )
+                args.defense_rng_step = batch_idx
                 defended_grads = apply_defense(
                     raw_grads,
                     args,

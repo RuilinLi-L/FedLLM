@@ -488,6 +488,25 @@ def _to_float(value) -> float | None:
         return None
 
 
+def _to_int(value) -> int | None:
+    if value in (None, "", "n/a"):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_complete_successful_attack(row: dict) -> bool:
+    if row.get("result_status", "ok") != "ok":
+        return False
+    requested = _to_int(row.get("n_inputs_requested"))
+    completed = _to_int(row.get("n_inputs_completed"))
+    if requested is not None and completed is not None and completed < requested:
+        return False
+    return True
+
+
 def _time_to_seconds(value: str | None) -> float | None:
     if not value or value == "n/a":
         return None
@@ -653,6 +672,8 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
     out: list[dict] = []
     for key, items in sorted(grouped.items()):
         dataset, batch_size, train_method, lora_r, lora_target_modules, defense, param_name, param_value = key
+        valid_items = [item for item in items if _is_complete_successful_attack(item)]
+        incomplete = [item for item in items if not _is_complete_successful_attack(item)]
         row = {
             "dataset": dataset,
             "batch_size": batch_size,
@@ -663,9 +684,19 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             "defense_param_name": param_name,
             "defense_param_value": param_value,
             "n_privacy_runs": str(len(items)),
+            "n_privacy_valid_runs": str(len(valid_items)),
+            "failed_or_incomplete_privacy_runs": str(len(incomplete)),
         }
+        if valid_items:
+            row["result_status"] = "ok" if not incomplete else "mixed"
+        else:
+            row["result_status"] = "failed"
+        if incomplete:
+            row["error_types"] = "; ".join(
+                sorted({item.get("error_type", "") for item in incomplete if item.get("error_type", "")})
+            )
         for field in ("rec_token_mean", "agg_rouge1_fm", "agg_rouge2_fm", "agg_r1fm_r2fm"):
-            values = [_to_float(item.get(field)) for item in items]
+            values = [_to_float(item.get(field)) for item in valid_items]
             clean_values = [value for value in values if value is not None]
             mean, std = _stats(clean_values)
             row[field] = mean

@@ -748,6 +748,7 @@ def main():
 
         print('========================', flush=True)
         
+        args.defense_rng_step = i
         prediction, reference = reconstruct(args, sample, metric, model_wrapper)
         predictions += prediction
         references += reference

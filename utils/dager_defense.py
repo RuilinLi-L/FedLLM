@@ -171,26 +171,16 @@ class DAGERDefense:
         # Create random offsets for each position
         offsets = torch.randn(max_position, pos_embedding_dim, device=device, generator=gen) * offset_scale
         
-        # Store original parameters and create hook for gradient modification
-        original_weight = pos_embedding.weight.data.clone()
-        
-        def offset_hook(grad):
-            # Add gradient contribution from offsets
-            # This simulates the effect of having used offset embeddings during forward pass
-            if grad.shape == offsets.shape:
-                # Direct gradient to position embedding layer
-                return grad + offsets * offset_scale
-            return grad
-        
-        # Register backward hook if possible
-        if hasattr(pos_embedding.weight, 'register_hook'):
-            pos_embedding.weight.register_hook(offset_hook)
-        
-        # Note: In practice, we would need to modify the forward pass to actually use offsets.
-        # This is a simplified implementation that modifies gradients directly.
-        # A more complete implementation would require modifying the model's forward method.
-        
-        return grads
+        # Attack-time DAGER defenses receive already-computed gradients. Apply a
+        # deterministic offset directly to the shared position-embedding gradient
+        # instead of registering a hook that would only affect a future backward.
+        out = []
+        for grad in grads:
+            if grad is not None and grad.shape == offsets.shape:
+                out.append(grad + offsets.to(device=grad.device, dtype=grad.dtype))
+            else:
+                out.append(grad)
+        return tuple(out)
     
     @staticmethod
     def gradient_slicing(
@@ -226,7 +216,8 @@ class DAGERDefense:
             return grads
             
         out = list(grads)
-        device = out[0].device if out[0] is not None else torch.device('cpu')
+        first_grad = next((grad for grad in out if grad is not None), None)
+        device = first_grad.device if first_grad is not None else torch.device('cpu')
         gen = _make_generator(seed, device)
         
         # Identify self-attention layers (especially first two)
@@ -234,7 +225,7 @@ class DAGERDefense:
         for i, name in enumerate(layer_names):
             if any(keyword in name for keyword in ['attention', 'attn', 'self_attn']):
                 # Check if it's query/key/value weight or bias
-                if any(param in name for param in ['q_proj', 'k_proj', 'v_proj', 'query', 'key', 'value']):
+                if any(param in name for param in ['q_proj', 'k_proj', 'v_proj', 'query', 'key', 'value', 'c_attn']):
                     # Extract layer number if possible
                     import re
                     match = re.search(r'layer\.(\d+)', name) or re.search(r'layers\.(\d+)', name) or re.search(r'\.(\d+)\.', name)

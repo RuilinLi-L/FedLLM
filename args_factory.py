@@ -68,6 +68,18 @@ def get_args(argv=None):
     parser.add_argument('--l2_std_thrs', type=float, default=5)
     parser.add_argument('--dp_l2_filter', type=str, default='maxB', choices=['maxB', 'outliers'])
     parser.add_argument('--defense_pct_mask', type=float, default=None) # mask some percentage of gradients
+    parser.add_argument(
+        '--defense_rng_step',
+        type=int,
+        default=None,
+        help='Optional update/sample index used to derive fresh stochastic-defense randomness.',
+    )
+    parser.add_argument(
+        '--defense_adaptive_decoding',
+        action='store_true',
+        default=False,
+        help='Use noisy/outlier DAGER decoding for non-noise defenses when running adaptive checks.',
+    )
 
     # Unified defense baselines (FL-LLM.md)
     parser.add_argument(

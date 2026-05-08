@@ -26,6 +26,7 @@ except ImportError:
 
 
 SPECIAL_GRADIENT_DEFENSES = {"mixup", "dpsgd", "soteria"}
+UPDATE_SEED_STRIDE = 1_000_003
 
 
 def requires_gradient_generation_defense(defense: str) -> bool:
@@ -34,6 +35,8 @@ def requires_gradient_generation_defense(defense: str) -> bool:
 
 def uses_noisy_gradient_decoding(args) -> bool:
     """Use outlier-based L1/L2 decoding paths only when actual Gaussian noise is present."""
+    if bool(getattr(args, "defense_adaptive_decoding", False)):
+        return True
     defense = getattr(args, "defense", "none")
     sigma = getattr(args, "defense_noise", None)
     if sigma is None:
@@ -52,6 +55,16 @@ def _make_generator(seed: int, device: torch.device) -> torch.Generator:
     gen = torch.Generator(device=device)
     gen.manual_seed(seed)
     return gen
+
+
+def _defense_call_seed(args) -> int:
+    """Derive a reproducible seed that changes across updates."""
+    base_seed = int(getattr(args, "rng_seed", 0))
+    step = getattr(args, "defense_rng_step", None)
+    if step is None:
+        step = int(getattr(args, "_defense_call_index", 0))
+        setattr(args, "_defense_call_index", step + 1)
+    return base_seed + UPDATE_SEED_STRIDE * int(step)
 
 
 def _apply_random_mask(grads, pct_mask: float, seed: int = 0):
@@ -264,7 +277,14 @@ def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
     Returns: gradient tuple (same structure as compute_grads).
     """
     defense = getattr(args, "defense", "none")
-    seed = int(getattr(args, "rng_seed", 0))
+    base_seed = int(getattr(args, "rng_seed", 0))
+    stochastic_main = (
+        defense in {"noise", "dpsgd", "compression", "dager"}
+        or (defense == "none" and getattr(args, "defense_noise", None) is not None)
+    )
+    stochastic_mask = getattr(args, "defense_pct_mask", None) is not None
+    fresh_seed = _defense_call_seed(args) if (stochastic_main or stochastic_mask) else base_seed
+    seed = fresh_seed if stochastic_main else base_seed
 
     if defense in SPECIAL_GRADIENT_DEFENSES:
         if model_wrapper is None or batch is None or labels is None:
@@ -289,7 +309,7 @@ def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
             raise ValueError(f"Unknown direct-generation defense: {defense}")
 
         if getattr(args, "defense_pct_mask", None) is not None:
-            g = _apply_random_mask(g, float(args.defense_pct_mask), seed=seed)
+            g = _apply_random_mask(g, float(args.defense_pct_mask), seed=fresh_seed)
         return g
 
     if grads is None:
@@ -335,6 +355,6 @@ def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
         raise ValueError(f"Unknown defense: {defense}")
 
     if getattr(args, "defense_pct_mask", None) is not None:
-        g = _apply_random_mask(g, float(args.defense_pct_mask), seed=seed)
+        g = _apply_random_mask(g, float(args.defense_pct_mask), seed=fresh_seed)
 
     return g

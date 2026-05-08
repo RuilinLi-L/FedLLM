@@ -81,6 +81,18 @@ def add_shared_defense_args(parser: ArgumentParser, *, default_grad_mode: str = 
         help="Optional element-wise random mask applied after the main defense.",
     )
     parser.add_argument(
+        "--defense_rng_step",
+        type=int,
+        default=None,
+        help="Optional update/sample index used to derive fresh stochastic-defense randomness.",
+    )
+    parser.add_argument(
+        "--defense_adaptive_decoding",
+        action="store_true",
+        default=False,
+        help="Use noisy/outlier DAGER decoding for non-noise defenses when running adaptive checks.",
+    )
+    parser.add_argument(
         "--defense_lrb_preset",
         type=str,
         default="custom",

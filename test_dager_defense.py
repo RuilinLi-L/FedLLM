@@ -8,6 +8,7 @@ import torch
 import numpy as np
 import sys
 import os
+from types import SimpleNamespace
 
 # Add the current directory to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -63,8 +64,8 @@ def test_gradient_slicing():
     
     # Create dummy layer names
     layer_names = [
-        "transformer.h.0.attn.q_proj.weight",  # First layer attention
-        "transformer.h.1.attn.k_proj.weight",  # Second layer attention  
+        "transformer.h.0.attn.c_attn.weight",  # GPT-2 first layer attention
+        "transformer.h.1.attn.c_attn.weight",  # GPT-2 second layer attention
         "transformer.h.2.mlp.dense.weight",    # Third layer MLP
     ]
     
@@ -94,8 +95,44 @@ def test_gradient_slicing():
     
     for i in range(len(grads)):
         assert torch.allclose(sliced_grads[i], torch.zeros_like(grads[i])), "All layers should be zeroed with slice_prob=0"
+
+    # Default DAGER slicing should recognize GPT-2 c_attn as first-two-layer attention.
+    sliced_grads = DAGERDefense.gradient_slicing(
+        grads,
+        layer_names,
+        model=None,
+        seed=42,
+    )
+    assert torch.allclose(sliced_grads[0], torch.zeros_like(grads[0])), "GPT-2 layer-0 c_attn should be zeroed"
+    assert torch.allclose(sliced_grads[1], torch.zeros_like(grads[1])), "GPT-2 layer-1 c_attn should be zeroed"
+    assert torch.allclose(sliced_grads[2], grads[2]), "Non-attention layers should remain"
     
     print("[PASS] Gradient slicing test passed")
+    return True
+
+
+def test_stochastic_offset_embedding_modifies_existing_position_gradient():
+    """Offset embedding should modify the gradients passed to the defense."""
+    print("Testing stochastic offset embedding...")
+
+    class DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.transformer = SimpleNamespace(wpe=torch.nn.Embedding(4, 3))
+
+    wrapper = SimpleNamespace(model=DummyModel())
+    grads = (torch.zeros(4, 3), torch.ones(2, 2))
+    defended = DAGERDefense.stochastic_offset_embedding(
+        grads,
+        wrapper,
+        batch={"input_ids": torch.zeros(1, 2, dtype=torch.long)},
+        offset_scale=0.01,
+        seed=42,
+    )
+
+    assert not torch.allclose(defended[0], grads[0]), "Position-embedding gradient should be modified"
+    assert torch.allclose(defended[1], grads[1]), "Unrelated gradients should remain unchanged"
+    print("[PASS] Stochastic offset embedding test passed")
     return True
 
 def test_combined_defense():
@@ -199,6 +236,7 @@ def main():
     try:
         test_dynamic_basis_perturbation()
         test_gradient_slicing()
+        test_stochastic_offset_embedding_modifies_existing_position_gradient()
         test_combined_defense()
         test_apply_dager_defense()
         

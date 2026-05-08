@@ -308,6 +308,7 @@ def run_training(args, tracker: dict) -> None:
             train_predictions.extend(torch.argmax(logits, dim=-1).detach().cpu().tolist())
             train_references.extend(labels.detach().cpu().tolist())
 
+            args.defense_rng_step = n_steps
             apply_training_defense(
                 model,
                 wrapper,

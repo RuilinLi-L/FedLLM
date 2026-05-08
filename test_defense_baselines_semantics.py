@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils.defense_common import grad_similarity_metrics
 from utils.defenses import (
     _apply_random_mask,
+    apply_defense,
     dpsgd_defense,
     gradient_compression,
     noise_injection,
@@ -56,6 +57,21 @@ def test_noise_rng_behavior():
     assert_true(torch.equal(masked_a[0], masked_b[0]), "masking should be reproducible for a fixed seed")
     assert_true(torch.equal(masked_a[1], masked_b[1]), "masking should be reproducible for a fixed seed")
     assert_true(not torch.equal(masked_a[0], masked_a[1]), "same-shape tensors should not share identical masks")
+
+
+def test_apply_defense_advances_stochastic_randomness_by_call():
+    args = SimpleNamespace(defense="noise", defense_noise=1.0, rng_seed=7, defense_pct_mask=None)
+    grads = (torch.zeros(8),)
+
+    first = apply_defense(grads, args)[0]
+    second = apply_defense(grads, args)[0]
+    assert_true(not torch.allclose(first, second), "successive stochastic defense calls should use fresh randomness")
+
+    args_a = SimpleNamespace(defense="noise", defense_noise=1.0, rng_seed=7, defense_pct_mask=None, defense_rng_step=3)
+    args_b = SimpleNamespace(defense="noise", defense_noise=1.0, rng_seed=7, defense_pct_mask=None, defense_rng_step=3)
+    stepped_a = apply_defense(grads, args_a)[0]
+    stepped_b = apply_defense(grads, args_b)[0]
+    assert_true(torch.allclose(stepped_a, stepped_b), "explicit defense_rng_step should be reproducible")
 
 
 def test_dpsgd_matches_manual_formula():
@@ -519,6 +535,7 @@ def test_lrb_hybrid_sensitivity_uses_empirical_calibration():
 def main():
     tests = [
         test_noise_rng_behavior,
+        test_apply_defense_advances_stochastic_randomness_by_call,
         test_dpsgd_matches_manual_formula,
         test_topk_keeps_expected_support_and_minimum_one_entry,
         test_qsgd_compression_matches_seeded_formula_and_bit_granularity,
