@@ -94,6 +94,9 @@ utility_default_param() {
     lrb)
       printf '0.2'
       ;;
+    lrbprojonly)
+      printf '0.5'
+      ;;
     topk)
       printf '0.1'
       ;;
@@ -169,7 +172,7 @@ parse_script_args
 
 if [ -n "$BASELINE_DEFENSE" ]; then
   case "$BASELINE_DEFENSE" in
-    none|noise|dpsgd|topk|compression|soteria|mixup|lrb)
+    none|noise|dpsgd|topk|compression|soteria|mixup|lrb|lrbprojonly)
       ;;
     *)
       echo "[utility] Unsupported --baseline_defense: ${BASELINE_DEFENSE}" >&2
@@ -251,7 +254,7 @@ run_variant() {
     mixup)
       extra_flag=( --defense_mixup_alpha "$param" )
       ;;
-    lrb)
+    lrb|lrbprojonly)
       extra_flag=( --defense_lrb_keep_ratio_sensitive "$param" )
       ;;
     *)

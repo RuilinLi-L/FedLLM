@@ -14,6 +14,7 @@
 - `soteria`
 - `mixup`
 - `lrb`
+- `lrbprojonly`
 
 主入口是 [`scripts/defense_baselines.sh`](../scripts/defense_baselines.sh)。
 
@@ -56,6 +57,7 @@ bash scripts/defense_baselines.sh sst2 2 gpt2 3 --finetuned_path ./models/gpt2-f
 - `soteria`
 - `mixup`
 - `lrb`
+- `lrbprojonly`
 
 命令：
 
@@ -81,11 +83,13 @@ bash scripts/defense_baselines.sh sst2 2 gpt2 100 \
 | `soteria` | `--defense_soteria_pruning_rate` | `10 30 50 70 90` |
 | `mixup` | `--defense_mixup_alpha` | `0.1 0.3 0.5 1.0 2.0` |
 | `lrb` | `--defense_lrb_keep_ratio_sensitive` | `0.05 0.1 0.2 0.35 0.5` |
+| `lrbprojonly` | `--defense_lrb_keep_ratio_sensitive` + projection-only LRB preset | `0.05 0.1 0.2 0.35 0.5` |
 
 语义说明：
 - `dpsgd` 现在是标准 DP-SGD 语义：逐样本裁剪，再求平均，再按 `sigma * clip_norm / batch_size` 加高斯噪声。
 - `soteria` 现在按分类头真正使用的 representation 打分，并剪掉**最高分**的那部分维度。
 - `lrb` 现在默认是 `LRB-v2` 风格：用“结构先验 + 当前梯度统计”的混合敏感度校准，并把梯度投影到一个 seeded `signed_pool` 公共子空间，再主要向残差方向加噪。
+- `lrbprojonly` 是 Projection-LRB / `proj_only` 的顶层别名：只做低分辨率 `signed_pool` projection，不做额外 clipping / residual-space noise；保留 `lrb` 原有语义不变。
 - 旧版本 `dpsgd` / `soteria` 结果与当前实现**不可直接横向比较**。
 
 ## 3. 只跑某一个 baseline
@@ -282,6 +286,17 @@ python attack.py --dataset sst2 --split val --n_inputs 10 --batch_size 2 \
   --defense_lrb_projection signed_pool \
   --defense_lrb_noise_sensitive 0.03 \
   --defense_lrb_noise_other 0.005
+```
+
+`lrbprojonly`：
+
+```bash
+python attack.py --dataset sst2 --split val --n_inputs 10 --batch_size 2 \
+  --l1_filter all --l2_filter non-overlap --model_path gpt2 \
+  --device cuda --task seq_class --cache_dir ./models_cache \
+  --finetuned_path ./models/gpt2-ft-rt \
+  --defense lrbprojonly \
+  --defense_lrb_keep_ratio_sensitive 0.5
 ```
 
 补充说明：

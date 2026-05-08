@@ -18,6 +18,7 @@ DEFENSE_CHOICES = [
     "mixup",
     "dager",
     "lrb",
+    "lrbprojonly",
 ]
 
 
@@ -259,6 +260,10 @@ def defense_param_spec(args) -> tuple[str, object]:
         ),
         "mixup": ("defense_mixup_alpha", getattr(args, "defense_mixup_alpha", None)),
         "lrb": (
+            "defense_lrb_preset" if preset_value is not None else "defense_lrb_keep_ratio_sensitive",
+            preset_value if preset_value is not None else getattr(args, "defense_lrb_keep_ratio_sensitive", None),
+        ),
+        "lrbprojonly": (
             "defense_lrb_preset" if preset_value is not None else "defense_lrb_keep_ratio_sensitive",
             preset_value if preset_value is not None else getattr(args, "defense_lrb_keep_ratio_sensitive", None),
         ),

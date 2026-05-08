@@ -12,7 +12,7 @@
 #   ./scripts/defense_baselines.sh sst2 2 gpt2 3 --baseline_defense soteria --baseline_param 60 --finetuned_path ./models/gpt2-ft-rt
 #
 # Script-only flags handled here and not forwarded to attack.py:
-#   --baseline_defense <none|noise|dpsgd|topk|compression|soteria|mixup|lrb>
+#   --baseline_defense <none|noise|dpsgd|topk|compression|soteria|mixup|lrb|lrbprojonly>
 #   --baseline_param <value>
 #
 # Logging:
@@ -39,7 +39,7 @@ BASELINE_DEFENSE=""
 BASELINE_PARAM=""
 EXTRA=()
 
-ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb )
+ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb lrbprojonly )
 
 parse_script_args() {
   local idx=0
@@ -113,6 +113,9 @@ dager_param_name() {
     lrb)
       printf 'defense_lrb_keep_ratio_sensitive'
       ;;
+    lrbprojonly)
+      printf 'defense_lrb_preset'
+      ;;
     *)
       printf 'n/a'
       ;;
@@ -140,7 +143,7 @@ dager_set_param_values() {
     mixup)
       param_vals=( 0.1 0.3 0.5 1.0 2.0 )
       ;;
-    lrb)
+    lrb|lrbprojonly)
       param_vals=( 0.05 0.1 0.2 0.35 0.5 )
       ;;
     *)
@@ -242,7 +245,7 @@ parse_script_args
 
 if [ -n "$BASELINE_DEFENSE" ]; then
   case "$BASELINE_DEFENSE" in
-    none|noise|dpsgd|topk|compression|soteria|mixup|lrb)
+    none|noise|dpsgd|topk|compression|soteria|mixup|lrb|lrbprojonly)
       ;;
     *)
       echo "[dager] Unsupported --baseline_defense: ${BASELINE_DEFENSE}" >&2
@@ -436,6 +439,10 @@ for defense in "${selected_defenses[@]}"; do
           DEF_EXTRA=( --defense_mixup_alpha "$val" )
           ;;
         lrb)
+          DEF_EXTRA=( --defense_lrb_keep_ratio_sensitive "$val" )
+          ;;
+        lrbprojonly)
+          param="lrbprojonly@k=${val}"
           DEF_EXTRA=( --defense_lrb_keep_ratio_sensitive "$val" )
           ;;
       esac

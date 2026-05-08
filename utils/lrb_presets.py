@@ -3,8 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 
+LRB_DEFENSE_NAMES = {"lrb", "lrbprojonly"}
+
 LRB_PRESET_CHOICES = [
     "custom",
+    "lrbprojonly",
     "identity_lrb",
     "clip_only",
     "proj_only",
@@ -54,10 +57,20 @@ def apply_lrb_preset(args: Any) -> Any:
     """Normalize a named LRB preset into the existing low-level LRB arguments."""
 
     preset = getattr(args, "defense_lrb_preset", "custom")
+    defense = getattr(args, "defense", "none")
     if preset not in LRB_PRESET_CHOICES:
         raise ValueError(f"Unsupported LRB preset: {preset}")
 
-    if getattr(args, "defense", "none") != "lrb" or preset == "custom":
+    if defense == "lrbprojonly":
+        if preset not in {"custom", "lrbprojonly", "proj_only"}:
+            raise ValueError(
+                "--defense lrbprojonly cannot be combined with "
+                f"--defense_lrb_preset {preset!r}; use --defense lrb for other LRB presets."
+            )
+        preset = "lrbprojonly"
+        args.defense_lrb_preset = preset
+
+    if defense not in LRB_DEFENSE_NAMES or preset == "custom":
         return args
 
     k = _main_keep(args)
@@ -88,7 +101,7 @@ def apply_lrb_preset(args: Any) -> Any:
             projection="signed_pool",
         )
 
-    if preset in {"proj_only", "proj_rule_only", "proj_empirical_only", "proj_no_empirical"}:
+    if preset in {"lrbprojonly", "proj_only", "proj_rule_only", "proj_empirical_only", "proj_no_empirical"}:
         empirical_weight = 0.6
         if preset in {"proj_rule_only", "proj_no_empirical"}:
             empirical_weight = 0.0
@@ -169,7 +182,7 @@ def apply_lrb_preset(args: Any) -> Any:
 
 def lrb_preset_param_value(args: Any) -> str | None:
     preset = getattr(args, "defense_lrb_preset", "custom")
-    if getattr(args, "defense", "none") != "lrb" or preset == "custom":
+    if getattr(args, "defense", "none") not in LRB_DEFENSE_NAMES or preset == "custom":
         return None
     k = getattr(args, "defense_lrb_keep_ratio_sensitive", None)
     if k is None:

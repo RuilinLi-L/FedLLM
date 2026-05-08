@@ -36,6 +36,7 @@ from utils.lrb_defense import (
     _estimate_layer_sensitivities,
     _project_low_resolution,
 )
+from utils.lrb_presets import apply_lrb_preset
 from utils.training_defense_wrapper import TrainingDefenseModelWrapper
 
 
@@ -532,6 +533,22 @@ def test_lrb_hybrid_sensitivity_uses_empirical_calibration():
     assert_true(scores[0] > scores[1], "empirical calibration should score the more concentrated layer as more sensitive")
 
 
+def test_lrbprojonly_alias_normalizes_to_projection_only_preset():
+    args = SimpleNamespace(
+        defense="lrbprojonly",
+        defense_lrb_preset="custom",
+        defense_lrb_keep_ratio_sensitive=0.5,
+    )
+    apply_lrb_preset(args)
+
+    assert_true(args.defense_lrb_preset == "lrbprojonly", "lrbprojonly should label the projection-only preset")
+    assert_true(args.defense_lrb_keep_ratio_sensitive == 0.5, "lrbprojonly should preserve the requested main keep ratio")
+    assert_true(args.defense_lrb_keep_ratio_other == 0.75, "lrbprojonly should keep the standard non-sensitive ratio")
+    assert_true(args.defense_lrb_noise_sensitive == 0.0, "lrbprojonly should not add residual-space noise")
+    assert_true(args.defense_lrb_noise_other == 0.0, "lrbprojonly should not add residual-space noise")
+    assert_true(args.defense_lrb_projection == "signed_pool", "lrbprojonly should use signed-pool projection")
+
+
 def main():
     tests = [
         test_noise_rng_behavior,
@@ -549,6 +566,7 @@ def main():
         test_lrb_matrix_projection_path_matches_cpu_reference,
         test_lrb_adaptive_bin_bounds_use_exact_integer_math,
         test_lrb_hybrid_sensitivity_uses_empirical_calibration,
+        test_lrbprojonly_alias_normalizes_to_projection_only_preset,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

@@ -85,7 +85,7 @@ def test_defense_router():
 
         checks = [
             ("from .lrb_defense import apply_lrb_defense", "LRB import"),
-            ("elif defense == \"lrb\":", "LRB routing branch"),
+            ("elif defense in {\"lrb\", \"lrbprojonly\"}:", "LRB routing branch"),
         ]
 
         all_passed = True

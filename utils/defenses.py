@@ -343,7 +343,7 @@ def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
             if p.requires_grad:
                 layer_names.append(name)
         g = apply_dager_defense(g, args, model_wrapper, batch, labels, layer_names)
-    elif defense == "lrb":
+    elif defense in {"lrb", "lrbprojonly"}:
         layer_names = None
         if model_wrapper is not None:
             layer_names = []
