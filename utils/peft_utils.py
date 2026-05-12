@@ -27,7 +27,9 @@ LLAMA_LORA_MODELS = frozenset(
 )
 
 SUPPORTED_LORA_MODELS = GPT2_LORA_MODELS | LLAMA_LORA_MODELS
-SUPPORTED_LORA_DEFENSES = frozenset({"none", "noise", "topk", "compression", "lrb"})
+SUPPORTED_LORA_DEFENSES = frozenset(
+    {"none", "noise", "dpsgd", "topk", "compression", "soteria", "mixup", "lrb"}
+)
 LEGACY_LORA_STATE_SUFFIXES = frozenset({".pt", ".pth"})
 PEFT_ADAPTER_CONFIG = "adapter_config.json"
 PEFT_ADAPTER_WEIGHT_FILES = frozenset(

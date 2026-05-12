@@ -44,11 +44,11 @@ LLM in the middle: A systematic review of threats and mitigations to real-world 
 
 | 论文 | 类别 | 核心方法 | 优点 | 缺点/局限 | 是否开源 |
 | --- | --- | --- | --- | --- | --- |
-| Deep Learning with Differential Privacy (DP-SGD) | Defense (DP) | 梯度裁剪+加噪声实现差分隐私 | 理论最完善，标准方法 | 对模型性能影响明显 | ✅ |
-| Soteria: Provable Defense against Privacy Leakage in Federated Learning | Defense (Representation) | 对中间表示进行扰动，降低可恢复性 | 专门针对梯度泄露设计 | 对复杂模型稳定性有限 | ✅ |
+| Deep Learning with Differential Privacy (DP-SGD) | Defense (DP) | 原始方法通过逐样本裁剪、加噪声和 accountant 报告 privacy cost | 理论最完善，标准方法 | 对模型性能影响明显；本仓库 LoRA eval 只实现 DP-SGD-style 梯度变换，不提供 formal DP guarantee | ✅ |
+| Soteria: Provable Defense against Privacy Leakage in Federated Learning | Defense (Representation) | 对中间表示进行扰动，降低可恢复性 | 专门针对梯度泄露设计 | 对复杂模型稳定性有限；本仓库 LoRA eval 是 Soteria-style representation masking，不是完整训练期复现 | ✅ |
 | Gradient Compression for Communication-Efficient FL | Defense (Compression) | 对梯度进行稀疏化或量化压缩 | 降低通信同时减少信息量 | 不是专为隐私设计，防护有限 | ✅ |
 | Top-k Gradient Sparsification | Defense (Compression) | 仅保留梯度中最大k个分量 | 简单高效，易实现 | 信息仍可能被恢复 | ✅ |
-| MixUp / Data Augmentation-based Defense | Defense (Data-level) | 通过数据混合降低样本可识别性 | 实现简单，无需改模型结构 | 对攻击的针对性较弱 | ✅ |
+| MixUp / Manifold MixUp-style Defense | Defense (Data/Representation-level) | 通过输入或隐藏表示混合降低样本可识别性 | 实现简单，无需改模型结构 | 对攻击的针对性较弱；本仓库实现为 representation-level manifold MixUp-style | ✅ |
 | Noise Injection on Gradients | Defense (Noise) | 直接对梯度添加随机扰动 | 简单直接，易于控制强度 | 隐私-效用权衡难调 | ✅ |
 ## 这里往下不是原始idea的内容，是后面ai生成的
 **对当前 baselines 的判断**
@@ -58,14 +58,14 @@ LLM in the middle: A systematic review of threats and mitigations to real-world 
 | baseline | 主要优势 | 主要不足 | 更适合扮演的角色 |
 | --- | --- | --- | --- |
 | `noise` | 最通用、最便宜、实现最简单，适合作为最小干预基线 | 只是在输出端做随机扰动，不改变泄露结构；往往需要较大噪声才有效，效用下降快 | 最基础的 sanity-check baseline |
-| `dpsgd` | 唯一有明确差分隐私语义的标准 baseline，论文说服力强 | 训练和显存开销大；在大模型/FedSGD 场景下隐私-效用权衡通常不理想；也没有利用 Transformer 泄露的结构性 | 理论上界/标准合规 baseline |
+| `dpsgd` | 原始 DP-SGD 是有明确差分隐私语义的标准 baseline，论文说服力强 | 当前 LoRA eval 只做逐样本裁剪、平均、加高斯噪声，没有训练期接入和 privacy accountant；不能声称 formal DP guarantee | DP-SGD-style attack-time baseline / clipping + Gaussian noise baseline |
 | `topk` | 计算与通信成本低，容易在大模型上跑大规模 sweep | 保留下来的往往正是最显著、最可能携带关键信息的分量；不是为隐私设计 | 通信压缩对照组 |
 | `compression` | 兼顾通信效率与一定信息损失，工程上容易接入 | 更多是在“少传多少”而不是“少泄露多少”上有效；对强攻击的针对性有限 | 压缩类 baseline |
-| `soteria` | 直接触及 representation leakage，本质上比纯梯度后处理更接近泄露根因 | 更适合特定任务和表示路径；迁移到 LLM/PEFT 后稳定性和通用性有限；开销也不低 | 表示层 baseline |
-| `mixup` | 对训练效用通常较友好，也可能降低样本唯一性 | 不是专门为梯度泄露设计；在小 batch 的 FL 设定里，混合后的梯度仍可能泄露较强信息 | 训练侧弱防御 baseline |
+| `soteria` | 直接触及 representation leakage，本质上比纯梯度后处理更接近泄露根因 | 当前 LoRA eval 是 classifier-input representation masking 后重算 adapter 梯度；不是原始 Soteria 的完整复现，也不是 LoRA 训练期防御 | Soteria-style representation masking baseline |
+| `mixup` | 对训练效用通常较友好，也可能降低样本唯一性 | 当前实现混合 hidden/classifier-input representation 和标签，不是原始 input-level MixUp；在小 batch 的 FL 设定里，混合后的梯度仍可能泄露较强信息 | Manifold MixUp-style representation baseline |
 | `lrb`（当前版本） | 最接近本文“通用防御”目标，显式利用层级差异和恢复瓶颈来做结构化抑制 | 目前还是启发式 v1：敏感层识别主要靠规则，投影基底较固定，也还没有 forward-side 的表示约束 | 最有希望发展成主方法的原型 |
 
-总结起来，`noise / dpsgd` 更像“通用扰动系”基线，`topk / compression` 更像“通信压缩系”基线，`soteria` 是“表示扰动系”基线，`mixup` 是“训练正则系”基线。真正和本文目标最一致的，是从 `lrb` 继续往前推，因为它开始显式针对“哪些中间信息更可恢复”这个问题本身，而不只是粗暴减少数值精度。
+总结起来，`noise / dpsgd` 更像“通用扰动系”基线，其中 `dpsgd` 在本仓库 LoRA eval 中应明确写成 DP-SGD-style；`topk / compression` 更像“通信压缩系”基线；`soteria` 是 Soteria-style 表示扰动基线；`mixup` 是 manifold MixUp-style 表示混合基线。真正和本文目标最一致的，是从 `lrb` 继续往前推，因为它开始显式针对“哪些中间信息更可恢复”这个问题本身，而不只是粗暴减少数值精度。
 ## 这里往上不是原始idea的内容，是后面ai生成的，下面的是原idea内容
 **防御方法设计**
 
@@ -120,14 +120,14 @@ HLRB 可以分成两个层面：
 **为什么这个方向比单一 baseline 更适合作为主方法**
 
 - 它和本文威胁模型更一致。本文不是只打 DAGER，也不是只打某个 PEFT 攻击，而是要同时面对 full-gradient、PEFT、partial-gradient 三类泄露。
-- 它比 `noise/dpsgd` 更结构化，比 `soteria` 更通用，比 `topk/compression` 更以隐私为中心。
+- 它比 `noise / DP-SGD-style` 更结构化，比 Soteria-style 表示剪枝更通用，比 `topk/compression` 更以隐私为中心。
 - 它保留了 `lrb` 当前实现的工程优势：可以先从 attack-time transform 做 v1/v2，对比结果出来后，再决定是否推进到训练时版本。
 
 **现阶段最推荐的研究路线**
 
 如果只选择一条主线，我建议：
 
-- 保留 `noise / dpsgd / topk / compression / soteria / mixup` 作为完整 baseline 套件。
+- 保留 `noise / dpsgd / topk / compression / soteria / mixup` 作为 baseline 套件，其中 LoRA eval 下 `dpsgd / soteria / mixup` 分别按 DP-SGD-style、Soteria-style、manifold MixUp-style 报告。
 - 把 `lrb` 明确定位为“我们的主方法原型”，后续升级为 `LRB-v2 / HLRB`。
 - 先做 `post-gradient HLRB`，验证是否能同时压低三类攻击。
 - 如果结果成立，再进一步实现 `representation-side HLRB`，把 forward bottleneck 也纳入。
@@ -146,7 +146,7 @@ HLRB 可以分成两个层面：
    用 `scripts/defense_baselines.sh` 和 `scripts/lrb_ablation.sh` 跑 `none / topk / compression / lrb` 等 full-gradient 攻击评测与 LRB 消融。最新消融结论是：`proj_only@0.5` 是当前 `SST2 + GPT2 + batch=2` full-gradient DAGER 下最重要的 LRB 主候选，`full_lrb@0.5` 保留为完整强防御对照。
 
 2. **LoRA / PEFT eval-first 攻击面**
-   先用 `train.py --train_method lora` 训练并保存真实的 LoRA `.pt` checkpoint，例如 `./models/gpt2_sst2_lora_r16/final.pt`；再用 `scripts/peft_eval.sh` 或 `scripts/peft_baselines.sh` 评估 LoRA 更新下的 `none / proj_only / proj_clip / full_lrb / topk@0.1 / compression@8`。当前 eval 只支持本地 `.pt/.pth` LoRA `state_dict`，不能直接传 PEFT adapter 目录。
+   先用 `train.py --train_method lora` 训练并保存真实的 LoRA checkpoint，例如 `./models/gpt2_sst2_lora_r16/final_adapter`；再用 `scripts/peft_eval.sh` 或 `scripts/peft_baselines.sh` 评估 LoRA 更新下的 `none / proj_only / proj_clip / full_lrb / topk@0.1 / compression@8`，以及 DP-SGD-style / Soteria-style / manifold MixUp-style 这三类 eval-only baseline。当前 eval 支持 PEFT adapter 目录，也兼容本地 `.pt/.pth` LoRA `state_dict`。
 
 3. **下一阶段泛化验证**
    LoRA/PEFT 和 partial-gradient 是验证 LRB 是否具有跨攻击面结构性价值的关键。文档执行入口以 `docs/PEFT_EVAL.md` 和 `docs/LRB_ABLATION_ANALYSIS_20260503.md` 的第 13 节为准，避免继续使用 `path/to/lora_checkpoint.pt` 这类占位符路径。

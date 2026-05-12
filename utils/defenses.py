@@ -2,7 +2,7 @@
 Defense baselines for gradient inversion experiments (FL-LLM.md).
 
 Post-gradient: noise, topk, compression, optional random mask (defense_pct_mask).
-Direct gradient generation: dpsgd, soteria, mixup.
+Direct gradient generation: dpsgd-style, soteria-style, manifold-mixup-style.
 DAGER-specific: dager defense methods targeting DAGER attack assumptions.
 """
 from __future__ import annotations
@@ -112,7 +112,12 @@ def _average_grad_list(grad_list):
 
 
 def dpsgd_defense(per_example_grads, max_norm: float, sigma: float, seed: int = 0):
-    """Faithful DP-SGD: per-example clip, mean aggregation, then Gaussian noise."""
+    """DP-SGD-style gradient transform: per-example clip, mean, Gaussian noise.
+
+    This helper does not run a training loop or privacy accountant, so callers
+    must not treat it as a complete DP-SGD implementation with formal DP
+    guarantees.
+    """
     if not per_example_grads:
         return tuple()
 
@@ -191,17 +196,20 @@ def gradient_compression(grads, n_bits: int, seed: int = 0):
 
 def soteria_defense(model_wrapper, batch, labels, args, create_graph=False):
     """
-    Representation-side Soteria defense.
+    Soteria-style representation-side eval baseline.
 
     For each sample, score classifier-input representation dimensions by
     |r_i| / (||dr_i / dX|| + eps), prune the highest-scoring fraction, recompute
     the sample loss with the masked representation, then average the resulting
-    per-example gradients.
+    per-example gradients. In LoRA eval this recomputes gradients only for the
+    current trainable adapter/head parameters; it is not a full training-time
+    Soteria reproduction.
     """
     if getattr(args, "task", None) != "seq_class":
         raise NotImplementedError("Soteria baseline is only supported for task=seq_class.")
-    if getattr(args, "train_method", "full") != "full":
-        raise NotImplementedError("Soteria baseline is only supported for train_method=full.")
+    train_method = getattr(args, "train_method", "full")
+    if train_method not in {"full", "lora"}:
+        raise NotImplementedError("Soteria baseline is only supported for train_method=full or train_method=lora.")
 
     pruning_rate = float(getattr(args, "defense_soteria_pruning_rate", 60.0))
     if pruning_rate < 0 or pruning_rate > 100:

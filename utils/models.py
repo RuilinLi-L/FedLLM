@@ -563,7 +563,7 @@ class ModelWrapper():
 
     def compute_grads_mixup(self, batch, y_labels, create_graph=False):
         """
-        Representation-level manifold MixUp for seq_class.
+        Representation-level manifold MixUp-style baseline for seq_class.
 
         Falls back to standard gradients for non-seq_class tasks or batch_size < 2.
         """

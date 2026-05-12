@@ -295,6 +295,24 @@ def test_soteria_masks_representation_during_gradient_generation():
     assert_true(not torch.allclose(defended[0], undefended_grad), "soteria should change gradients via representation masking")
 
 
+def test_soteria_allows_lora_eval_semantics():
+    wrapper = DummySoteriaWrapper()
+    args = SimpleNamespace(
+        task="seq_class",
+        train_method="lora",
+        defense_soteria_pruning_rate=50.0,
+        defense_soteria_sample_dims=None,
+        rng_seed=0,
+    )
+    batch = {"inputs": torch.tensor([[2.0, 1.0]], dtype=torch.float32)}
+    labels = torch.tensor([0], dtype=torch.long)
+
+    defended = soteria_defense(wrapper, batch, labels, args)
+
+    assert_true(len(defended) == 1, "LoRA eval Soteria should return the trainable gradient tuple")
+    assert_true(defended[0].shape == wrapper.model.weight.shape, "LoRA eval Soteria should preserve gradient shape")
+
+
 def test_soteria_keeps_embedding_gradients_for_proxy_metrics():
     wrapper = DummySoteriaEmbeddingWrapper()
     args = SimpleNamespace(
@@ -557,6 +575,7 @@ def main():
         test_topk_keeps_expected_support_and_minimum_one_entry,
         test_qsgd_compression_matches_seeded_formula_and_bit_granularity,
         test_soteria_masks_representation_during_gradient_generation,
+        test_soteria_allows_lora_eval_semantics,
         test_soteria_keeps_embedding_gradients_for_proxy_metrics,
         test_soteria_sample_dims_path_runs,
         test_bert_seq_class_structure,

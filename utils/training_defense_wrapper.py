@@ -184,6 +184,7 @@ class TrainingDefenseModelWrapper:
         return grad_list
 
     def compute_grads_mixup(self, batch, labels, create_graph=False):
+        """Representation-level manifold MixUp-style gradient baseline."""
         if getattr(self.args, "task", "seq_class") != "seq_class":
             return self._compute_standard_grads(batch, labels, create_graph=create_graph)
         if batch["input_ids"].shape[0] < 2:

@@ -117,6 +117,25 @@ def test_validate_lora_eval_args_accepts_supported_gpt2_setup():
         Path(checkpoint).unlink(missing_ok=True)
 
 
+def test_validate_lora_eval_args_accepts_direct_generation_baselines():
+    checkpoint = _temp_checkpoint()
+    try:
+        for defense in ("dpsgd", "soteria", "mixup"):
+            args = SimpleNamespace(
+                train_method="lora",
+                model_path="gpt2",
+                finetuned_path=checkpoint,
+                lora_r=16,
+                defense=defense,
+                task="seq_class",
+                lora_target_modules=None,
+            )
+            validated = validate_lora_eval_args(args)
+            assert_true(validated is args, f"{defense} should be accepted for LoRA eval")
+    finally:
+        Path(checkpoint).unlink(missing_ok=True)
+
+
 def test_validate_lora_eval_args_accepts_peft_adapter_dir():
     adapter_dir = Path(_temp_adapter_dir())
     try:
@@ -262,7 +281,7 @@ def test_validate_lora_eval_args_rejects_unsupported_defense():
             model_path="gpt2",
             finetuned_path=checkpoint,
             lora_r=16,
-            defense="soteria",
+            defense="dager",
         )
         try:
             validate_lora_eval_args(args)
@@ -307,7 +326,7 @@ def test_lora_training_rejects_direct_generation_defenses():
     except NotImplementedError as exc:
         assert_true("does not currently support" in str(exc), "LoRA direct defense rejection should be explicit")
     else:
-        raise AssertionError("LoRA training should reject DP-SGD until per-example path is supported")
+        raise AssertionError("LoRA training should reject DP-SGD-style direct defenses until the per-example path is supported")
 
 
 def main():
@@ -317,6 +336,7 @@ def main():
         test_seq_class_modules_to_save_include_classifier_heads,
         test_resolve_lora_checkpoint_accepts_peft_adapter_dir,
         test_validate_lora_eval_args_accepts_supported_gpt2_setup,
+        test_validate_lora_eval_args_accepts_direct_generation_baselines,
         test_validate_lora_eval_args_accepts_peft_adapter_dir,
         test_validate_lora_eval_args_rejects_adapter_rank_mismatch,
         test_validate_lora_eval_args_rejects_adapter_target_mismatch,

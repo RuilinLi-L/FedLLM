@@ -1,5 +1,9 @@
 #!/bin/bash
 # Run PEFT/LoRA baseline sweeps through attack.py while recording unsupported variants.
+# LoRA direct-generation names are eval-only shorthand:
+# - dpsgd: DP-SGD-style per-example clipping + Gaussian noise, no accountant.
+# - soteria: Soteria-style representation masking, not training-time Soteria.
+# - mixup: manifold MixUp-style representation interpolation.
 # Usage:
 #   ./scripts/peft_baselines.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --finetuned_path PATH [--lora_r R] [extra attack args...]
 
@@ -25,7 +29,7 @@ LRB_MAIN_K="0.5"
 EXTRA=()
 
 ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup dager lrb )
-SUPPORTED_LORA_DEFENSES=( none noise topk compression lrb )
+SUPPORTED_LORA_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb )
 KNOWN_LRB_PRESETS=(
   identity_lrb
   clip_only
@@ -353,7 +357,7 @@ rec_l2_mean=n/a
 rec_token_mean=n/a
 rec_maxb_token_mean=n/a
 error_type=unsupported_defense
-error_message=LoRA/PEFT eval currently supports only defenses: none, noise, topk, compression, lrb
+error_message=LoRA/PEFT eval currently supports only defenses: none, noise, dpsgd, topk, compression, soteria, mixup, lrb
 ===== RESULT SUMMARY END =====
 EOF
 }
@@ -476,6 +480,7 @@ header_line="===== run start $(date '+%Y-%m-%d %H:%M:%S') tag=peft_baselines arg
   echo "selected_defenses=${selected_defenses[*]}"
   echo "train_method=lora"
   echo "supported_lora_defenses=${SUPPORTED_LORA_DEFENSES[*]}"
+  echo "lora_eval_semantics=dpsgd=DP-SGD-style_no_accountant;soteria=Soteria-style_representation_masking_eval_only;mixup=manifold_MixUp-style_representation_interpolation"
 } >"${run_dir}/_run_header.txt"
 cp "${run_dir}/_run_header.txt" "${summary_path}"
 echo "[dager] Run directory: ${run_dir}" >&2

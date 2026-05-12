@@ -93,7 +93,7 @@ def get_args(argv=None):
         '--defense_clip_norm',
         type=float,
         default=1.0,
-        help='Per-example L2 clip norm C for dpsgd.',
+        help='Per-example L2 clip norm C for the DP-SGD-style baseline.',
     )
     parser.add_argument(
         '--defense_topk_ratio',
@@ -111,7 +111,7 @@ def get_args(argv=None):
         '--defense_soteria_pruning_rate',
         type=float,
         default=60.0,
-        help='Percent of classifier-input representation dimensions pruned by Soteria.',
+        help='Percent of classifier-input representation dimensions pruned by the Soteria-style baseline.',
     )
     parser.add_argument(
         '--defense_soteria_sample_dims',
@@ -123,7 +123,7 @@ def get_args(argv=None):
         '--defense_mixup_alpha',
         type=float,
         default=1.0,
-        help='Beta(alpha, alpha) for MixUp mixing coefficient.',
+        help='Beta(alpha, alpha) for the representation-level manifold MixUp-style baseline.',
     )
     parser.add_argument(
         '--defense_lrb_preset',
