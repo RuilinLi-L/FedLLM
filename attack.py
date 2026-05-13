@@ -10,6 +10,7 @@ from utils.functional import get_top_B_in_span, check_if_in_span, remove_padding
 from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import lrb_preset_param_value
+from utils.partial_gradient import apply_partial_gradient_filter, partial_gradient_summary_fields
 from args_factory import get_args
 import time
 
@@ -147,6 +148,7 @@ def _emit_result_summary(args):
         ('defense', getattr(args, 'defense', 'none')),
         ('defense_param_name', defense_param_name),
         ('defense_param_value', defense_param_value),
+        *partial_gradient_summary_fields(args),
         ('n_inputs_requested', tracker.get('n_inputs_requested')),
         ('n_inputs_completed', tracker.get('n_inputs_completed')),
         ('last_input_idx', tracker.get('last_input_idx')),
@@ -270,6 +272,11 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
         true_grads = apply_defense(
             true_grads, args, model_wrapper=model_wrapper, batch=orig_batch, labels=true_labels
         )
+    true_grads = apply_partial_gradient_filter(
+        true_grads,
+        args,
+        parameter_names=model_wrapper.trainable_parameter_names(),
+    )
     prediction, predicted_sentences, predicted_sentences_scores = [], [], []
     #import pdb;pdb.set_trace() 
     with torch.no_grad():

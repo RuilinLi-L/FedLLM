@@ -4,6 +4,7 @@ import sys
 
 from utils.lrb_presets import LRB_PRESET_CHOICES, apply_lrb_preset
 from utils.peft_utils import validate_lora_eval_args
+from utils.partial_gradient import validate_partial_gradient_args
 
 def get_args(argv=None):
     parser = argparse.ArgumentParser(description='DAGER attack')
@@ -60,6 +61,21 @@ def get_args(argv=None):
     parser.add_argument('--b_mini', type=int, default=None)
     parser.add_argument('--avg_lr', type=float, default=None)
     parser.add_argument('--dist_norm', type=str, default='l2', choices=['l1', 'l2'])
+
+    # Partial-gradient / layer-level leakage attack surface
+    parser.add_argument(
+        '--gradient_layer_subset',
+        type=str,
+        default='all',
+        help="Gradient exposure by transformer layer: all, firstN, or lastN (e.g. first2, last2).",
+    )
+    parser.add_argument(
+        '--gradient_param_filter',
+        type=str,
+        default='all',
+        choices=['all', 'qkv_only', 'lora_only'],
+        help='Gradient exposure by parameter/module family.',
+    )
     
     #DP
     parser.add_argument('--defense_noise', type=float, default=None) # add noise to true grads
@@ -294,6 +310,7 @@ def get_args(argv=None):
     if args.n_incorrect is None:
         args.n_incorrect = args.batch_size
 
+    validate_partial_gradient_args(args)
     validate_lora_eval_args(args)
 
     if args.neptune is not None:

@@ -5,6 +5,12 @@ import numpy as np
 import warnings
 from utils.ext import update_causal_mask
 from utils.partial_models import add_partial_forward_gpt2, add_partial_forward_bert, add_partial_forward_llama
+from utils.partial_gradient import (
+    non_prefix_dager_block_ids,
+    partial_gradient_active,
+    select_visible_matrix_candidates,
+    update_dager_candidate_summary,
+)
 from utils.peft_utils import apply_lora_adapter
 from constants import config
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
@@ -619,6 +625,44 @@ class ModelWrapper():
         else:
             grad_indices = self.layer_ids
             grad_names = [str(idx) for idx in grad_indices]
+
+        if partial_gradient_active(self.args):
+            parameter_names = self._trainable_parameter_names()
+            candidate_names = [
+                parameter_names[idx] if idx < len(parameter_names) else name
+                for idx, name in zip(grad_indices, grad_names)
+            ]
+            selected_indices, selected_names, skipped = select_visible_matrix_candidates(
+                true_grads,
+                grad_indices,
+                candidate_names,
+                self.args.n_layers,
+            )
+            update_dager_candidate_summary(self.args, selected_names)
+            if len(selected_indices) < self.args.n_layers:
+                skipped_preview = ', '.join(
+                    f'{name}:{reason}' for _, name, reason in skipped[:8]
+                )
+                raise ValueError(
+                    'Partial-gradient exposure does not leave enough matrix-like gradients '
+                    f'for DAGER span decomposition: need {self.args.n_layers}, '
+                    f'found {len(selected_indices)}. '
+                    f'gradient_layer_subset={getattr(self.args, "gradient_layer_subset", "all")}, '
+                    f'gradient_param_filter={getattr(self.args, "gradient_param_filter", "all")}. '
+                    f'Skipped candidates: {skipped_preview or "none"}.'
+                )
+            non_prefix_ids = non_prefix_dager_block_ids(selected_names, self.args.n_layers)
+            if non_prefix_ids is not None:
+                raise ValueError(
+                    'Partial-gradient DAGER currently supports prefix transformer-layer exposures only. '
+                    'The selected visible matrix gradients map to transformer blocks '
+                    f'{non_prefix_ids}, but the decoder span checks consume blocks '
+                    f'{list(range(self.args.n_layers))}. Use --gradient_layer_subset firstN, '
+                    '--gradient_param_filter qkv_only, or --gradient_param_filter lora_only until '
+                    'non-prefix layer-aligned hidden-state decoding is implemented.'
+                )
+            grad_indices = selected_indices
+            grad_names = selected_names
 
         rank_cap = None
         for idx, name in zip(grad_indices[:self.args.n_layers], grad_names[:self.args.n_layers]):

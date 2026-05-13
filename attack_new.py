@@ -10,6 +10,8 @@ from utils.data import TextDataset
 from args_factory import get_args
 from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
 from utils.gpu import resolve_cuda_device
+from utils.lrb_presets import lrb_preset_param_value
+from utils.partial_gradient import apply_partial_gradient_filter, partial_gradient_summary_fields
 import time
 
 from scipy.optimize import linear_sum_assignment
@@ -26,6 +28,156 @@ torch.manual_seed(args.rng_seed)
 total_correct_tokens = 0
 total_tokens = 0
 total_correct_maxB_tokens = 0
+
+SUMMARY_START = '===== RESULT SUMMARY START ====='
+SUMMARY_END = '===== RESULT SUMMARY END ====='
+SUMMARY_METRICS = ['rouge1', 'rouge2', 'rougeL', 'rougeLsum']
+
+
+def _safe_mean(values):
+    if not values:
+        return None
+    return float(np.mean(values))
+
+
+def _fmt_summary_value(value):
+    if value is None:
+        return 'n/a'
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, float):
+        return f'{value:.6f}'
+    return str(value)
+
+
+def _init_result_tracker(args):
+    requested = max(0, min(args.n_inputs, args.end_input) - args.start_input)
+    return {
+        'summary_emitted': False,
+        'summary_version': 2,
+        'result_status': 'ok',
+        'n_inputs_requested': requested,
+        'n_inputs_completed': 0,
+        'last_input_idx': None,
+        'last_input_time': None,
+        'last_total_time': None,
+        'last_rec_status': None,
+        'rec_l1_mean_values': [],
+        'rec_l1_maxb_mean_values': [],
+        'rec_l2_mean_values': [],
+        'rec_token_values': [],
+        'rec_maxb_token_values': [],
+        'aggregate_metrics': {},
+        'error_type': None,
+        'error_message': None,
+    }
+
+
+def _record_rec_metrics(args, rec_status, rec_l1, rec_l1_maxB, rec_l2, rec_maxb_token, rec_token):
+    tracker = getattr(args, 'result_tracker', None)
+    if tracker is None:
+        return
+    tracker['last_rec_status'] = rec_status
+    tracker['rec_l1_mean_values'].append(float(np.mean(np.asarray(rec_l1, dtype=float))))
+    tracker['rec_l1_maxb_mean_values'].append(float(np.mean(np.asarray(rec_l1_maxB, dtype=float))))
+    tracker['rec_l2_mean_values'].append(float(np.mean(np.asarray(rec_l2, dtype=float))))
+    tracker['rec_token_values'].append(float(rec_token))
+    tracker['rec_maxb_token_values'].append(float(rec_maxb_token))
+
+
+def _defense_param_spec(args):
+    defense = getattr(args, 'defense', 'none')
+    preset_value = lrb_preset_param_value(args)
+    mapping = {
+        'noise': ('defense_noise', getattr(args, 'defense_noise', None)),
+        'dpsgd': ('defense_noise', getattr(args, 'defense_noise', None)),
+        'topk': ('defense_topk_ratio', getattr(args, 'defense_topk_ratio', None)),
+        'compression': ('defense_n_bits', getattr(args, 'defense_n_bits', None)),
+        'soteria': (
+            'defense_soteria_pruning_rate',
+            getattr(args, 'defense_soteria_pruning_rate', None),
+        ),
+        'mixup': ('defense_mixup_alpha', getattr(args, 'defense_mixup_alpha', None)),
+        'lrb': (
+            'defense_lrb_preset' if preset_value is not None else 'defense_lrb_keep_ratio_sensitive',
+            preset_value if preset_value is not None else getattr(args, 'defense_lrb_keep_ratio_sensitive', None),
+        ),
+        'lrbprojonly': (
+            'defense_lrb_preset' if preset_value is not None else 'defense_lrb_keep_ratio_sensitive',
+            preset_value if preset_value is not None else getattr(args, 'defense_lrb_keep_ratio_sensitive', None),
+        ),
+    }
+    if defense == 'none':
+        return 'n/a', 'n/a'
+    return mapping.get(defense, ('n/a', 'n/a'))
+
+
+def _metric_summary(res):
+    summary = {}
+    for metric in SUMMARY_METRICS:
+        curr = res[metric].mid
+        summary[f'agg_{metric}_fm'] = curr.fmeasure * 100
+        summary[f'agg_{metric}_p'] = curr.precision * 100
+        summary[f'agg_{metric}_r'] = curr.recall * 100
+    summary['agg_r1fm_r2fm'] = (res['rouge1'].mid.fmeasure + res['rouge2'].mid.fmeasure) * 100
+    return summary
+
+
+def _emit_result_summary(args):
+    tracker = getattr(args, 'result_tracker', None)
+    if tracker is None or tracker.get('summary_emitted'):
+        return
+
+    defense_param_name, defense_param_value = _defense_param_spec(args)
+    fields = [
+        ('summary_version', tracker.get('summary_version', 1)),
+        ('result_status', tracker.get('result_status', 'ok')),
+        ('dataset', args.dataset),
+        ('split', args.split),
+        ('task', args.task),
+        ('model_path', args.model_path),
+        ('finetuned_path', args.finetuned_path if args.finetuned_path is not None else 'n/a'),
+        ('batch_size', args.batch_size),
+        ('train_method', getattr(args, 'train_method', 'full')),
+        ('lora_r', getattr(args, 'lora_r', None)),
+        ('lora_target_modules', getattr(args, 'lora_target_modules', None)),
+        ('lora_checkpoint_type', getattr(args, 'lora_checkpoint_type', None)),
+        ('lora_adapter_r', getattr(args, 'lora_adapter_r', None)),
+        ('lora_adapter_target_modules', getattr(args, 'lora_adapter_target_modules', None)),
+        ('lora_adapter_task_type', getattr(args, 'lora_adapter_task_type', None)),
+        ('lora_adapter_base_model', getattr(args, 'lora_adapter_base_model', None)),
+        ('lora_adapter_peft_type', getattr(args, 'lora_adapter_peft_type', None)),
+        ('defense', getattr(args, 'defense', 'none')),
+        ('defense_param_name', defense_param_name),
+        ('defense_param_value', defense_param_value),
+        *partial_gradient_summary_fields(args),
+        ('n_inputs_requested', tracker.get('n_inputs_requested')),
+        ('n_inputs_completed', tracker.get('n_inputs_completed')),
+        ('last_input_idx', tracker.get('last_input_idx')),
+        ('last_input_time', tracker.get('last_input_time')),
+        ('last_total_time', tracker.get('last_total_time')),
+        ('last_rec_status', tracker.get('last_rec_status')),
+        ('rec_l1_mean', _safe_mean(tracker.get('rec_l1_mean_values', []))),
+        ('rec_l1_maxb_mean', _safe_mean(tracker.get('rec_l1_maxb_mean_values', []))),
+        ('rec_l2_mean', _safe_mean(tracker.get('rec_l2_mean_values', []))),
+        ('rec_token_mean', _safe_mean(tracker.get('rec_token_values', []))),
+        ('rec_maxb_token_mean', _safe_mean(tracker.get('rec_maxb_token_values', []))),
+    ]
+
+    if tracker.get('error_type'):
+        fields.append(('error_type', tracker['error_type']))
+    if tracker.get('error_message'):
+        fields.append(('error_message', tracker['error_message']))
+
+    aggregate_metrics = tracker.get('aggregate_metrics', {})
+    for key in sorted(aggregate_metrics):
+        fields.append((key, aggregate_metrics[key]))
+
+    print(SUMMARY_START, flush=True)
+    for key, value in fields:
+        print(f'{key}={_fmt_summary_value(value)}', flush=True)
+    print(SUMMARY_END, flush=True)
+    tracker['summary_emitted'] = True
 
 def check_if_in_span(R_K_norm, v, norm='l2'):
     v /= v.pow(2).sum(-1,keepdim=True).sqrt()
@@ -483,6 +635,11 @@ def reconstruct(args, sample, metric, model_wrapper):
         true_grads = apply_defense(
             true_grads, args, model_wrapper=model_wrapper, batch=orig_batch, labels=true_labels
         )
+    true_grads = apply_partial_gradient_filter(
+        true_grads,
+        args,
+        parameter_names=model_wrapper.trainable_parameter_names(),
+    )
     prediction, predicted_sentences, predicted_sentences_scores = [], [], []
 
     with torch.no_grad():
@@ -589,13 +746,16 @@ def reconstruct(args, sample, metric, model_wrapper):
             else:
                 rec_l2.append( torch.all(boolsq2).item() )
         
-        print( f'Rec L1: {rec_l1}, Rec L1 MaxB: {rec_l1_maxB}, Rec MaxB Token: {total_correct_maxB_tokens/total_tokens}, Rec Token: {total_correct_tokens/total_tokens}, Rec L2: {rec_l2}' )
+        rec_maxb_token = total_correct_maxB_tokens / total_tokens if total_tokens > 0 else 0.0
+        rec_token = total_correct_tokens / total_tokens if total_tokens > 0 else 0.0
+        print( f'Rec L1: {rec_l1}, Rec L1 MaxB: {rec_l1_maxB}, Rec MaxB Token: {rec_maxb_token}, Rec Token: {rec_token}, Rec L2: {rec_l2}' )
+        _record_rec_metrics(args, 'ok', rec_l1, rec_l1_maxB, rec_l2, rec_maxb_token, rec_token)
 
         if args.neptune:
             args.neptune['logs/rec_l1'].log( np.array(rec_l1).sum() )
             args.neptune['logs/rec_l1_max_b'].log( np.array(rec_l1_maxB).sum() ) 
-            args.neptune['logs/maxB token'].log( total_correct_maxB_tokens/total_tokens ) 
-            args.neptune['logs/token'].log( total_correct_tokens/total_tokens ) 
+            args.neptune['logs/maxB token'].log( rec_maxb_token )
+            args.neptune['logs/token'].log( rec_token )
             args.neptune['logs/rec_l2'].log( np.array(rec_l2).sum() ) 
             
         if model_wrapper.is_decoder():
@@ -721,68 +881,89 @@ def print_metrics(args, res, suffix):
         args.neptune[f'logs/r1fm+r2fm_{suffix}'].log(sum_12_fm*100)
     print(f'r1fm+r2fm = {sum_12_fm*100:.3f}', flush=True)
     print()
+    return _metric_summary(res) if suffix == 'agg' else None
 
 def main():
-    device = torch.device(args.device)
-    metric = load_metric('rouge', cache_dir=args.cache_dir)
-    dataset = TextDataset(args.device, args.dataset, args.split, args.n_inputs, args.batch_size, args.cache_dir)
-
-    model_wrapper = ModelWrapper(args)
-
-    print('\n\nAttacking..\n', flush=True)
-    predictions, references = [], []
+    args.result_tracker = _init_result_tracker(args)
     t_start = time.time()
-    
-    for i in range(args.start_input, min(args.n_inputs, args.end_input)):
-        t_input_start = time.time()
-        sample = dataset[i] # (seqs, labels)
+    try:
+        device = torch.device(args.device)
+        metric = load_metric('rouge', cache_dir=args.cache_dir)
+        dataset = TextDataset(args.device, args.dataset, args.split, args.n_inputs, args.batch_size, args.cache_dir)
 
-        print(f'Running input #{i} of {args.n_inputs}.', flush=True)
+        model_wrapper = ModelWrapper(args)
+
+        print('\n\nAttacking..\n', flush=True)
+        predictions, references = [], []
+
+        for i in range(args.start_input, min(args.n_inputs, args.end_input)):
+            t_input_start = time.time()
+            sample = dataset[i] # (seqs, labels)
+
+            print(f'Running input #{i} of {args.n_inputs}.', flush=True)
+            if args.neptune:
+                args.neptune['logs/curr_input'].log(i)
+
+            print('reference: ', flush=True)
+            for seq in sample[0]:
+                print('========================', flush=True)
+                print(seq, flush=True)
+
+            print('========================', flush=True)
+
+            args.defense_rng_step = i
+            prediction, reference = reconstruct(args, sample, metric, model_wrapper)
+            predictions += prediction
+            references += reference
+
+            print(f'Done with input #{i} of {args.n_inputs}.', flush=True)
+            print('reference: ', flush=True)
+            for seq in reference:
+                print('========================', flush=True)
+                print(seq, flush=True)
+            print('========================', flush=True)
+
+            print('predicted: ', flush=True)
+            for seq in prediction:
+                print('========================', flush=True)
+                print(seq, flush=True)
+            print('========================', flush=True)
+
+            print('[Curr input metrics]:', flush=True)
+            res = metric.compute(predictions=prediction, references=reference)
+            print_metrics(args, res, suffix='curr')
+
+            print('[Aggregate metrics]:', flush=True)
+            res = metric.compute(predictions=predictions, references=references)
+            args.result_tracker['aggregate_metrics'] = print_metrics(args, res, suffix='agg')
+
+            input_time = str(datetime.timedelta(seconds=time.time() - t_input_start)).split(".")[0]
+            total_time = str(datetime.timedelta(seconds=time.time() - t_start)).split(".")[0]
+            args.result_tracker['n_inputs_completed'] += 1
+            args.result_tracker['last_input_idx'] = i
+            args.result_tracker['last_input_time'] = input_time
+            args.result_tracker['last_total_time'] = total_time
+            print(f'input #{i} time: {input_time} | total time: {total_time}', flush=True)
+            print()
+            print()
+
+        if args.result_tracker['last_total_time'] is None:
+            args.result_tracker['last_total_time'] = str(datetime.timedelta(seconds=time.time() - t_start)).split(".")[0]
+
+        print('Done with all.', flush=True)
         if args.neptune:
-            args.neptune['logs/curr_input'].log(i)
-
-        print('reference: ', flush=True)
-        for seq in sample[0]:
-            print('========================', flush=True)
-            print(seq, flush=True)
-
-        print('========================', flush=True)
-        
-        args.defense_rng_step = i
-        prediction, reference = reconstruct(args, sample, metric, model_wrapper)
-        predictions += prediction
-        references += reference
-
-        print(f'Done with input #{i} of {args.n_inputs}.', flush=True)
-        print('reference: ', flush=True)
-        for seq in reference:
-            print('========================', flush=True)
-            print(seq, flush=True)
-        print('========================', flush=True)
-
-        print('predicted: ', flush=True)
-        for seq in prediction:
-            print('========================', flush=True)
-            print(seq, flush=True)
-        print('========================', flush=True)
-
-        print('[Curr input metrics]:', flush=True)
-        res = metric.compute(predictions=prediction, references=reference)
-        print_metrics(args, res, suffix='curr')
-
-        print('[Aggregate metrics]:', flush=True)
-        res = metric.compute(predictions=predictions, references=references)
-        print_metrics(args, res, suffix='agg')
-
-        input_time = str(datetime.timedelta(seconds=time.time() - t_input_start)).split(".")[0]
-        total_time = str(datetime.timedelta(seconds=time.time() - t_start)).split(".")[0]
-        print(f'input #{i} time: {input_time} | total time: {total_time}', flush=True)
-        print()
-        print()
-
-    print('Done with all.', flush=True)
-    if args.neptune:
-        args.neptune['logs/curr_input'].log(args.n_inputs)
+            args.neptune['logs/curr_input'].log(args.n_inputs)
+        _emit_result_summary(args)
+    except Exception as exc:
+        args.result_tracker['result_status'] = 'failed'
+        args.result_tracker['error_type'] = type(exc).__name__
+        args.result_tracker['error_message'] = str(exc)
+        if args.result_tracker['last_total_time'] is None:
+            args.result_tracker['last_total_time'] = str(
+                datetime.timedelta(seconds=time.time() - t_start)
+            ).split(".")[0]
+        _emit_result_summary(args)
+        raise
 
 if __name__ == '__main__':
     main()
