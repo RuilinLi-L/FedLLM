@@ -7,6 +7,19 @@ from typing import Iterable, Sequence
 DEFAULT_LAYER_SUBSET = "all"
 DEFAULT_PARAM_FILTER = "all"
 VALID_PARAM_FILTERS = frozenset({"all", "qkv_only", "lora_only"})
+PARTIAL_ATTACK_FULL_VISIBLE = "full_gradient_visible"
+PARTIAL_ATTACK_DAGER_PREFIX = "dager_prefix_visible"
+PARTIAL_ATTACK_DAGER_QKV = "dager_qkv_visible"
+PARTIAL_ATTACK_LORA_ADAPTER = "lora_adapter_visible"
+PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX = "unsupported_nonprefix_dager"
+PARTIAL_ATTACK_UNSUPPORTED_INSUFFICIENT = "unsupported_insufficient_visible_matrices"
+
+
+class UnsupportedPartialGradientExposureError(RuntimeError):
+    def __init__(self, message: str, *, variant: str, reason: str):
+        super().__init__(message)
+        self.variant = variant
+        self.reason = reason
 
 
 def partial_gradient_active(args) -> bool:
@@ -28,20 +41,56 @@ def validate_partial_gradient_args(args):
     return args
 
 
+def infer_partial_attack_variant(args) -> str:
+    layer_subset = getattr(args, "gradient_layer_subset", DEFAULT_LAYER_SUBSET)
+    param_filter = getattr(args, "gradient_param_filter", DEFAULT_PARAM_FILTER)
+
+    if not partial_gradient_active(args):
+        return PARTIAL_ATTACK_FULL_VISIBLE
+    mode, _ = _parse_layer_subset(layer_subset)
+    if mode in {"last", "mid", "middle"}:
+        return PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX
+    if param_filter == "lora_only":
+        return PARTIAL_ATTACK_LORA_ADAPTER
+    if param_filter == "qkv_only":
+        return PARTIAL_ATTACK_DAGER_QKV
+    if mode == "first":
+        return PARTIAL_ATTACK_DAGER_PREFIX
+    return PARTIAL_ATTACK_FULL_VISIBLE
+
+
+def mark_partial_gradient_unsupported(args, *, variant: str, reason: str) -> None:
+    info = getattr(args, "partial_gradient_info", _default_partial_gradient_info(args))
+    info["partial_attack_variant"] = variant
+    info["unsupported_reason"] = reason
+    setattr(args, "partial_gradient_info", info)
+
+
+def _default_partial_gradient_info(args=None):
+    return {
+        "gradient_layer_subset": getattr(args, "gradient_layer_subset", DEFAULT_LAYER_SUBSET),
+        "gradient_param_filter": getattr(args, "gradient_param_filter", DEFAULT_PARAM_FILTER),
+        "partial_filter_active": partial_gradient_active(args) if args is not None else False,
+        "partial_attack_variant": infer_partial_attack_variant(args) if args is not None else PARTIAL_ATTACK_FULL_VISIBLE,
+        "visible_grad_count": "n/a",
+        "visible_matrix_grad_count": "n/a",
+        "visible_param_names": "n/a",
+        "dager_visible_candidate_count": "n/a",
+        "dager_visible_param_names": "n/a",
+        "selected_block_ids": "n/a",
+        "unsupported_reason": _default_unsupported_reason(args) if args is not None else "n/a",
+    }
+
+
 def apply_partial_gradient_filter(grads, args, parameter_names: Iterable[str] | None = None):
     layer_subset = getattr(args, "gradient_layer_subset", DEFAULT_LAYER_SUBSET)
     param_filter = getattr(args, "gradient_param_filter", DEFAULT_PARAM_FILTER)
     active = partial_gradient_active(args)
 
-    info = {
-        "gradient_layer_subset": layer_subset,
-        "gradient_param_filter": param_filter,
-        "partial_filter_active": active,
-        "visible_grad_count": "n/a",
-        "visible_matrix_grad_count": "n/a",
-        "visible_param_names": "n/a",
-        "dager_visible_candidate_count": "n/a",
-    }
+    info = _default_partial_gradient_info(args)
+    info["gradient_layer_subset"] = layer_subset
+    info["gradient_param_filter"] = param_filter
+    info["partial_filter_active"] = active
 
     if not active:
         setattr(args, "partial_gradient_info", info)
@@ -84,23 +133,19 @@ def apply_partial_gradient_filter(grads, args, parameter_names: Iterable[str] | 
 def partial_gradient_summary_fields(args):
     info = getattr(args, "partial_gradient_info", None)
     if info is None:
-        info = {
-            "gradient_layer_subset": getattr(args, "gradient_layer_subset", DEFAULT_LAYER_SUBSET),
-            "gradient_param_filter": getattr(args, "gradient_param_filter", DEFAULT_PARAM_FILTER),
-            "partial_filter_active": partial_gradient_active(args),
-            "visible_grad_count": "n/a",
-            "visible_matrix_grad_count": "n/a",
-            "visible_param_names": "n/a",
-            "dager_visible_candidate_count": "n/a",
-        }
+        info = _default_partial_gradient_info(args)
     return [
         ("gradient_layer_subset", info.get("gradient_layer_subset", DEFAULT_LAYER_SUBSET)),
         ("gradient_param_filter", info.get("gradient_param_filter", DEFAULT_PARAM_FILTER)),
         ("partial_filter_active", info.get("partial_filter_active", False)),
+        ("partial_attack_variant", info.get("partial_attack_variant", PARTIAL_ATTACK_FULL_VISIBLE)),
         ("visible_grad_count", info.get("visible_grad_count", "n/a")),
         ("visible_matrix_grad_count", info.get("visible_matrix_grad_count", "n/a")),
         ("visible_param_names", info.get("visible_param_names", "n/a")),
         ("dager_visible_candidate_count", info.get("dager_visible_candidate_count", "n/a")),
+        ("dager_visible_param_names", info.get("dager_visible_param_names", "n/a")),
+        ("selected_block_ids", info.get("selected_block_ids", "n/a")),
+        ("unsupported_reason", info.get("unsupported_reason", "n/a")),
     ]
 
 
@@ -131,11 +176,21 @@ def select_visible_matrix_candidates(
     return selected_indices, selected_names, skipped
 
 
-def update_dager_candidate_summary(args, candidate_names: Sequence[str]) -> None:
+def update_dager_candidate_summary(
+    args,
+    candidate_names: Sequence[str],
+    *,
+    variant: str | None = None,
+    unsupported_reason: str | None = None,
+) -> None:
     info = getattr(args, "partial_gradient_info", {})
     info["dager_visible_candidate_count"] = len(candidate_names)
-    if candidate_names:
-        info["dager_visible_param_names"] = _summarize_names(candidate_names)
+    info["dager_visible_param_names"] = _summarize_names(candidate_names)
+    info["selected_block_ids"] = _summarize_block_ids(candidate_names)
+    if variant is not None:
+        info["partial_attack_variant"] = variant
+    if unsupported_reason is not None:
+        info["unsupported_reason"] = unsupported_reason
     setattr(args, "partial_gradient_info", info)
 
 
@@ -152,10 +207,10 @@ def non_prefix_dager_block_ids(candidate_names: Sequence[str], n_layers: int) ->
 def _parse_layer_subset(layer_subset: str):
     if layer_subset == DEFAULT_LAYER_SUBSET:
         return DEFAULT_LAYER_SUBSET, None
-    match = re.fullmatch(r"(first|last)(\d+)", str(layer_subset))
+    match = re.fullmatch(r"(first|last|mid|middle)(\d+)", str(layer_subset))
     if not match:
         raise ValueError(
-            "--gradient_layer_subset must be 'all' or a value like first2/last2; "
+            "--gradient_layer_subset must be 'all' or a value like first2/last2/mid2; "
             f"got {layer_subset!r}."
         )
     n_layers = int(match.group(2))
@@ -172,8 +227,11 @@ def _layer_selector(layer_subset: str, names: Sequence[str]):
     layer_ids = sorted({layer_id for name in names for layer_id in [_extract_block_id(name)] if layer_id is not None})
     if mode == "first":
         selected = set(layer_ids[:n_layers])
-    else:
+    elif mode == "last":
         selected = set(layer_ids[-n_layers:])
+    else:
+        start = max(0, (len(layer_ids) - n_layers) // 2)
+        selected = set(layer_ids[start:start + n_layers])
     return lambda name: _extract_block_id(name) in selected
 
 
@@ -223,3 +281,21 @@ def _summarize_names(names: Sequence[str], limit: int = 8) -> str:
     if len(names) > limit:
         shown.append(f"...(+{len(names) - limit})")
     return ";".join(shown)
+
+
+def _summarize_block_ids(names: Sequence[str]) -> str:
+    if not names:
+        return "none"
+    ids = []
+    for name in names:
+        layer_id = _extract_block_id(str(name))
+        ids.append("unknown" if layer_id is None else str(layer_id))
+    return ";".join(ids)
+
+
+def _default_unsupported_reason(args) -> str:
+    if args is None:
+        return "n/a"
+    if infer_partial_attack_variant(args) == PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX:
+        return "nonprefix_layer_subset_requires_layer_aligned_decoder"
+    return "n/a"

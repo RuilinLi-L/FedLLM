@@ -6,6 +6,13 @@ import warnings
 from utils.ext import update_causal_mask
 from utils.partial_models import add_partial_forward_gpt2, add_partial_forward_bert, add_partial_forward_llama
 from utils.partial_gradient import (
+    PARTIAL_ATTACK_DAGER_QKV,
+    PARTIAL_ATTACK_LORA_ADAPTER,
+    PARTIAL_ATTACK_UNSUPPORTED_INSUFFICIENT,
+    PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+    UnsupportedPartialGradientExposureError,
+    infer_partial_attack_variant,
+    mark_partial_gradient_unsupported,
     non_prefix_dager_block_ids,
     partial_gradient_active,
     select_visible_matrix_candidates,
@@ -638,29 +645,62 @@ class ModelWrapper():
                 candidate_names,
                 self.args.n_layers,
             )
-            update_dager_candidate_summary(self.args, selected_names)
             if len(selected_indices) < self.args.n_layers:
                 skipped_preview = ', '.join(
                     f'{name}:{reason}' for _, name, reason in skipped[:8]
                 )
-                raise ValueError(
+                reason = 'not_enough_visible_matrix_gradients_for_dager_span'
+                update_dager_candidate_summary(
+                    self.args,
+                    selected_names,
+                    variant=PARTIAL_ATTACK_UNSUPPORTED_INSUFFICIENT,
+                    unsupported_reason=reason,
+                )
+                mark_partial_gradient_unsupported(
+                    self.args,
+                    variant=PARTIAL_ATTACK_UNSUPPORTED_INSUFFICIENT,
+                    reason=reason,
+                )
+                raise UnsupportedPartialGradientExposureError(
                     'Partial-gradient exposure does not leave enough matrix-like gradients '
                     f'for DAGER span decomposition: need {self.args.n_layers}, '
                     f'found {len(selected_indices)}. '
                     f'gradient_layer_subset={getattr(self.args, "gradient_layer_subset", "all")}, '
                     f'gradient_param_filter={getattr(self.args, "gradient_param_filter", "all")}. '
-                    f'Skipped candidates: {skipped_preview or "none"}.'
+                    f'Skipped candidates: {skipped_preview or "none"}.',
+                    variant=PARTIAL_ATTACK_UNSUPPORTED_INSUFFICIENT,
+                    reason=reason,
                 )
             non_prefix_ids = non_prefix_dager_block_ids(selected_names, self.args.n_layers)
             if non_prefix_ids is not None:
-                raise ValueError(
+                reason = 'nonprefix_layer_subset_requires_layer_aligned_decoder'
+                update_dager_candidate_summary(
+                    self.args,
+                    selected_names,
+                    variant=PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+                    unsupported_reason=reason,
+                )
+                mark_partial_gradient_unsupported(
+                    self.args,
+                    variant=PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+                    reason=reason,
+                )
+                raise UnsupportedPartialGradientExposureError(
                     'Partial-gradient DAGER currently supports prefix transformer-layer exposures only. '
                     'The selected visible matrix gradients map to transformer blocks '
                     f'{non_prefix_ids}, but the decoder span checks consume blocks '
                     f'{list(range(self.args.n_layers))}. Use --gradient_layer_subset firstN, '
                     '--gradient_param_filter qkv_only, or --gradient_param_filter lora_only until '
-                    'non-prefix layer-aligned hidden-state decoding is implemented.'
+                    'non-prefix layer-aligned hidden-state decoding is implemented.',
+                    variant=PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+                    reason=reason,
                 )
+            variant = infer_partial_attack_variant(self.args)
+            if getattr(self.args, 'train_method', 'full') == 'lora':
+                variant = PARTIAL_ATTACK_LORA_ADAPTER
+            elif getattr(self.args, 'gradient_param_filter', 'all') == 'qkv_only':
+                variant = PARTIAL_ATTACK_DAGER_QKV
+            update_dager_candidate_summary(self.args, selected_names, variant=variant)
             grad_indices = selected_indices
             grad_names = selected_names
 

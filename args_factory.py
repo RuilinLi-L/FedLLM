@@ -67,7 +67,7 @@ def get_args(argv=None):
         '--gradient_layer_subset',
         type=str,
         default='all',
-        help="Gradient exposure by transformer layer: all, firstN, or lastN (e.g. first2, last2).",
+        help="Gradient exposure by transformer layer: all, firstN, lastN, or midN (e.g. first2, last2, mid2).",
     )
     parser.add_argument(
         '--gradient_param_filter',

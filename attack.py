@@ -10,7 +10,12 @@ from utils.functional import get_top_B_in_span, check_if_in_span, remove_padding
 from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import lrb_preset_param_value
-from utils.partial_gradient import apply_partial_gradient_filter, partial_gradient_summary_fields
+from utils.partial_gradient import (
+    UnsupportedPartialGradientExposureError,
+    apply_partial_gradient_filter,
+    mark_partial_gradient_unsupported,
+    partial_gradient_summary_fields,
+)
 from args_factory import get_args
 import time
 
@@ -595,6 +600,18 @@ def main():
             args.neptune['logs/curr_input'].log(args.n_inputs)
         _emit_result_summary(args)
     except Exception as exc:
+        if isinstance(exc, UnsupportedPartialGradientExposureError):
+            args.result_tracker['result_status'] = 'unsupported'
+            args.result_tracker['error_type'] = type(exc).__name__
+            args.result_tracker['error_message'] = str(exc)
+            args.result_tracker['last_rec_status'] = 'unsupported'
+            mark_partial_gradient_unsupported(args, variant=exc.variant, reason=exc.reason)
+            if args.result_tracker['last_total_time'] is None:
+                args.result_tracker['last_total_time'] = str(
+                    datetime.timedelta(seconds=time.time() - t_start)
+                ).split(".")[0]
+            _emit_result_summary(args)
+            return
         args.result_tracker['result_status'] = 'failed'
         args.result_tracker['error_type'] = type(exc).__name__
         args.result_tracker['error_message'] = str(exc)

@@ -3,12 +3,13 @@
 # Usage:
 #   ./scripts/partial_gradient_baselines.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --exposure first2 --finetuned_path PATH [extra attack args...]
 # Script-only flags:
-#   --exposure <first2|last2|qkv_only|lora_only>
+#   --exposure <first2|last2|mid2|qkv_only|lora_only>
 #   --train_method <full|lora>
 #   --baseline_defense <none|noise|dpsgd|topk|compression|soteria|mixup|dager|lrb|lrbprojonly>
 #   --baseline_param <value>
 #   --lrb_variants <comma-separated LRB presets>
 #   --lrb_main_k <value>
+#   --allow_unsupported_exposure
 
 set -euo pipefail
 
@@ -31,6 +32,9 @@ BASELINE_DEFENSE=""
 BASELINE_PARAM=""
 LRB_VARIANTS_RAW=""
 LRB_MAIN_K="0.5"
+ALLOW_UNSUPPORTED_EXPOSURE=0
+PARTIAL_ATTACK_VARIANT="full_gradient_visible"
+UNSUPPORTED_REASON="n/a"
 EXTRA=()
 
 ALL_FULL_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb lrbprojonly )
@@ -103,6 +107,10 @@ parse_script_args() {
         ;;
       --lrb_main_k=*)
         LRB_MAIN_K="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --allow_unsupported_exposure)
+        ALLOW_UNSUPPORTED_EXPOSURE=1
         idx=$((idx + 1))
         ;;
       *)
@@ -236,18 +244,31 @@ exposure_flags() {
   case "$EXPOSURE" in
     first2)
       EXPOSURE_EXTRA=( --gradient_layer_subset first2 --gradient_param_filter all )
+      PARTIAL_ATTACK_VARIANT="dager_prefix_visible"
+      UNSUPPORTED_REASON="n/a"
       ;;
     last2)
       EXPOSURE_EXTRA=( --gradient_layer_subset last2 --gradient_param_filter all )
+      PARTIAL_ATTACK_VARIANT="unsupported_nonprefix_dager"
+      UNSUPPORTED_REASON="nonprefix_layer_subset_requires_layer_aligned_decoder"
+      ;;
+    mid[0-9]*|middle[0-9]*)
+      EXPOSURE_EXTRA=( --gradient_layer_subset "$EXPOSURE" --gradient_param_filter all )
+      PARTIAL_ATTACK_VARIANT="unsupported_nonprefix_dager"
+      UNSUPPORTED_REASON="nonprefix_layer_subset_requires_layer_aligned_decoder"
       ;;
     qkv_only)
       EXPOSURE_EXTRA=( --gradient_layer_subset all --gradient_param_filter qkv_only )
+      PARTIAL_ATTACK_VARIANT="dager_qkv_visible"
+      UNSUPPORTED_REASON="n/a"
       ;;
     lora_only)
       EXPOSURE_EXTRA=( --gradient_layer_subset all --gradient_param_filter lora_only )
+      PARTIAL_ATTACK_VARIANT="lora_adapter_visible"
+      UNSUPPORTED_REASON="n/a"
       ;;
     *)
-      echo "[partial-gradient] --exposure must be one of: first2, last2, qkv_only, lora_only." >&2
+      echo "[partial-gradient] --exposure must be one of: first2, last2, mid2, qkv_only, lora_only." >&2
       exit 2
       ;;
   esac
@@ -324,10 +345,14 @@ defense_param_value=${param:-n/a}
 gradient_layer_subset=${GRADIENT_LAYER_SUBSET}
 gradient_param_filter=${GRADIENT_PARAM_FILTER}
 partial_filter_active=true
+partial_attack_variant=${PARTIAL_ATTACK_VARIANT}
 visible_grad_count=n/a
 visible_matrix_grad_count=n/a
 visible_param_names=n/a
 dager_visible_candidate_count=n/a
+dager_visible_param_names=n/a
+selected_block_ids=n/a
+unsupported_reason=${UNSUPPORTED_REASON}
 n_inputs_requested=${N_INPUTS}
 n_inputs_completed=0
 last_rec_status=failed
@@ -363,10 +388,14 @@ defense_param_value=${param:-n/a}
 gradient_layer_subset=${GRADIENT_LAYER_SUBSET}
 gradient_param_filter=${GRADIENT_PARAM_FILTER}
 partial_filter_active=true
+partial_attack_variant=${PARTIAL_ATTACK_VARIANT}
 visible_grad_count=n/a
 visible_matrix_grad_count=n/a
 visible_param_names=n/a
 dager_visible_candidate_count=n/a
+dager_visible_param_names=n/a
+selected_block_ids=n/a
+unsupported_reason=${UNSUPPORTED_REASON}
 n_inputs_requested=${N_INPUTS}
 n_inputs_completed=0
 last_rec_status=unsupported
@@ -374,6 +403,45 @@ rec_token_mean=n/a
 rec_maxb_token_mean=n/a
 error_type=unsupported_defense
 error_message=LoRA/PEFT eval currently supports only defenses: none, noise, dpsgd, topk, compression, soteria, mixup, lrb
+===== RESULT SUMMARY END =====
+EOF
+}
+
+dager_unsupported_exposure_summary_block() {
+  local defense="$1"
+  local param="$2"
+  cat <<EOF
+===== RESULT SUMMARY START =====
+summary_version=2
+result_status=unsupported
+dataset=${DATASET}
+split=val
+task=seq_class
+model_path=${MODEL}
+finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
+batch_size=${BATCH}
+train_method=${TRAIN_METHOD}
+defense=${defense}
+defense_param_name=$(dager_param_name "$defense")
+defense_param_value=${param:-n/a}
+gradient_layer_subset=${GRADIENT_LAYER_SUBSET}
+gradient_param_filter=${GRADIENT_PARAM_FILTER}
+partial_filter_active=true
+partial_attack_variant=${PARTIAL_ATTACK_VARIANT}
+visible_grad_count=n/a
+visible_matrix_grad_count=n/a
+visible_param_names=n/a
+dager_visible_candidate_count=n/a
+dager_visible_param_names=n/a
+selected_block_ids=n/a
+unsupported_reason=${UNSUPPORTED_REASON}
+n_inputs_requested=${N_INPUTS}
+n_inputs_completed=0
+last_rec_status=unsupported
+rec_token_mean=n/a
+rec_maxb_token_mean=n/a
+error_type=unsupported_partial_exposure
+error_message=${UNSUPPORTED_REASON}
 ===== RESULT SUMMARY END =====
 EOF
 }
@@ -513,6 +581,9 @@ header_line="===== run start $(date '+%Y-%m-%d %H:%M:%S') tag=partial_gradient_b
   echo "exposure=${EXPOSURE}"
   echo "gradient_layer_subset=${GRADIENT_LAYER_SUBSET}"
   echo "gradient_param_filter=${GRADIENT_PARAM_FILTER}"
+  echo "partial_attack_variant=${PARTIAL_ATTACK_VARIANT}"
+  echo "unsupported_reason=${UNSUPPORTED_REASON}"
+  echo "allow_unsupported_exposure=${ALLOW_UNSUPPORTED_EXPOSURE}"
   echo "train_method=${TRAIN_METHOD}"
   echo "focus_baseline_defense=${BASELINE_DEFENSE:-all}"
   echo "focus_baseline_param=${BASELINE_PARAM:-all}"
@@ -561,6 +632,19 @@ run_variant() {
   echo "---------- ${log_base} ----------"
   def_file="${run_dir}/${log_base}.txt"
   t_start=$(date '+%Y-%m-%d %H:%M:%S')
+
+  if [[ "$PARTIAL_ATTACK_VARIANT" == unsupported_* && "$ALLOW_UNSUPPORTED_EXPOSURE" != "1" ]]; then
+    summary_block="$(dager_unsupported_exposure_summary_block "$defense" "$param")"
+    t_end=$(date '+%Y-%m-%d %H:%M:%S')
+    write_variant_summary_file "$def_file" "$summary_block" "$defense" "$param" "$log_base" "$t_start" "$t_end" 0
+    {
+      echo ""
+      echo "========== variant=${log_base} exposure=${EXPOSURE} defense=${defense} param=${param:-n/a} =========="
+      printf '%s\n' "$summary_block"
+    } >>"${summary_path}"
+    variant_files+=( "$def_file" )
+    return 0
+  fi
 
   if [ "$TRAIN_METHOD" = "lora" ] && ! is_supported_lora_defense "$defense"; then
     summary_block="$(dager_unsupported_summary_block "$defense" "$param")"
