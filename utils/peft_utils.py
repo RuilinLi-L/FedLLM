@@ -23,6 +23,7 @@ LLAMA_PEFT_MODELS = frozenset(
 
 SUPPORTED_PEFT_MODELS = GPT2_PEFT_MODELS | BERT_PEFT_MODELS | LLAMA_PEFT_MODELS
 SUPPORTED_PEFT_METHODS = frozenset({"lora", "ia3", "prefix"})
+SUPPORTED_PEFT_DAGER_METHODS = frozenset({"lora", "ia3"})
 SUPPORTED_PEFT_DEFENSES = frozenset(
     {"none", "noise", "dpsgd", "topk", "compression", "soteria", "mixup", "lrb", "lrbprojonly"}
 )
@@ -495,7 +496,16 @@ def resolve_peft_config(
         return PeftResolvedConfig(method, None, target, feedforward, None, metadata)
 
     if method == "prefix":
-        n_tokens = peft_num_virtual_tokens or metadata.adapter_num_virtual_tokens or 20
+        n_tokens = metadata.adapter_num_virtual_tokens
+        if peft_num_virtual_tokens is not None:
+            if n_tokens is not None and int(peft_num_virtual_tokens) != int(n_tokens):
+                raise ValueError(
+                    "--peft_num_virtual_tokens does not match PEFT adapter config: "
+                    f"cli={peft_num_virtual_tokens!r}, adapter={n_tokens!r}."
+                )
+            n_tokens = peft_num_virtual_tokens
+        if n_tokens is None:
+            n_tokens = 20
         if int(n_tokens) <= 0:
             raise ValueError("--peft_num_virtual_tokens must be positive.")
         if model_path in LLAMA_PEFT_MODELS:
@@ -616,7 +626,10 @@ def build_peft_config(
     if peft_method == "prefix":
         if model_path in LLAMA_PEFT_MODELS:
             raise NotImplementedError("Prefix tuning for Llama is planned for v2; v1 supports BERT and GPT-2.")
-        kwargs = {"num_virtual_tokens": int(peft_num_virtual_tokens or 20)}
+        n_tokens = 20 if peft_num_virtual_tokens is None else int(peft_num_virtual_tokens)
+        if n_tokens <= 0:
+            raise ValueError("--peft_num_virtual_tokens must be positive.")
+        kwargs = {"num_virtual_tokens": n_tokens}
         if task_type is not None:
             kwargs["task_type"] = task_type
         return peft.PrefixTuningConfig(**kwargs)
@@ -785,6 +798,11 @@ def validate_peft_eval_args(args):
     if not peft_active(args):
         return args
     apply_peft_config_to_args(args, require_checkpoint=True)
+    if getattr(args, "peft_method", None) not in SUPPORTED_PEFT_DAGER_METHODS:
+        raise NotImplementedError(
+            "PEFT DAGER eval currently supports LoRA and IA3 adapter-gradient spans; "
+            f"got peft_method={getattr(args, 'peft_method', None)!r}."
+        )
     defense = getattr(args, "defense", "none")
     if defense not in SUPPORTED_PEFT_DEFENSES:
         raise NotImplementedError(

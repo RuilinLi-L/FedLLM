@@ -12,6 +12,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import args_factory
+import train
 from train import prepare_training_defense
 from utils.models import select_lora_gradient_indices, select_peft_gradient_indices
 from utils.peft_utils import (
@@ -44,7 +46,7 @@ def _temp_adapter_dir() -> str:
     return _temp_peft_adapter_dir("LORA")
 
 
-def _temp_peft_adapter_dir(peft_type: str, model_path: str = "gpt2") -> str:
+def _temp_peft_adapter_dir(peft_type: str, model_path: str = "gpt2", num_virtual_tokens: int = 20) -> str:
     path = Path(tempfile.mkdtemp())
     config = {"peft_type": peft_type, "task_type": "SEQ_CLS", "base_model_name_or_path": model_path}
     if peft_type == "LORA":
@@ -52,7 +54,7 @@ def _temp_peft_adapter_dir(peft_type: str, model_path: str = "gpt2") -> str:
     elif peft_type == "IA3":
         config.update({"target_modules": ["query", "value", "intermediate.dense"], "feedforward_modules": ["intermediate.dense"]})
     elif peft_type == "PREFIX_TUNING":
-        config.update({"num_virtual_tokens": 20})
+        config.update({"num_virtual_tokens": num_virtual_tokens})
     (path / "adapter_config.json").write_text(json.dumps(config), encoding="utf-8")
     torch.save({"dummy": torch.tensor([1.0])}, path / "adapter_model.bin")
     return str(path)
@@ -370,7 +372,7 @@ def test_bert_lora_eval_args_are_supported():
 
 def test_ia3_and_prefix_adapter_metadata_normalize():
     ia3_dir = Path(_temp_peft_adapter_dir("IA3", model_path="bert-base-uncased"))
-    prefix_dir = Path(_temp_peft_adapter_dir("PREFIX_TUNING", model_path="bert-base-uncased"))
+    prefix_dir = Path(_temp_peft_adapter_dir("PREFIX_TUNING", model_path="bert-base-uncased", num_virtual_tokens=8))
     try:
         ia3_args = SimpleNamespace(
             train_method="peft",
@@ -405,7 +407,7 @@ def test_ia3_and_prefix_adapter_metadata_normalize():
         apply_peft_config_to_args(prefix_args, require_checkpoint=True)
         assert_true(prefix_args.peft_method == "prefix", "PREFIX_TUNING metadata should normalize to peft_method=prefix")
         assert_true(prefix_args.peft_type == "PREFIX_TUNING", "prefix peft_type should preserve adapter metadata")
-        assert_true(prefix_args.peft_num_virtual_tokens == 20, "prefix virtual tokens should be read from adapter config")
+        assert_true(prefix_args.peft_num_virtual_tokens == 8, "prefix virtual tokens should be read from adapter config")
     finally:
         for directory in (ia3_dir, prefix_dir):
             for child in directory.iterdir():
@@ -426,26 +428,126 @@ def test_unsupported_adapter_method_is_v2_error():
         raise AssertionError("Houlsby-style adapter should not be enabled in v1")
 
 
-def test_peft_gradient_inventory_supports_ia3_and_prefix_names():
+def test_prefix_eval_is_rejected_for_dager_span():
+    prefix_dir = Path(_temp_peft_adapter_dir("PREFIX_TUNING", model_path="bert-base-uncased", num_virtual_tokens=8))
+    try:
+        args = SimpleNamespace(
+            train_method="peft",
+            peft_method="prefix",
+            model_path="bert-base-uncased",
+            finetuned_path=str(prefix_dir),
+            lora_r=None,
+            defense="lrb",
+            task="seq_class",
+            lora_target_modules=None,
+            peft_num_virtual_tokens=None,
+        )
+        try:
+            validate_peft_eval_args(args)
+        except NotImplementedError as exc:
+            assert_true("LoRA and IA3" in str(exc), "Prefix DAGER rejection should mention supported methods")
+        else:
+            raise AssertionError("Prefix PEFT eval should be rejected until DAGER span support exists")
+    finally:
+        for child in prefix_dir.iterdir():
+            child.unlink()
+        prefix_dir.rmdir()
+
+
+def test_prefix_virtual_token_override_validates_positive():
+    try:
+        resolve_peft_config(
+            model_path="bert-base-uncased",
+            peft_method="prefix",
+            task="seq_class",
+            peft_num_virtual_tokens=0,
+        )
+    except ValueError as exc:
+        assert_true("positive" in str(exc), "zero prefix virtual tokens should fail validation")
+    else:
+        raise AssertionError("zero prefix virtual tokens should not silently fall back to default")
+
+
+def test_prefix_virtual_token_override_rejects_adapter_mismatch():
+    prefix_dir = Path(_temp_peft_adapter_dir("PREFIX_TUNING", model_path="bert-base-uncased", num_virtual_tokens=8))
+    try:
+        try:
+            resolve_peft_config(
+                model_path="bert-base-uncased",
+                peft_method="prefix",
+                checkpoint_path=str(prefix_dir),
+                task="seq_class",
+                peft_num_virtual_tokens=20,
+            )
+        except ValueError as exc:
+            assert_true("peft_num_virtual_tokens" in str(exc), "prefix token mismatch should mention the flag")
+        else:
+            raise AssertionError("prefix token mismatch should fail validation")
+    finally:
+        for child in prefix_dir.iterdir():
+            child.unlink()
+        prefix_dir.rmdir()
+
+
+def test_adapter_is_not_exposed_as_cli_choice():
+    for parser_factory in (args_factory.get_args, train.build_parser):
+        try:
+            if parser_factory is args_factory.get_args:
+                parser_factory([
+                    "--dataset", "sst2",
+                    "--task", "seq_class",
+                    "--split", "val",
+                    "--n_inputs", "1",
+                    "--l1_filter", "all",
+                    "--l2_filter", "non-overlap",
+                    "--train_method", "peft",
+                    "--peft_method", "adapter",
+                    "--finetuned_path", "dummy",
+                ])
+            else:
+                parser_factory().parse_args([
+                    "--train_method", "peft",
+                    "--peft_method", "adapter",
+                ])
+        except SystemExit:
+            continue
+        raise AssertionError("adapter should not be accepted as a PEFT CLI choice in v1")
+
+
+def test_peft_gradient_inventory_deduplicates_transformer_layers():
     names = [
         "base_model.model.bert.encoder.layer.0.attention.self.query.ia3_l.default",
-        "base_model.model.bert.encoder.layer.0.intermediate.dense.ia3_l.default",
+        "base_model.model.bert.encoder.layer.0.attention.self.value.ia3_l.default",
+        "base_model.model.bert.encoder.layer.1.attention.self.query.ia3_l.default",
+        "base_model.model.bert.encoder.layer.1.attention.self.value.ia3_l.default",
         "base_model.model.classifier.modules_to_save.default.weight",
     ]
     ia3_selected = select_peft_gradient_indices(
         names,
         peft_method="ia3",
-        target_modules="query,intermediate.dense",
+        target_modules="query,value",
         preferred_modules=["query"],
     )
-    assert_true(ia3_selected == [(0, names[0])], "IA3 inventory should prefer requested attention adapter tensors")
+    assert_true(
+        ia3_selected == [(0, names[0]), (2, names[2])],
+        f"IA3 inventory should select one preferred tensor per transformer layer: {ia3_selected}",
+    )
 
-    prefix_names = [
-        "prompt_encoder.default.embedding.weight",
-        "base_model.model.classifier.modules_to_save.default.weight",
+    lora_names = [
+        "base_model.model.bert.encoder.layer.0.attention.self.query.lora_A.default.weight",
+        "base_model.model.bert.encoder.layer.0.attention.self.value.lora_A.default.weight",
+        "base_model.model.bert.encoder.layer.1.attention.self.query.lora_A.default.weight",
+        "base_model.model.bert.encoder.layer.1.attention.self.value.lora_A.default.weight",
     ]
-    prefix_selected = select_peft_gradient_indices(prefix_names, peft_method="prefix")
-    assert_true(prefix_selected == [(0, prefix_names[0])], "Prefix inventory should select prompt encoder tensors")
+    lora_selected = select_lora_gradient_indices(
+        lora_names,
+        target_modules="query,value",
+        preferred_modules=["query"],
+    )
+    assert_true(
+        lora_selected == [(0, lora_names[0]), (2, lora_names[2])],
+        f"LoRA inventory should select one preferred tensor per transformer layer: {lora_selected}",
+    )
 
 
 def test_lora_training_allows_post_gradient_lrb():
@@ -487,7 +589,11 @@ def main():
         test_bert_lora_eval_args_are_supported,
         test_ia3_and_prefix_adapter_metadata_normalize,
         test_unsupported_adapter_method_is_v2_error,
-        test_peft_gradient_inventory_supports_ia3_and_prefix_names,
+        test_prefix_eval_is_rejected_for_dager_span,
+        test_prefix_virtual_token_override_validates_positive,
+        test_prefix_virtual_token_override_rejects_adapter_mismatch,
+        test_adapter_is_not_exposed_as_cli_choice,
+        test_peft_gradient_inventory_deduplicates_transformer_layers,
         test_lora_training_allows_post_gradient_lrb,
         test_lora_training_rejects_direct_generation_defenses,
     ]

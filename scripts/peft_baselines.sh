@@ -429,14 +429,18 @@ write_variant_summary_file() {
 parse_script_args
 
 case "$PEFT_METHOD" in
-  lora|ia3|prefix)
+  lora|ia3)
+    ;;
+  prefix)
+    echo "[dager] --peft_method prefix is trainable but not supported by DAGER span eval in v1." >&2
+    exit 2
     ;;
   adapter)
     echo "[dager] --peft_method adapter is planned for v2 but not enabled in v1." >&2
     exit 2
     ;;
   *)
-    echo "[dager] --peft_method must be lora, ia3, or prefix." >&2
+    echo "[dager] --peft_method must be lora or ia3 for DAGER PEFT eval." >&2
     exit 2
     ;;
 esac

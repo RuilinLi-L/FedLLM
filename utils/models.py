@@ -1,4 +1,5 @@
 import os
+import re
 from contextlib import contextmanager
 import torch
 import torch.nn.functional as F
@@ -24,6 +25,35 @@ from utils.representation_bottleneck import apply_representation_bottleneck, rep
 from constants import config
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
 from utils.functional import get_layer_decomp
+
+def _peft_transformer_layer_id(name):
+    lower = name.lower()
+    for pattern in (
+        r"\.h\.(\d+)\.",
+        r"\.layer\.(\d+)\.",
+        r"\.layers\.(\d+)\.",
+        r"\.block\.(\d+)\.",
+    ):
+        match = re.search(pattern, lower)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _dedupe_peft_indices_by_layer(selected):
+    out = []
+    seen_layers = set()
+    for idx, name in selected:
+        layer_id = _peft_transformer_layer_id(name)
+        if layer_id is None:
+            out.append((idx, name))
+            continue
+        if layer_id in seen_layers:
+            continue
+        seen_layers.add(layer_id)
+        out.append((idx, name))
+    return out
+
 
 def select_lora_gradient_indices(parameter_names, target_modules=None, preferred_modules=None):
     target_parts = []
@@ -65,7 +95,7 @@ def select_lora_gradient_indices(parameter_names, target_modules=None, preferred
             if is_adapter_name(name, prefer_a=prefer_a, preferred_only=preferred_only)
         ]
         if selected:
-            return selected
+            return _dedupe_peft_indices_by_layer(selected)
     return []
 
 
@@ -108,7 +138,7 @@ def select_peft_gradient_indices(parameter_names, peft_method='lora', target_mod
             if is_adapter_name(name, preferred_only=preferred_only)
         ]
         if selected:
-            return selected
+            return _dedupe_peft_indices_by_layer(selected)
     return []
 
 

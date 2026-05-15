@@ -226,11 +226,8 @@ def apply_training_defense(model, wrapper, trainable_params, batch, labels, loss
             labels=labels,
         )
     else:
-        if rep_bottleneck_active(args):
-            raw_grads = wrapper.compute_grads(batch, labels)
-        else:
-            loss.backward()
-            raw_grads = capture_gradients(trainable_params)
+        loss.backward()
+        raw_grads = capture_gradients(trainable_params)
         defended_grads = apply_defense(
             raw_grads,
             args,
@@ -258,8 +255,8 @@ def build_parser():
         help="Optional tokenizer source when model_path points to a checkpoint directory without tokenizer files.",
     )
     parser.add_argument("--train_method", type=str, default="full", choices=["full", "lora", "peft"])
-    parser.add_argument("--peft_method", type=str, default=None, choices=["lora", "ia3", "prefix", "adapter"])
-    parser.add_argument("--peft_num_virtual_tokens", type=int, default=20)
+    parser.add_argument("--peft_method", type=str, default=None, choices=["lora", "ia3", "prefix"])
+    parser.add_argument("--peft_num_virtual_tokens", type=int, default=None)
     parser.add_argument("--lora_r", type=int, default=None)
     parser.add_argument(
         "--lora_target_modules",

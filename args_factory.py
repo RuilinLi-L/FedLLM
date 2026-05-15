@@ -307,8 +307,8 @@ def get_args(argv=None):
     
     # PEFT / LoRA
     parser.add_argument('--train_method', type=str, default='full', choices=['full', 'lora', 'peft'])
-    parser.add_argument('--peft_method', type=str, default=None, choices=['lora', 'ia3', 'prefix', 'adapter'])
-    parser.add_argument('--peft_num_virtual_tokens', type=int, default=20)
+    parser.add_argument('--peft_method', type=str, default=None, choices=['lora', 'ia3', 'prefix'])
+    parser.add_argument('--peft_num_virtual_tokens', type=int, default=None)
     parser.add_argument('--lora_r', type=int, default=None)
     parser.add_argument(
         '--lora_target_modules',
