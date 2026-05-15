@@ -14,7 +14,7 @@ from transformers import (
     DataCollatorWithPadding,
 )
 
-from .peft_utils import apply_lora_adapter
+from .peft_utils import apply_peft_adapter, peft_active
 
 
 def set_random_seed(seed: int) -> None:
@@ -164,15 +164,17 @@ def load_seq_class_model_and_tokenizer(args):
     else:
         model.config.pad_token_id = tokenizer.pad_token_id
 
-    if getattr(args, "train_method", "full") == "lora":
-        model = apply_lora_adapter(
+    if peft_active(args):
+        model = apply_peft_adapter(
             model,
             model_path=args.model_path,
+            peft_method=getattr(args, "peft_method", "lora"),
             lora_r=args.lora_r,
             checkpoint_path=getattr(args, "finetuned_path", None),
             unwrap_base_model=False,
             task=getattr(args, "task", "seq_class"),
             target_modules=getattr(args, "lora_target_modules", None),
+            peft_num_virtual_tokens=getattr(args, "peft_num_virtual_tokens", None),
         )
 
     tokenizer.model_max_length = 512

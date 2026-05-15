@@ -208,8 +208,10 @@ def soteria_defense(model_wrapper, batch, labels, args, create_graph=False):
     if getattr(args, "task", None) != "seq_class":
         raise NotImplementedError("Soteria baseline is only supported for task=seq_class.")
     train_method = getattr(args, "train_method", "full")
-    if train_method not in {"full", "lora"}:
-        raise NotImplementedError("Soteria baseline is only supported for train_method=full or train_method=lora.")
+    if train_method == "lora":
+        train_method = "peft"
+    if train_method not in {"full", "peft"}:
+        raise NotImplementedError("Soteria baseline is only supported for train_method=full or train_method=peft/lora.")
 
     pruning_rate = float(getattr(args, "defense_soteria_pruning_rate", 60.0))
     if pruning_rate < 0 or pruning_rate > 100:

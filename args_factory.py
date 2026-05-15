@@ -3,8 +3,9 @@ import time
 import sys
 
 from utils.lrb_presets import LRB_PRESET_CHOICES, apply_lrb_preset
-from utils.peft_utils import validate_lora_eval_args
+from utils.peft_utils import normalize_peft_args, validate_peft_eval_args
 from utils.partial_gradient import validate_partial_gradient_args
+from utils.representation_bottleneck import REP_BOTTLENECK_CHOICES, validate_rep_bottleneck_args
 
 def get_args(argv=None):
     parser = argparse.ArgumentParser(description='DAGER attack')
@@ -209,6 +210,25 @@ def get_args(argv=None):
         choices=['signed_pool', 'pool'],
         help='Public subspace projection used by LRB; signed_pool is the randomized-basis default.',
     )
+    parser.add_argument(
+        '--defense_rep_bottleneck',
+        type=str,
+        default='none',
+        choices=REP_BOTTLENECK_CHOICES,
+        help='Representation-side bottleneck applied to classifier-input representations.',
+    )
+    parser.add_argument(
+        '--defense_rep_keep_ratio',
+        type=float,
+        default=0.5,
+        help='Keep ratio for representation-side mask/projection bottlenecks.',
+    )
+    parser.add_argument(
+        '--defense_rep_dropout_p',
+        type=float,
+        default=0.1,
+        help='Dropout probability for representation-side dropout bottleneck.',
+    )
     
     # DAGER-specific defense parameters
     parser.add_argument(
@@ -285,8 +305,10 @@ def get_args(argv=None):
     parser.add_argument('--hidden_act', type=str, default=None)
     parser.add_argument('--loss', type=str, default='ce', choices=['ce', 'mse'])
     
-    #LoRA
-    parser.add_argument('--train_method', type=str, default='full', choices=['full', 'lora'])
+    # PEFT / LoRA
+    parser.add_argument('--train_method', type=str, default='full', choices=['full', 'lora', 'peft'])
+    parser.add_argument('--peft_method', type=str, default=None, choices=['lora', 'ia3', 'prefix', 'adapter'])
+    parser.add_argument('--peft_num_virtual_tokens', type=int, default=20)
     parser.add_argument('--lora_r', type=int, default=None)
     parser.add_argument(
         '--lora_target_modules',
@@ -298,6 +320,7 @@ def get_args(argv=None):
     if argv is None:
        argv = sys.argv[1:]
     args=parser.parse_args(argv)
+    normalize_peft_args(args)
     apply_lrb_preset(args)
 
     if args.log_file:
@@ -311,7 +334,9 @@ def get_args(argv=None):
         args.n_incorrect = args.batch_size
 
     validate_partial_gradient_args(args)
-    validate_lora_eval_args(args)
+    validate_rep_bottleneck_args(args)
+    validate_peft_eval_args(args)
+    apply_lrb_preset(args)
 
     if args.neptune is not None:
         import neptune.new as neptune

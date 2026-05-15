@@ -6,6 +6,7 @@ from typing import Sequence
 import torch
 
 from utils.lrb_presets import LRB_PRESET_CHOICES, lrb_preset_param_value
+from utils.representation_bottleneck import REP_BOTTLENECK_CHOICES
 
 
 DEFENSE_CHOICES = [
@@ -160,6 +161,25 @@ def add_shared_defense_args(parser: ArgumentParser, *, default_grad_mode: str = 
         default="signed_pool",
         choices=["signed_pool", "pool"],
         help="Public subspace projection used by LRB.",
+    )
+    parser.add_argument(
+        "--defense_rep_bottleneck",
+        type=str,
+        default="none",
+        choices=REP_BOTTLENECK_CHOICES,
+        help="Representation-side bottleneck applied to classifier-input representations.",
+    )
+    parser.add_argument(
+        "--defense_rep_keep_ratio",
+        type=float,
+        default=0.5,
+        help="Keep ratio for representation mask/projection bottlenecks.",
+    )
+    parser.add_argument(
+        "--defense_rep_dropout_p",
+        type=float,
+        default=0.1,
+        help="Dropout probability for representation-side dropout bottleneck.",
     )
     parser.add_argument(
         "--defense_dager_basis_perturb",

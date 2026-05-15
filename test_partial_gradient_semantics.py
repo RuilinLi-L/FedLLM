@@ -138,6 +138,18 @@ def test_lora_only_excludes_modules_to_save_heads():
     )
 
 
+def test_lora_only_filter_includes_peft_adapter_families():
+    names = [
+        "base_model.model.bert.encoder.layer.0.attention.self.query.ia3_l.default",
+        "prompt_encoder.default.embedding.weight",
+        "base_model.model.classifier.modules_to_save.default.weight",
+        "base_model.model.bert.encoder.layer.0.attention.self.query.weight",
+    ]
+    filtered = apply_partial_gradient_filter(_grads(len(names)), _args(param_filter="lora_only"), names)
+    kept = [idx for idx, grad in enumerate(filtered) if grad is not None]
+    assert_true(kept == [0, 1], f"lora_only should now include IA3/Prefix adapter tensors: {kept}")
+
+
 def test_first2_qkv_is_and_filter():
     names = [
         "transformer.h.0.attn.c_attn.weight",
@@ -234,6 +246,7 @@ def main():
         test_last2_keeps_last_two_transformer_blocks,
         test_qkv_only_matches_supported_model_families,
         test_lora_only_excludes_modules_to_save_heads,
+        test_lora_only_filter_includes_peft_adapter_families,
         test_first2_qkv_is_and_filter,
         test_visible_matrix_candidates_skip_hidden_and_vector_tensors,
         test_non_prefix_dager_candidates_are_detected,

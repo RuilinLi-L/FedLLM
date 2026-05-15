@@ -1,4 +1,5 @@
 import os
+from contextlib import contextmanager
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -18,7 +19,8 @@ from utils.partial_gradient import (
     select_visible_matrix_candidates,
     update_dager_candidate_summary,
 )
-from utils.peft_utils import apply_lora_adapter
+from utils.peft_utils import apply_peft_adapter, peft_active
+from utils.representation_bottleneck import apply_representation_bottleneck, rep_bottleneck_active
 from constants import config
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
 from utils.functional import get_layer_decomp
@@ -67,6 +69,49 @@ def select_lora_gradient_indices(parameter_names, target_modules=None, preferred
     return []
 
 
+def select_peft_gradient_indices(parameter_names, peft_method='lora', target_modules=None, preferred_modules=None):
+    method = (peft_method or 'lora').lower()
+    if method == 'lora':
+        return select_lora_gradient_indices(parameter_names, target_modules, preferred_modules)
+
+    target_parts = []
+    if target_modules and target_modules != 'n/a':
+        target_parts = [
+            part.strip().lower()
+            for part in str(target_modules).split(',')
+            if part.strip() and part.strip() != 'all-linear'
+        ]
+    preferred_parts = [
+        part.strip().lower()
+        for part in (preferred_modules or [])
+        if str(part).strip()
+    ]
+
+    def is_adapter_name(name, *, preferred_only=False):
+        lower = name.lower()
+        if 'modules_to_save' in lower:
+            return False
+        if method == 'ia3' and 'ia3' not in lower:
+            return False
+        if method == 'prefix' and not any(part in lower for part in ('prefix', 'prompt_encoder')):
+            return False
+        if target_parts and not any(part in lower for part in target_parts):
+            return False
+        if preferred_only and preferred_parts and not any(part in lower for part in preferred_parts):
+            return False
+        return True
+
+    for preferred_only in (True, False):
+        selected = [
+            (idx, name)
+            for idx, name in enumerate(parameter_names)
+            if is_adapter_name(name, preferred_only=preferred_only)
+        ]
+        if selected:
+            return selected
+    return []
+
+
 class ModelWrapper():
     def __init__(self, args):
         assert (args.model_path in ['bert-base-uncased', 'gpt2', 'openai-community/gpt2-large', 'meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-70b-hf', 'meta-llama/Meta-Llama-3-8B', 'meta-llama/Meta-Llama-3.1-8B', 'meta-llama/Meta-Llama-3-70B']),\
@@ -76,9 +121,11 @@ class ModelWrapper():
         self.full_model = None
         self.lora_gradient_indices = []
         self.lora_gradient_names = []
+        self.peft_gradient_indices = []
+        self.peft_gradient_names = []
         model_kwargs = {'cache_dir': args.cache_dir} if args.cache_dir is not None else {}
 
-        model_kwargs['pretrained_model_name_or_path'] = args.model_path if args.finetuned_path is None or args.train_method == 'lora' else args.finetuned_path
+        model_kwargs['pretrained_model_name_or_path'] = args.model_path if args.finetuned_path is None or peft_active(args) else args.finetuned_path
         model_kwargs['attn_implementation'] = args.attn_implementation
 
         if args.hidden_act is not None and args.model_path in ['gpt2', 'openai-community/gpt2-large']:
@@ -131,15 +178,17 @@ class ModelWrapper():
             self.model.config.pad_token_id = self.model.config.eos_token_id
             self.pad_token = self.model.config.eos_token_id
             self.tokenizer.add_special_tokens({'pad_token': self.tokenizer.eos_token})
-            if args.train_method == 'lora':
-                self.model = apply_lora_adapter(
+            if peft_active(args):
+                self.model = apply_peft_adapter(
                     self.model,
                     model_path=args.model_path,
+                    peft_method=getattr(args, 'peft_method', 'lora'),
                     lora_r=args.lora_r,
                     checkpoint_path=args.finetuned_path,
                     unwrap_base_model=False,
                     task=args.task,
                     target_modules=getattr(args, 'lora_target_modules', None),
+                    peft_num_virtual_tokens=getattr(args, 'peft_num_virtual_tokens', None),
                 )
                 self.full_model = self.model
                 self.base_model = self._unwrap_model_for_attack(self.model)
@@ -151,19 +200,34 @@ class ModelWrapper():
             add_partial_forward_gpt2(self.base_model.transformer)
 
         elif args.model_path in ['bert-base-uncased']:
-            self.base_model = self.model
+            if peft_active(args):
+                self.model = apply_peft_adapter(
+                    self.model,
+                    model_path=args.model_path,
+                    peft_method=getattr(args, 'peft_method', 'lora'),
+                    lora_r=args.lora_r,
+                    checkpoint_path=args.finetuned_path,
+                    unwrap_base_model=False,
+                    task=args.task,
+                    target_modules=getattr(args, 'lora_target_modules', None),
+                    peft_num_virtual_tokens=getattr(args, 'peft_num_virtual_tokens', None),
+                )
+                self.full_model = self.model
+                self.base_model = self._unwrap_model_for_attack(self.model)
+            else:
+                self.base_model = self.model
             self.start_token = 101
             self.eos_token = 102
             self.pad_token = 0
             self.layer_ids = list(range(5,190,16))
             
             # Store embeddings
-            bert_embeddings_weight = self.model.bert.embeddings.word_embeddings.weight.unsqueeze(0)
-            bert_embeddings_weight_token = self.model.bert.embeddings.token_type_embeddings.weight.unsqueeze(0)
+            bert_embeddings_weight = self.base_model.bert.embeddings.word_embeddings.weight.unsqueeze(0)
+            bert_embeddings_weight_token = self.base_model.bert.embeddings.token_type_embeddings.weight.unsqueeze(0)
             
             self.embeddings_weight_nopos = (bert_embeddings_weight_token + bert_embeddings_weight[0][:,None,:])[None,:,:,:]
             self.emb_size = self.model.config.hidden_size
-            add_partial_forward_bert(self.model.bert)
+            add_partial_forward_bert(self.base_model.bert)
         elif args.model_path in ['meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-70b-hf', 'meta-llama/Meta-Llama-3-8B', 'meta-llama/Meta-Llama-3.1-8B', 'meta-llama/Meta-Llama-3-70B']:
             
             self.start_token = self.tokenizer.bos_token_id
@@ -177,15 +241,17 @@ class ModelWrapper():
                 self.pad_token = self.tokenizer.eos_token_id
                 self.model.config.pad_token_id = self.tokenizer.eos_token_id
             
-            if args.train_method == 'lora' and args.finetuned_path is not None:
-                self.model = apply_lora_adapter(
+            if peft_active(args) and args.finetuned_path is not None:
+                self.model = apply_peft_adapter(
                     self.model,
                     model_path=args.model_path,
+                    peft_method=getattr(args, 'peft_method', 'lora'),
                     lora_r=args.lora_r,
                     checkpoint_path=args.finetuned_path,
                     unwrap_base_model=False,
                     task=args.task,
                     target_modules=getattr(args, 'lora_target_modules', None),
+                    peft_num_virtual_tokens=getattr(args, 'peft_num_virtual_tokens', None),
                 )
                 self.full_model = self.model
                 self.base_model = self._unwrap_model_for_attack(self.model)
@@ -196,15 +262,17 @@ class ModelWrapper():
                 #else:
                     #self.model.lm_head.weight.data.normal_(mean=0.0, std=1e-6)
                     
-                if args.train_method == 'lora':
-                    self.full_model = apply_lora_adapter(
+                if peft_active(args):
+                    self.full_model = apply_peft_adapter(
                         self.model,
                         model_path=args.model_path,
+                        peft_method=getattr(args, 'peft_method', 'lora'),
                         lora_r=args.lora_r,
                         checkpoint_path=None,
                         unwrap_base_model=False,
                         task=args.task,
                         target_modules=getattr(args, 'lora_target_modules', None),
+                        peft_num_virtual_tokens=getattr(args, 'peft_num_virtual_tokens', None),
                     )
                     self.model = self.full_model
                     self.base_model = self._unwrap_model_for_attack(self.model)
@@ -220,8 +288,8 @@ class ModelWrapper():
 
         self.trainable_parameters = lambda: (param for param in self.model.parameters() if param.requires_grad)
         self.trainable_parameter_names = self._trainable_parameter_names
-        if args.train_method == 'lora':
-            self._refresh_lora_gradient_inventory()
+        if peft_active(args):
+            self._refresh_peft_gradient_inventory()
         config['START_TOKEN'] = self.start_token
         config['EOS_TOKEN'] = self.eos_token
         config['PAD_TOKEN'] = self.pad_token
@@ -238,23 +306,34 @@ class ModelWrapper():
         return [name for name, param in self.model.named_parameters() if param.requires_grad]
 
     def _refresh_lora_gradient_inventory(self):
+        self._refresh_peft_gradient_inventory()
+
+    def _refresh_peft_gradient_inventory(self):
         names = self._trainable_parameter_names()
-        selected = select_lora_gradient_indices(
+        selected = select_peft_gradient_indices(
             names,
+            getattr(self.args, 'peft_method', 'lora'),
             getattr(self.args, 'lora_target_modules', None),
-            preferred_modules=self._lora_span_preferred_modules(),
+            preferred_modules=self._peft_span_preferred_modules(),
         )
         adapter_indices = [idx for idx, _ in selected]
         adapter_names = [name for _, name in selected]
         if not adapter_indices:
             raise ValueError(
-                'LoRA trainable parameter inventory is empty. Expected lora_A/lora_B adapter '
-                'parameters, excluding modules_to_save classifier heads.'
+                'PEFT trainable parameter inventory is empty. Expected adapter parameters, '
+                'excluding modules_to_save classifier heads.'
             )
+        self.peft_gradient_indices = adapter_indices
+        self.peft_gradient_names = adapter_names
         self.lora_gradient_indices = adapter_indices
         self.lora_gradient_names = adapter_names
 
     def _lora_span_preferred_modules(self):
+        return self._peft_span_preferred_modules()
+
+    def _peft_span_preferred_modules(self):
+        if self.args.model_path in ['bert-base-uncased']:
+            return ['query', 'value']
         if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
             return ['c_attn']
         if self.args.model_path in [
@@ -268,7 +347,7 @@ class ModelWrapper():
         return []
 
     def _classifier_model(self):
-        if self.args.train_method == 'lora' and hasattr(self.model, 'score'):
+        if peft_active(self.args) and hasattr(self.model, 'score'):
             return self.model
         return self.base_model
         
@@ -332,6 +411,16 @@ class ModelWrapper():
 
     def _compute_standard_grads_prepared(self, batch, labels, create_graph=False):
         self.model.zero_grad(set_to_none=True)
+        if self.args.task == 'seq_class' and rep_bottleneck_active(self.args):
+            with self._representation_bottleneck_hook():
+                outs = self.model(**batch, labels=labels.view(-1).long(), output_hidden_states=True)
+            loss = outs.loss
+            return torch.autograd.grad(
+                loss,
+                self.trainable_parameters(),
+                create_graph=create_graph,
+                allow_unused=True,
+            )
         if self.is_lower() and self.args.task == 'seq_class':
             outputs = self.model(**batch)
             logits = outputs.logits.float()
@@ -365,7 +454,7 @@ class ModelWrapper():
             return self.base_model.transformer.wte(batch['input_ids'])
 
         if self.args.model_path in ['bert-base-uncased']:
-            bert = self.model.bert
+            bert = self.base_model.bert
             el = bert.embeddings
             input_ids = batch['input_ids']
             token_type_ids = batch.get('token_type_ids', torch.zeros_like(input_ids))
@@ -417,6 +506,7 @@ class ModelWrapper():
             representation = hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
             if representation_mask is not None:
                 representation = representation * representation_mask
+            representation = apply_representation_bottleneck(representation, self.args)
             return representation
 
         if self.args.model_path in ['bert-base-uncased']:
@@ -432,6 +522,7 @@ class ModelWrapper():
                 representation = sequence_output[:, 0]
             if representation_mask is not None:
                 representation = representation * representation_mask
+            representation = apply_representation_bottleneck(representation, self.args)
             return representation
 
         if self.args.model_path in [
@@ -466,6 +557,7 @@ class ModelWrapper():
             representation = hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
             if representation_mask is not None:
                 representation = representation * representation_mask
+            representation = apply_representation_bottleneck(representation, self.args)
             return representation
 
         raise NotImplementedError(f'Seq-class forward not implemented for {self.args.model_path}')
@@ -475,7 +567,8 @@ class ModelWrapper():
             return self._classifier_model().score(representation)
 
         if self.args.model_path in ['bert-base-uncased']:
-            return self.model.classifier(self.model.dropout(representation))
+            classifier_model = self.model if hasattr(self.model, 'classifier') else self.base_model
+            return classifier_model.classifier(classifier_model.dropout(representation))
 
         if self.args.model_path in [
             'meta-llama/Llama-2-7b-hf',
@@ -487,6 +580,50 @@ class ModelWrapper():
             return self._classifier_model().score(representation)
 
         raise NotImplementedError(f'Seq-class classifier head not implemented for {self.args.model_path}')
+
+    def _classifier_head(self):
+        if self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
+            return getattr(self._classifier_model(), 'score', None)
+
+        if self.args.model_path in ['bert-base-uncased']:
+            classifier_model = self.model if hasattr(self.model, 'classifier') else self.base_model
+            return getattr(classifier_model, 'classifier', None)
+
+        if self.args.model_path in [
+            'meta-llama/Llama-2-7b-hf',
+            'meta-llama/Llama-2-70b-hf',
+            'meta-llama/Meta-Llama-3-8B',
+            'meta-llama/Meta-Llama-3.1-8B',
+            'meta-llama/Meta-Llama-3-70B',
+        ]:
+            return getattr(self._classifier_model(), 'score', None)
+
+        raise NotImplementedError(f'Seq-class classifier head not implemented for {self.args.model_path}')
+
+    @contextmanager
+    def _representation_bottleneck_hook(self):
+        if not rep_bottleneck_active(self.args):
+            yield {"representation": None}
+            return
+
+        captured = {"representation": None}
+
+        def hook(_module, inputs):
+            if not inputs:
+                return None
+            representation = apply_representation_bottleneck(inputs[0], self.args)
+            captured["representation"] = representation
+            return (representation, *inputs[1:])
+
+        classifier_head = self._classifier_head()
+        if classifier_head is None:
+            yield captured
+            return
+        handle = classifier_head.register_forward_pre_hook(hook)
+        try:
+            yield captured
+        finally:
+            handle.remove()
 
     def _seq_class_logits_from_embeds(self, batch, inputs_embeds, representation_mask=None):
         representation = self._seq_class_representation_from_embeds(
@@ -620,14 +757,14 @@ class ModelWrapper():
             self.model.to(device)
 
     def get_matrices_expansions(self, true_grads, B=None, tol=None):
-        if self.args.train_method == 'lora':
-            grad_indices = self.lora_gradient_indices
-            grad_names = self.lora_gradient_names
+        if peft_active(self.args):
+            grad_indices = self.peft_gradient_indices
+            grad_names = self.peft_gradient_names
             if len(grad_indices) < self.args.n_layers:
                 raise ValueError(
-                    'LoRA DAGER span check needs at least args.n_layers adapter tensors; '
+                    'PEFT DAGER span check needs at least args.n_layers adapter tensors; '
                     f'found {len(grad_indices)} tensor(s): {grad_names}. '
-                    'Check --lora_target_modules and adapter_config.json.'
+                    'Check --peft_method, --lora_target_modules, and adapter_config.json.'
                 )
         else:
             grad_indices = self.layer_ids
@@ -696,7 +833,7 @@ class ModelWrapper():
                     reason=reason,
                 )
             variant = infer_partial_attack_variant(self.args)
-            if getattr(self.args, 'train_method', 'full') == 'lora':
+            if peft_active(self.args):
                 variant = PARTIAL_ATTACK_LORA_ADAPTER
             elif getattr(self.args, 'gradient_param_filter', 'all') == 'qkv_only':
                 variant = PARTIAL_ATTACK_DAGER_QKV
@@ -745,7 +882,7 @@ class ModelWrapper():
         
         for i in range(self.args.n_layers):
             grad_Q = true_grads[grad_indices[i]]
-            if self.args.train_method != 'lora' and self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
+            if not peft_active(self.args) and self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
                 grad_Q = grad_Q.T
             _, R_Q = get_layer_decomp(grad_Q, B=B, tol=tol, upcast=(self.args.precision=='half'))
             R_Q = R_Q.to(self.args.device)
@@ -754,9 +891,9 @@ class ModelWrapper():
             
     def get_embeddings(self, pos = None):
         if self.args.model_path in ['bert-base-uncased']:
-            bert_embeddings_weight_position = self.model.bert.embeddings.position_embeddings.weight.unsqueeze(0)
+            bert_embeddings_weight_position = self.base_model.bert.embeddings.position_embeddings.weight.unsqueeze(0)
             emb = self.embeddings_weight_nopos.to(self.args.device) + bert_embeddings_weight_position[0][pos:pos+1,None,None,:]
-            emb = self.model.bert.embeddings.LayerNorm(emb)
+            emb = self.base_model.bert.embeddings.LayerNorm(emb)
             return emb
         
         elif self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
@@ -778,7 +915,7 @@ class ModelWrapper():
             #     emb = self.model.bert.encoder.layer[i](emb)[0]# As end of sentence tokens have little gradient they are unreliable measures for sentence inclusion
             #     layer_inputs.append(emb[ : , :-1, : ].clone())
             # return layer_inputs
-            return self.model.bert.get_hidden_states(input_ids=sentences, token_type_ids=token_type_ids, n_layers=layers)
+            return self.base_model.bert.get_hidden_states(input_ids=sentences, token_type_ids=token_type_ids, n_layers=layers)
         
         elif self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
             return self.base_model.transformer.get_hidden_states(input_ids=sentences, attention_mask=attention_mask, n_layers=layers)

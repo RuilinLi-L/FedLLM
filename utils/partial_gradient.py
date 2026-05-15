@@ -10,7 +10,8 @@ VALID_PARAM_FILTERS = frozenset({"all", "qkv_only", "lora_only"})
 PARTIAL_ATTACK_FULL_VISIBLE = "full_gradient_visible"
 PARTIAL_ATTACK_DAGER_PREFIX = "dager_prefix_visible"
 PARTIAL_ATTACK_DAGER_QKV = "dager_qkv_visible"
-PARTIAL_ATTACK_LORA_ADAPTER = "lora_adapter_visible"
+PARTIAL_ATTACK_LORA_ADAPTER = "peft_adapter_visible"
+PARTIAL_ATTACK_PEFT_ADAPTER = PARTIAL_ATTACK_LORA_ADAPTER
 PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX = "unsupported_nonprefix_dager"
 PARTIAL_ATTACK_UNSUPPORTED_INSUFFICIENT = "unsupported_insufficient_visible_matrices"
 
@@ -256,7 +257,12 @@ def _param_filter_matches(name: str, param_filter: str) -> bool:
     if param_filter == "lora_only":
         if "modules_to_save" in lower:
             return False
-        return bool(re.search(r"(?:^|\.)lora_[ab](?:\.|$)", lower))
+        return (
+            bool(re.search(r"(?:^|\.)lora_[ab](?:\.|$)", lower))
+            or "ia3" in lower
+            or "prompt_encoder" in lower
+            or "prefix" in lower
+        )
     if param_filter == "qkv_only":
         qkv_parts = (
             "c_attn",

@@ -4,7 +4,7 @@
 #   ./scripts/partial_gradient_baselines.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --exposure first2 --finetuned_path PATH [extra attack args...]
 # Script-only flags:
 #   --exposure <first2|last2|mid2|qkv_only|lora_only>
-#   --train_method <full|lora>
+#   --train_method <full|lora|peft>
 #   --baseline_defense <none|noise|dpsgd|topk|compression|soteria|mixup|dager|lrb|lrbprojonly>
 #   --baseline_param <value>
 #   --lrb_variants <comma-separated LRB presets>
@@ -28,6 +28,7 @@ fi
 
 EXPOSURE=""
 TRAIN_METHOD="full"
+PEFT_METHOD=""
 BASELINE_DEFENSE=""
 BASELINE_PARAM=""
 LRB_VARIANTS_RAW=""
@@ -38,8 +39,8 @@ UNSUPPORTED_REASON="n/a"
 EXTRA=()
 
 ALL_FULL_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb lrbprojonly )
-ALL_LORA_DEFENSES=( none noise dpsgd topk compression soteria mixup dager lrb )
-SUPPORTED_LORA_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb )
+ALL_PEFT_DEFENSES=( none noise dpsgd topk compression soteria mixup dager lrb lrbprojonly )
+SUPPORTED_PEFT_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb lrbprojonly )
 KNOWN_LRB_PRESETS=(
   identity_lrb
   clip_only
@@ -75,6 +76,14 @@ parse_script_args() {
         ;;
       --train_method=*)
         TRAIN_METHOD="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --peft_method)
+        PEFT_METHOD="${RAW_EXTRA[$((idx + 1))]:-}"
+        idx=$((idx + 2))
+        ;;
+      --peft_method=*)
+        PEFT_METHOD="${arg#*=}"
         idx=$((idx + 1))
         ;;
       --baseline_defense)
@@ -154,10 +163,10 @@ dager_param_slug() {
   printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | sed 's/__*/_/g' | sed 's/^_\|_$//g'
 }
 
-is_supported_lora_defense() {
+is_supported_peft_defense() {
   local defense="$1"
   local item
-  for item in "${SUPPORTED_LORA_DEFENSES[@]}"; do
+  for item in "${SUPPORTED_PEFT_DEFENSES[@]}"; do
     if [ "$item" = "$defense" ]; then
       return 0
     fi
@@ -264,7 +273,7 @@ exposure_flags() {
       ;;
     lora_only)
       EXPOSURE_EXTRA=( --gradient_layer_subset all --gradient_param_filter lora_only )
-      PARTIAL_ATTACK_VARIANT="lora_adapter_visible"
+      PARTIAL_ATTACK_VARIANT="peft_adapter_visible"
       UNSUPPORTED_REASON="n/a"
       ;;
     *)
@@ -339,6 +348,7 @@ model_path=${MODEL}
 finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
 train_method=${TRAIN_METHOD}
+peft_method=${PEFT_METHOD:-n/a}
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -382,6 +392,7 @@ model_path=${MODEL}
 finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
 train_method=${TRAIN_METHOD}
+peft_method=${PEFT_METHOD:-n/a}
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -402,7 +413,7 @@ last_rec_status=unsupported
 rec_token_mean=n/a
 rec_maxb_token_mean=n/a
 error_type=unsupported_defense
-error_message=LoRA/PEFT eval currently supports only defenses: none, noise, dpsgd, topk, compression, soteria, mixup, lrb
+error_message=PEFT eval currently supports only defenses: none, noise, dpsgd, topk, compression, soteria, mixup, lrb, lrbprojonly
 ===== RESULT SUMMARY END =====
 EOF
 }
@@ -421,6 +432,7 @@ model_path=${MODEL}
 finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
 train_method=${TRAIN_METHOD}
+peft_method=${PEFT_METHOD:-n/a}
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -476,20 +488,35 @@ if [ -z "$EXPOSURE" ]; then
 fi
 
 case "$TRAIN_METHOD" in
-  full|lora)
+  full|lora|peft)
     ;;
   *)
-    echo "[partial-gradient] --train_method must be full or lora." >&2
+    echo "[partial-gradient] --train_method must be full, lora, or peft." >&2
     exit 2
     ;;
 esac
+
+if [ -n "$PEFT_METHOD" ]; then
+  case "$PEFT_METHOD" in
+    lora|ia3|prefix)
+      ;;
+    adapter)
+      echo "[partial-gradient] --peft_method adapter is planned for v2 but not enabled in v1." >&2
+      exit 2
+      ;;
+    *)
+      echo "[partial-gradient] --peft_method must be lora, ia3, or prefix." >&2
+      exit 2
+      ;;
+  esac
+fi
 
 exposure_flags
 GRADIENT_LAYER_SUBSET="${EXPOSURE_EXTRA[1]}"
 GRADIENT_PARAM_FILTER="${EXPOSURE_EXTRA[3]}"
 
-if [ "$EXPOSURE" = "lora_only" ] && [ "$TRAIN_METHOD" != "lora" ]; then
-  echo "[partial-gradient] --exposure lora_only requires --train_method lora." >&2
+if [ "$EXPOSURE" = "lora_only" ] && [ "$TRAIN_METHOD" != "lora" ] && [ "$TRAIN_METHOD" != "peft" ]; then
+  echo "[partial-gradient] --exposure lora_only requires --train_method lora or peft." >&2
   exit 2
 fi
 
@@ -541,7 +568,16 @@ if [ -n "$LRB_VARIANTS_RAW" ]; then
 fi
 
 if [ "$TRAIN_METHOD" = "lora" ]; then
-  all_defenses=( "${ALL_LORA_DEFENSES[@]}" )
+  TRAIN_METHOD="peft"
+  PEFT_METHOD="${PEFT_METHOD:-lora}"
+fi
+
+if [ "$TRAIN_METHOD" = "peft" ]; then
+  PEFT_METHOD="${PEFT_METHOD:-lora}"
+fi
+
+if [ "$TRAIN_METHOD" = "peft" ]; then
+  all_defenses=( "${ALL_PEFT_DEFENSES[@]}" )
 else
   all_defenses=( "${ALL_FULL_DEFENSES[@]}" )
 fi
@@ -585,6 +621,7 @@ header_line="===== run start $(date '+%Y-%m-%d %H:%M:%S') tag=partial_gradient_b
   echo "unsupported_reason=${UNSUPPORTED_REASON}"
   echo "allow_unsupported_exposure=${ALLOW_UNSUPPORTED_EXPOSURE}"
   echo "train_method=${TRAIN_METHOD}"
+  echo "peft_method=${PEFT_METHOD:-n/a}"
   echo "focus_baseline_defense=${BASELINE_DEFENSE:-all}"
   echo "focus_baseline_param=${BASELINE_PARAM:-all}"
   echo "lrb_variants=${LRB_VARIANTS_RAW:-none}"
@@ -611,8 +648,8 @@ BASE=(
 )
 
 TRAIN_EXTRA=()
-if [ "$TRAIN_METHOD" = "lora" ]; then
-  TRAIN_EXTRA=( --train_method lora )
+if [ "$TRAIN_METHOD" = "peft" ]; then
+  TRAIN_EXTRA=( --train_method peft --peft_method "$PEFT_METHOD" )
 fi
 
 variant_files=()
@@ -646,7 +683,7 @@ run_variant() {
     return 0
   fi
 
-  if [ "$TRAIN_METHOD" = "lora" ] && ! is_supported_lora_defense "$defense"; then
+  if [ "$TRAIN_METHOD" = "peft" ] && ! is_supported_peft_defense "$defense"; then
     summary_block="$(dager_unsupported_summary_block "$defense" "$param")"
     t_end=$(date '+%Y-%m-%d %H:%M:%S')
     write_variant_summary_file "$def_file" "$summary_block" "$defense" "$param" "$log_base" "$t_start" "$t_end" 0
@@ -696,6 +733,11 @@ for defense in "${selected_defenses[@]}"; do
       run_variant "$defense" "$log_base" "$param" "${DEF_EXTRA[@]}"
     done
     continue
+  fi
+
+  if [ "$defense" = "lrbprojonly" ] && [ "${#LRB_VARIANTS[@]}" -gt 0 ]; then
+    echo "[partial-gradient] --lrb_variants applies to --baseline_defense lrb, not lrbprojonly." >&2
+    exit 2
   fi
 
   if [ "$defense" = "none" ]; then

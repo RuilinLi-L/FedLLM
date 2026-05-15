@@ -212,6 +212,70 @@ def test_tradeoff_join_uses_none_as_utility_anchor():
     assert_true(lrb_row["lora_r"] == "16", "tradeoff rows should keep lora_r as a distinguishing field")
 
 
+def test_tradeoff_join_distinguishes_peft_method_and_rep_bottleneck():
+    rows = [
+        {
+            "log_kind": "train",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "peft",
+            "peft_method": "ia3",
+            "lora_r": "",
+            "lora_target_modules": "query,value,intermediate.dense",
+            "rep_bottleneck_type": "projection",
+            "rep_keep_ratio": "0.5",
+            "rep_dropout_p": "0.1",
+            "defense": "none",
+            "defense_param_value": "n/a",
+            "seed": "101",
+            "result_status": "ok",
+            "eval_accuracy": "0.800000",
+            "eval_macro_f1": "0.800000",
+            "total_train_time": "00:01:00",
+        },
+        {
+            "log_kind": "train",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "peft",
+            "peft_method": "ia3",
+            "lora_r": "",
+            "lora_target_modules": "query,value,intermediate.dense",
+            "rep_bottleneck_type": "projection",
+            "rep_keep_ratio": "0.5",
+            "rep_dropout_p": "0.1",
+            "defense": "lrbprojonly",
+            "defense_param_value": "0.500000",
+            "seed": "101",
+            "result_status": "ok",
+            "eval_accuracy": "0.780000",
+            "eval_macro_f1": "0.780000",
+            "total_train_time": "00:01:05",
+        },
+        {
+            "log_kind": "attack_dager",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "peft",
+            "peft_method": "ia3",
+            "lora_r": "",
+            "lora_target_modules": "query,value,intermediate.dense",
+            "rep_bottleneck_type": "projection",
+            "rep_keep_ratio": "0.5",
+            "rep_dropout_p": "0.1",
+            "defense": "lrbprojonly",
+            "defense_param_value": "0.500000",
+            "rec_token_mean": "0.250000",
+        },
+    ]
+    tradeoff = cel.build_privacy_utility_tradeoff(rows)
+    row = next(item for item in tradeoff if item.get("defense") == "lrbprojonly")
+    assert_true(row["peft_method"] == "ia3", "tradeoff rows should keep PEFT method")
+    assert_true(row["rep_bottleneck_type"] == "projection", "tradeoff rows should keep representation bottleneck")
+    assert_true(row["utility_drop"] == "0.020000", "none anchor should match the same PEFT/rep setting")
+    assert_true(row["privacy_score"] == "0.750000", "attack row should join through PEFT/rep keys")
+
+
 def main():
     tests = [
         test_defense_param_spec_tracks_shared_cli_mapping,
@@ -219,6 +283,7 @@ def main():
         test_collect_parser_splits_multi_variant_attack_summaries,
         test_collect_parser_reads_train_and_proxy_summaries,
         test_tradeoff_join_uses_none_as_utility_anchor,
+        test_tradeoff_join_distinguishes_peft_method_and_rep_bottleneck,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

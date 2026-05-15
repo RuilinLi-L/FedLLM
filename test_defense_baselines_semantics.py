@@ -360,7 +360,7 @@ def test_bert_seq_class_structure():
     content = Path(__file__).with_name("utils").joinpath("models.py").read_text(encoding="utf8")
     assert_true("representation = bert.pooler(sequence_output)" in content, "BERT path should use pooler_output")
     assert_true(
-        "return self.model.classifier(self.model.dropout(representation))" in content,
+        "return classifier_model.classifier(classifier_model.dropout(representation))" in content,
         "BERT path should apply dropout before classifier",
     )
     assert_true("pooled = enc_out.last_hidden_state[:, 0]" not in content, "BERT path should not classify from raw CLS hidden state")
@@ -395,7 +395,7 @@ class DummyMixupModel(torch.nn.Module):
 class DummyMixupWrapper(TrainingDefenseModelWrapper):
     def __init__(self, *, task="seq_class", alpha=0.7):
         self.model = DummyMixupModel()
-        self.args = SimpleNamespace(task=task, defense_mixup_alpha=alpha)
+        self.args = SimpleNamespace(task=task, defense_mixup_alpha=alpha, defense_rep_bottleneck="none")
         self._trainable_params = tuple(self.model.parameters())
 
     def _seq_class_input_embeds(self, batch):

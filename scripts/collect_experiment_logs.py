@@ -205,8 +205,12 @@ def _meta_from_text(path: Path, text: str) -> dict[str, str]:
             meta["rank_tol"] = flags["rank_tol"]
         meta["model_path_guess"] = flags.get("model_path", "")
         meta["train_method_guess"] = flags.get("train_method", "")
+        meta["peft_method_guess"] = flags.get("peft_method", "")
         meta["lora_r_guess"] = flags.get("lora_r", "")
         meta["lora_target_modules_guess"] = flags.get("lora_target_modules", "")
+        meta["defense_rep_bottleneck_guess"] = flags.get("defense_rep_bottleneck", "")
+        meta["defense_rep_keep_ratio_guess"] = flags.get("defense_rep_keep_ratio", "")
+        meta["defense_rep_dropout_p_guess"] = flags.get("defense_rep_dropout_p", "")
     else:
         meta.update(
             {
@@ -220,8 +224,12 @@ def _meta_from_text(path: Path, text: str) -> dict[str, str]:
                 "rank_tol": "",
                 "model_path_guess": "",
                 "train_method_guess": "",
+                "peft_method_guess": "",
                 "lora_r_guess": "",
                 "lora_target_modules_guess": "",
+                "defense_rep_bottleneck_guess": "",
+                "defense_rep_keep_ratio_guess": "",
+                "defense_rep_dropout_p_guess": "",
             }
         )
     return meta
@@ -283,10 +291,15 @@ def parse_train(text: str, meta: dict) -> list[dict]:
             "num_epochs",
             "model_path",
             "train_method",
+            "peft_method",
+            "peft_num_virtual_tokens",
             "lora_r",
             "lora_target_modules",
             "defense",
             "defense_noise",
+            "defense_rep_bottleneck",
+            "defense_rep_keep_ratio",
+            "defense_rep_dropout_p",
         ):
             if key in flags:
                 row[f"train_{key}"] = flags[key]
@@ -382,11 +395,24 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "model_path",
         "batch_size",
         "train_method",
+        "peft_method",
+        "peft_type",
+        "peft_target_modules",
+        "peft_feedforward_modules",
+        "peft_num_virtual_tokens",
+        "peft_checkpoint_type",
+        "peft_adapter_r",
+        "peft_adapter_target_modules",
+        "peft_adapter_feedforward_modules",
+        "peft_adapter_task_type",
+        "peft_adapter_base_model",
+        "peft_adapter_peft_type",
         "lora_r",
         "lora_target_modules",
         "lora_checkpoint_type",
         "lora_adapter_r",
         "lora_adapter_target_modules",
+        "lora_adapter_feedforward_modules",
         "lora_adapter_task_type",
         "lora_adapter_base_model",
         "lora_adapter_peft_type",
@@ -395,6 +421,10 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "defense",
         "defense_param_name",
         "defense_param_value",
+        "rep_bottleneck_type",
+        "rep_keep_ratio",
+        "rep_dropout_p",
+        "rep_bottleneck_with_lrb",
         "gradient_layer_subset",
         "gradient_param_filter",
         "partial_filter_active",
@@ -564,6 +594,8 @@ def _row_value(row: dict, key: str, fallback_key: str | None = None, default: st
 def _model_default_lora_target_modules(model_path: str) -> str:
     if model_path in {"gpt2", "openai-community/gpt2-large"}:
         return "c_attn"
+    if model_path == "bert-base-uncased":
+        return "query,value"
     if model_path in {
         "meta-llama/Llama-2-7b-hf",
         "meta-llama/Llama-2-70b-hf",
@@ -575,6 +607,39 @@ def _model_default_lora_target_modules(model_path: str) -> str:
     return "n/a"
 
 
+def _peft_method(row: dict, fallback_key: str | None = None) -> str:
+    method = _row_value(row, "peft_method", fallback_key)
+    if not method:
+        method = _row_value(row, "peft_method_guess")
+    if method:
+        return method
+    train_method = _row_value(row, "train_method", "train_method_guess")
+    return "lora" if train_method == "lora" else ""
+
+
+def _rep_bottleneck_key(row: dict) -> tuple[str, str, str]:
+    mode = (
+        _row_value(row, "rep_bottleneck_type")
+        or _row_value(row, "train_defense_rep_bottleneck")
+        or _row_value(row, "defense_rep_bottleneck_guess")
+        or "none"
+    )
+    keep_ratio = (
+        _row_value(row, "rep_keep_ratio")
+        or _row_value(row, "train_defense_rep_keep_ratio")
+        or _row_value(row, "defense_rep_keep_ratio_guess")
+    )
+    dropout_p = (
+        _row_value(row, "rep_dropout_p")
+        or _row_value(row, "train_defense_rep_dropout_p")
+        or _row_value(row, "defense_rep_dropout_p_guess")
+    )
+    if mode == "none":
+        keep_ratio = "n/a"
+        dropout_p = "n/a"
+    return mode, keep_ratio, dropout_p
+
+
 def _normalized_lora_target_modules(
     row: dict,
     *,
@@ -584,10 +649,14 @@ def _normalized_lora_target_modules(
     train_method = _row_value(row, "train_method", "train_train_method")
     if not train_method:
         train_method = _row_value(row, "train_method_guess", default="full")
-    if train_method != "lora":
+    if train_method not in {"lora", "peft"}:
+        return "n/a"
+    if _peft_method(row, "train_peft_method") == "prefix":
         return "n/a"
 
     value = _row_value(row, value_key, fallback_key).strip()
+    if not value and value_key == "lora_target_modules":
+        value = _row_value(row, "peft_target_modules", "train_peft_target_modules").strip()
     if not value:
         value = _row_value(row, "lora_target_modules_guess").strip()
     if value and value.lower() not in {"n/a", "default"}:
@@ -607,8 +676,10 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
             row.get("dataset", ""),
             row.get("batch_size", row.get("train_batch_size", "")),
             row.get("train_method", row.get("train_train_method", "full")),
+            _peft_method(row, "train_peft_method"),
             row.get("lora_r", row.get("train_lora_r", "")),
             _normalized_lora_target_modules(row, fallback_key="train_lora_target_modules"),
+            *_rep_bottleneck_key(row),
             row.get("defense", row.get("train_defense", "none")),
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
@@ -617,14 +688,31 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
 
     out: list[dict] = []
     for key, items in sorted(grouped.items()):
-        dataset, batch_size, train_method, lora_r, lora_target_modules, defense, param_name, param_value = key
+        (
+            dataset,
+            batch_size,
+            train_method,
+            peft_method,
+            lora_r,
+            lora_target_modules,
+            rep_bottleneck_type,
+            rep_keep_ratio,
+            rep_dropout_p,
+            defense,
+            param_name,
+            param_value,
+        ) = key
         row = {
             "log_kind": "utility_summary",
             "dataset": dataset,
             "batch_size": batch_size,
             "train_method": train_method,
+            "peft_method": peft_method,
             "lora_r": lora_r,
             "lora_target_modules": lora_target_modules,
+            "rep_bottleneck_type": rep_bottleneck_type,
+            "rep_keep_ratio": rep_keep_ratio,
+            "rep_dropout_p": rep_dropout_p,
             "defense": defense,
             "defense_param_name": param_name,
             "defense_param_value": param_value,
@@ -672,8 +760,10 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             row.get("dataset", row.get("dataset_guess", "")),
             row.get("batch_size", row.get("batch_size_guess", "")),
             row.get("train_method", row.get("train_method_guess", "full")),
+            _peft_method(row),
             row.get("lora_r", row.get("lora_r_guess", "")),
             _normalized_lora_target_modules(row),
+            *_rep_bottleneck_key(row),
             row.get("defense", "none"),
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
@@ -682,15 +772,32 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
 
     out: list[dict] = []
     for key, items in sorted(grouped.items()):
-        dataset, batch_size, train_method, lora_r, lora_target_modules, defense, param_name, param_value = key
+        (
+            dataset,
+            batch_size,
+            train_method,
+            peft_method,
+            lora_r,
+            lora_target_modules,
+            rep_bottleneck_type,
+            rep_keep_ratio,
+            rep_dropout_p,
+            defense,
+            param_name,
+            param_value,
+        ) = key
         valid_items = [item for item in items if _is_complete_successful_attack(item)]
         incomplete = [item for item in items if not _is_complete_successful_attack(item)]
         row = {
             "dataset": dataset,
             "batch_size": batch_size,
             "train_method": train_method,
+            "peft_method": peft_method,
             "lora_r": lora_r,
             "lora_target_modules": lora_target_modules,
+            "rep_bottleneck_type": rep_bottleneck_type,
+            "rep_keep_ratio": rep_keep_ratio,
+            "rep_dropout_p": rep_dropout_p,
             "defense": defense,
             "defense_param_name": param_name,
             "defense_param_value": param_value,
@@ -747,8 +854,12 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("dataset", ""),
             row.get("batch_size", ""),
             row.get("train_method", "full"),
+            row.get("peft_method", ""),
             row.get("lora_r", ""),
             _normalized_lora_target_modules(row),
+            row.get("rep_bottleneck_type", "none"),
+            row.get("rep_keep_ratio", "n/a"),
+            row.get("rep_dropout_p", "n/a"),
             row.get("defense", ""),
             row.get("defense_param_value", ""),
         ): row
@@ -759,8 +870,12 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("dataset", ""),
             row.get("batch_size", ""),
             row.get("train_method", "full"),
+            row.get("peft_method", ""),
             row.get("lora_r", ""),
             _normalized_lora_target_modules(row),
+            row.get("rep_bottleneck_type", "none"),
+            row.get("rep_keep_ratio", "n/a"),
+            row.get("rep_dropout_p", "n/a"),
         ): row
         for row in utility_rows
         if row.get("defense") == "none"
@@ -771,14 +886,28 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         dataset = utility.get("dataset", "")
         batch_size = utility.get("batch_size", "")
         train_method = utility.get("train_method", "full")
+        peft_method = utility.get("peft_method", "")
         lora_r = utility.get("lora_r", "")
         lora_target_modules = _normalized_lora_target_modules(utility)
+        rep_bottleneck_type, rep_keep_ratio, rep_dropout_p = _rep_bottleneck_key(utility)
         defense = utility.get("defense", "")
         param_value = utility.get("defense_param_value", "")
 
         row = dict(utility)
         attack = attack_index.get(
-            (dataset, batch_size, train_method, lora_r, lora_target_modules, defense, param_value)
+            (
+                dataset,
+                batch_size,
+                train_method,
+                peft_method,
+                lora_r,
+                lora_target_modules,
+                rep_bottleneck_type,
+                rep_keep_ratio,
+                rep_dropout_p,
+                defense,
+                param_value,
+            )
         )
         if attack is not None:
             row["rec_token_mean"] = attack.get("rec_token_mean", "")
@@ -788,7 +917,20 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
 
         acc = _to_float(row.get("eval_accuracy"))
         none_acc = _to_float(
-            none_index.get((dataset, batch_size, train_method, lora_r, lora_target_modules), {}).get("eval_accuracy")
+            none_index.get(
+                (
+                    dataset,
+                    batch_size,
+                    train_method,
+                    peft_method,
+                    lora_r,
+                    lora_target_modules,
+                    rep_bottleneck_type,
+                    rep_keep_ratio,
+                    rep_dropout_p,
+                ),
+                {},
+            ).get("eval_accuracy")
         )
         rec_token = _to_float(row.get("rec_token_mean"))
         row["utility_drop"] = f"{(none_acc - acc):.6f}" if acc is not None and none_acc is not None else ""

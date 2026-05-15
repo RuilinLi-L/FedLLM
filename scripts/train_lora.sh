@@ -54,6 +54,7 @@ python train.py \
   --task seq_class \
   --batch_size "$BATCH" \
   --model_path "$MODEL" \
-  --train_method lora \
+  --train_method peft \
+  --peft_method lora \
   --lora_r "$LORA_R" \
   "${EXTRA[@]}"

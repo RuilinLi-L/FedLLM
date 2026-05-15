@@ -26,10 +26,11 @@ BASELINE_DEFENSE=""
 BASELINE_PARAM=""
 LRB_VARIANTS_RAW=""
 LRB_MAIN_K="0.5"
+PEFT_METHOD="lora"
 EXTRA=()
 
-ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup dager lrb )
-SUPPORTED_LORA_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb )
+ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup dager lrb lrbprojonly )
+SUPPORTED_PEFT_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb lrbprojonly )
 KNOWN_LRB_PRESETS=(
   identity_lrb
   clip_only
@@ -73,6 +74,18 @@ parse_script_args() {
         ;;
       --baseline_param=*)
         BASELINE_PARAM="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --peft_method)
+        if [ $((idx + 1)) -ge "${#RAW_EXTRA[@]}" ]; then
+          echo "[dager] --peft_method requires a value." >&2
+          exit 2
+        fi
+        PEFT_METHOD="${RAW_EXTRA[$((idx + 1))]}"
+        idx=$((idx + 2))
+        ;;
+      --peft_method=*)
+        PEFT_METHOD="${arg#*=}"
         idx=$((idx + 1))
         ;;
       --lrb_variants)
@@ -136,10 +149,10 @@ attack_extra_value() {
   return 1
 }
 
-is_supported_lora_defense() {
+is_supported_peft_defense() {
   local defense="$1"
   local item
-  for item in "${SUPPORTED_LORA_DEFENSES[@]}"; do
+  for item in "${SUPPORTED_PEFT_DEFENSES[@]}"; do
     if [ "$item" = "$defense" ]; then
       return 0
     fi
@@ -186,6 +199,9 @@ dager_param_name() {
         printf 'defense_lrb_keep_ratio_sensitive'
       fi
       ;;
+    lrbprojonly)
+      printf 'defense_lrb_preset'
+      ;;
     *)
       printf 'n/a'
       ;;
@@ -213,7 +229,7 @@ dager_set_param_values() {
     mixup)
       param_vals=( 0.1 0.3 0.5 1.0 2.0 )
       ;;
-    lrb)
+    lrb|lrbprojonly)
       param_vals=( 0.05 0.1 0.2 0.35 0.5 )
       ;;
     *)
@@ -287,12 +303,25 @@ task=seq_class
 model_path=${MODEL}
 finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
-train_method=lora
+train_method=peft
+peft_method=${PEFT_METHOD}
+peft_type=n/a
+peft_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
+peft_feedforward_modules=n/a
+peft_num_virtual_tokens=$(attack_extra_value --peft_num_virtual_tokens || printf 'n/a')
+peft_checkpoint_type=n/a
+peft_adapter_r=n/a
+peft_adapter_target_modules=n/a
+peft_adapter_feedforward_modules=n/a
+peft_adapter_task_type=n/a
+peft_adapter_base_model=n/a
+peft_adapter_peft_type=n/a
 lora_r=$(attack_extra_value --lora_r || printf 'n/a')
 lora_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
 lora_checkpoint_type=n/a
 lora_adapter_r=n/a
 lora_adapter_target_modules=n/a
+lora_adapter_feedforward_modules=n/a
 lora_adapter_task_type=n/a
 lora_adapter_base_model=n/a
 lora_adapter_peft_type=n/a
@@ -333,12 +362,25 @@ task=seq_class
 model_path=${MODEL}
 finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
-train_method=lora
+train_method=peft
+peft_method=${PEFT_METHOD}
+peft_type=n/a
+peft_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
+peft_feedforward_modules=n/a
+peft_num_virtual_tokens=$(attack_extra_value --peft_num_virtual_tokens || printf 'n/a')
+peft_checkpoint_type=n/a
+peft_adapter_r=n/a
+peft_adapter_target_modules=n/a
+peft_adapter_feedforward_modules=n/a
+peft_adapter_task_type=n/a
+peft_adapter_base_model=n/a
+peft_adapter_peft_type=n/a
 lora_r=$(attack_extra_value --lora_r || printf 'n/a')
 lora_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
 lora_checkpoint_type=n/a
 lora_adapter_r=n/a
 lora_adapter_target_modules=n/a
+lora_adapter_feedforward_modules=n/a
 lora_adapter_task_type=n/a
 lora_adapter_base_model=n/a
 lora_adapter_peft_type=n/a
@@ -357,7 +399,7 @@ rec_l2_mean=n/a
 rec_token_mean=n/a
 rec_maxb_token_mean=n/a
 error_type=unsupported_defense
-error_message=LoRA/PEFT eval currently supports only defenses: none, noise, dpsgd, topk, compression, soteria, mixup, lrb
+error_message=PEFT eval currently supports only defenses: none, noise, dpsgd, topk, compression, soteria, mixup, lrb, lrbprojonly
 ===== RESULT SUMMARY END =====
 EOF
 }
@@ -386,9 +428,22 @@ write_variant_summary_file() {
 
 parse_script_args
 
+case "$PEFT_METHOD" in
+  lora|ia3|prefix)
+    ;;
+  adapter)
+    echo "[dager] --peft_method adapter is planned for v2 but not enabled in v1." >&2
+    exit 2
+    ;;
+  *)
+    echo "[dager] --peft_method must be lora, ia3, or prefix." >&2
+    exit 2
+    ;;
+esac
+
 if [ -n "$BASELINE_DEFENSE" ]; then
   case "$BASELINE_DEFENSE" in
-    none|noise|dpsgd|topk|compression|soteria|mixup|dager|lrb)
+    none|noise|dpsgd|topk|compression|soteria|mixup|dager|lrb|lrbprojonly)
       ;;
     *)
       echo "[dager] Unsupported --baseline_defense: ${BASELINE_DEFENSE}" >&2
@@ -478,8 +533,9 @@ header_line="===== run start $(date '+%Y-%m-%d %H:%M:%S') tag=peft_baselines arg
   echo "lrb_variants=${LRB_VARIANTS_RAW:-none}"
   echo "lrb_main_k=${LRB_MAIN_K}"
   echo "selected_defenses=${selected_defenses[*]}"
-  echo "train_method=lora"
-  echo "supported_lora_defenses=${SUPPORTED_LORA_DEFENSES[*]}"
+  echo "train_method=peft"
+  echo "peft_method=${PEFT_METHOD}"
+  echo "supported_peft_defenses=${SUPPORTED_PEFT_DEFENSES[*]}"
   echo "lora_eval_semantics=dpsgd=DP-SGD-style_no_accountant;soteria=Soteria-style_representation_masking_eval_only;mixup=manifold_MixUp-style_representation_interpolation"
 } >"${run_dir}/_run_header.txt"
 cp "${run_dir}/_run_header.txt" "${summary_path}"
@@ -519,7 +575,7 @@ run_variant() {
   def_file="${run_dir}/${log_base}.txt"
   t_start=$(date '+%Y-%m-%d %H:%M:%S')
 
-  if ! is_supported_lora_defense "$defense"; then
+  if ! is_supported_peft_defense "$defense"; then
     summary_block="$(dager_unsupported_summary_block "$defense" "$param")"
     t_end=$(date '+%Y-%m-%d %H:%M:%S')
     write_variant_summary_file "$def_file" "$summary_block" "$defense" "$param" "$log_base" "$t_start" "$t_end" 0
@@ -529,14 +585,14 @@ run_variant() {
       printf '%s\n' "$summary_block"
     } >>"${summary_path}"
     variant_files+=( "$def_file" )
-    echo "[dager] Marked unsupported LoRA variant: ${def_file}" >&2
+    echo "[dager] Marked unsupported PEFT variant: ${def_file}" >&2
     return 0
   fi
 
   local tmpfile
   tmpfile=$(mktemp)
   set +e
-  "${BASE[@]}" "${EXTRA[@]}" --train_method lora --defense "$defense" "${def_extra[@]}" 2>&1 | tee "$tmpfile"
+  "${BASE[@]}" "${EXTRA[@]}" --train_method peft --peft_method "$PEFT_METHOD" --defense "$defense" "${def_extra[@]}" 2>&1 | tee "$tmpfile"
   rc=${PIPESTATUS[0]}
   set -e
   t_end=$(date '+%Y-%m-%d %H:%M:%S')
@@ -579,6 +635,11 @@ for defense in "${selected_defenses[@]}"; do
     continue
   fi
 
+  if [ "$defense" = "lrbprojonly" ] && [ "${#LRB_VARIANTS[@]}" -gt 0 ]; then
+    echo "[dager] --lrb_variants applies to --baseline_defense lrb, not lrbprojonly." >&2
+    exit 2
+  fi
+
   if [ "$defense" = "none" ]; then
     param_vals=( "" )
   elif [ -n "$BASELINE_DEFENSE" ] && [ "$defense" = "$BASELINE_DEFENSE" ] && [ -n "$BASELINE_PARAM" ]; then
@@ -613,6 +674,10 @@ for defense in "${selected_defenses[@]}"; do
           DEF_EXTRA=( --defense_mixup_alpha "$val" )
           ;;
         lrb)
+          DEF_EXTRA=( --defense_lrb_keep_ratio_sensitive "$val" )
+          ;;
+        lrbprojonly)
+          param="lrbprojonly@k=${val}"
           DEF_EXTRA=( --defense_lrb_keep_ratio_sensitive "$val" )
           ;;
       esac

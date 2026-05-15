@@ -24,7 +24,18 @@ from utils.defense_common import (
 from utils.defenses import apply_defense, requires_gradient_generation_defense
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import apply_lrb_preset
-from utils.peft_utils import apply_lora_config_to_args, save_lora_checkpoint
+from utils.peft_utils import (
+    SUPPORTED_PEFT_TRAINING_POST_GRADIENT_DEFENSES,
+    apply_peft_config_to_args,
+    normalize_peft_args,
+    peft_active,
+    save_peft_checkpoint,
+)
+from utils.representation_bottleneck import (
+    rep_bottleneck_active,
+    rep_bottleneck_summary_fields,
+    validate_rep_bottleneck_args,
+)
 from utils.seq_class_utils import (
     classification_metrics,
     load_seq_class_datasets,
@@ -67,18 +78,17 @@ def install_terminal_logging(args) -> None:
 
 def save_model(model, tokenizer, save_path: Path, train_method: str) -> str:
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    if train_method != "lora":
+    if train_method not in {"lora", "peft"}:
         save_path.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(str(save_path))
         tokenizer.save_pretrained(str(save_path))
         return str(save_path)
 
-    saved = save_lora_checkpoint(model, tokenizer, save_path)
-    print(
-        "[dager] Saved LoRA adapter to "
-        f"{saved['adapter_path']} and legacy state_dict to {saved['legacy_state_dict_path']}",
-        flush=True,
-    )
+    saved = save_peft_checkpoint(model, tokenizer, save_path)
+    message = f"[dager] Saved PEFT adapter to {saved['adapter_path']}"
+    if saved.get("legacy_state_dict_path") not in (None, "", "n/a"):
+        message += f" and legacy state_dict to {saved['legacy_state_dict_path']}"
+    print(message, flush=True)
     return saved["primary_path"]
 
 
@@ -92,6 +102,8 @@ def init_result_tracker(args) -> dict:
         "model_path": args.model_path,
         "batch_size": args.batch_size,
         "train_method": args.train_method,
+        "peft_method": getattr(args, "peft_method", None),
+        "peft_type": getattr(args, "peft_type", None),
         "lora_r": getattr(args, "lora_r", None),
         "lora_target_modules": getattr(args, "lora_target_modules", None),
         "num_epochs": args.num_epochs,
@@ -120,11 +132,24 @@ def emit_train_result_summary(args, tracker: dict) -> None:
         ("model_path", tracker.get("model_path")),
         ("batch_size", tracker.get("batch_size")),
         ("train_method", tracker.get("train_method")),
+        ("peft_method", tracker.get("peft_method")),
+        ("peft_type", tracker.get("peft_type")),
+        ("peft_target_modules", getattr(args, "peft_target_modules", None)),
+        ("peft_feedforward_modules", getattr(args, "peft_feedforward_modules", None)),
+        ("peft_num_virtual_tokens", getattr(args, "peft_num_virtual_tokens", None)),
+        ("peft_checkpoint_type", getattr(args, "peft_checkpoint_type", None)),
+        ("peft_adapter_r", getattr(args, "peft_adapter_r", None)),
+        ("peft_adapter_target_modules", getattr(args, "peft_adapter_target_modules", None)),
+        ("peft_adapter_feedforward_modules", getattr(args, "peft_adapter_feedforward_modules", None)),
+        ("peft_adapter_task_type", getattr(args, "peft_adapter_task_type", None)),
+        ("peft_adapter_base_model", getattr(args, "peft_adapter_base_model", None)),
+        ("peft_adapter_peft_type", getattr(args, "peft_adapter_peft_type", None)),
         ("lora_r", tracker.get("lora_r")),
         ("lora_target_modules", tracker.get("lora_target_modules")),
         ("lora_checkpoint_type", getattr(args, "lora_checkpoint_type", None)),
         ("lora_adapter_r", getattr(args, "lora_adapter_r", None)),
         ("lora_adapter_target_modules", getattr(args, "lora_adapter_target_modules", None)),
+        ("lora_adapter_feedforward_modules", getattr(args, "lora_adapter_feedforward_modules", None)),
         ("lora_adapter_task_type", getattr(args, "lora_adapter_task_type", None)),
         ("lora_adapter_base_model", getattr(args, "lora_adapter_base_model", None)),
         ("lora_adapter_peft_type", getattr(args, "lora_adapter_peft_type", None)),
@@ -133,6 +158,7 @@ def emit_train_result_summary(args, tracker: dict) -> None:
         ("defense", getattr(args, "defense", "none")),
         ("defense_param_name", defense_param_name),
         ("defense_param_value", defense_param_value),
+        *rep_bottleneck_summary_fields(args),
         ("output_dir", tracker.get("output_dir")),
         ("steps_completed", tracker.get("steps_completed")),
         ("final_train_loss", tracker.get("final_train_loss")),
@@ -156,7 +182,7 @@ def emit_train_result_summary(args, tracker: dict) -> None:
     tracker["summary_emitted"] = True
 
 
-def evaluate_model(model, eval_loader, device, dataset_name: str) -> dict[str, float]:
+def evaluate_model(model, eval_loader, device, dataset_name: str, wrapper=None) -> dict[str, float]:
     model.eval()
     losses = []
     predictions = []
@@ -167,9 +193,14 @@ def evaluate_model(model, eval_loader, device, dataset_name: str) -> dict[str, f
         labels = batch["labels"]
         model_inputs = {k: v for k, v in batch.items() if k != "labels"}
         with torch.no_grad():
-            outputs = model(**model_inputs, labels=labels)
-        losses.append(float(outputs.loss.item()))
-        predictions.extend(torch.argmax(outputs.logits, dim=-1).detach().cpu().tolist())
+            if wrapper is not None and rep_bottleneck_active(wrapper.args):
+                loss, logits, _ = wrapper.seq_class_loss_logits(batch, labels)
+            else:
+                outputs = model(**model_inputs, labels=labels)
+                loss = outputs.loss
+                logits = outputs.logits
+        losses.append(float(loss.item()))
+        predictions.extend(torch.argmax(logits, dim=-1).detach().cpu().tolist())
         references.extend(labels.detach().cpu().tolist())
 
     metrics = classification_metrics(predictions, references, dataset_name)
@@ -178,7 +209,7 @@ def evaluate_model(model, eval_loader, device, dataset_name: str) -> dict[str, f
 
 
 def prepare_training_defense(model, args, trainable_params):
-    if args.train_method == "lora" and args.defense in {"dpsgd", "mixup", "soteria", "dager"}:
+    if peft_active(args) and args.defense not in SUPPORTED_PEFT_TRAINING_POST_GRADIENT_DEFENSES:
         raise NotImplementedError(
             f"train_method={args.train_method} does not currently support --defense {args.defense!r}."
         )
@@ -195,8 +226,11 @@ def apply_training_defense(model, wrapper, trainable_params, batch, labels, loss
             labels=labels,
         )
     else:
-        loss.backward()
-        raw_grads = capture_gradients(trainable_params)
+        if rep_bottleneck_active(args):
+            raw_grads = wrapper.compute_grads(batch, labels)
+        else:
+            loss.backward()
+            raw_grads = capture_gradients(trainable_params)
         defended_grads = apply_defense(
             raw_grads,
             args,
@@ -223,7 +257,9 @@ def build_parser():
         default=None,
         help="Optional tokenizer source when model_path points to a checkpoint directory without tokenizer files.",
     )
-    parser.add_argument("--train_method", type=str, default="full", choices=["full", "lora"])
+    parser.add_argument("--train_method", type=str, default="full", choices=["full", "lora", "peft"])
+    parser.add_argument("--peft_method", type=str, default=None, choices=["lora", "ia3", "prefix", "adapter"])
+    parser.add_argument("--peft_num_virtual_tokens", type=int, default=20)
     parser.add_argument("--lora_r", type=int, default=None)
     parser.add_argument(
         "--lora_target_modules",
@@ -299,16 +335,19 @@ def run_training(args, tracker: dict) -> None:
             labels = batch["labels"]
             model_inputs = {k: v for k, v in batch.items() if k != "labels"}
 
+            args.defense_rng_step = n_steps
             opt.zero_grad(set_to_none=True)
-            outputs = model(**model_inputs, labels=labels)
-            logits = outputs.logits
-            loss = outputs.loss
+            if rep_bottleneck_active(args):
+                loss, logits, _ = wrapper.seq_class_loss_logits(batch, labels)
+            else:
+                outputs = model(**model_inputs, labels=labels)
+                logits = outputs.logits
+                loss = outputs.loss
 
             epoch_loss += float(loss.item())
             train_predictions.extend(torch.argmax(logits, dim=-1).detach().cpu().tolist())
             train_references.extend(labels.detach().cpu().tolist())
 
-            args.defense_rng_step = n_steps
             apply_training_defense(
                 model,
                 wrapper,
@@ -334,12 +373,12 @@ def run_training(args, tracker: dict) -> None:
         print("metric train: ", train_metrics)
         print("loss train: ", f"{tracker['final_train_loss']:.6f}")
 
-        eval_metrics = evaluate_model(model, eval_loader, device, args.dataset)
+        eval_metrics = evaluate_model(model, eval_loader, device, args.dataset, wrapper=wrapper)
         tracker["eval_metrics"] = eval_metrics
         print("metric eval: ", eval_metrics)
 
     tracker["total_train_time"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - train_start))
-    final_path = output_dir / ("final" if args.train_method != "lora" else "final_adapter")
+    final_path = output_dir / ("final" if not peft_active(args) else "final_adapter")
     tracker["final_model_path"] = save_model(model, tokenizer, final_path, args.train_method)
     print("END")
 
@@ -347,9 +386,12 @@ def run_training(args, tracker: dict) -> None:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    normalize_peft_args(args)
     normalize_legacy_training_defense_args(args)
     apply_lrb_preset(args)
-    apply_lora_config_to_args(args, require_checkpoint=False)
+    validate_rep_bottleneck_args(args)
+    apply_peft_config_to_args(args, require_checkpoint=False)
+    apply_lrb_preset(args)
     install_terminal_logging(args)
     tracker = init_result_tracker(args)
 
