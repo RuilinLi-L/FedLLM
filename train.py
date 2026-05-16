@@ -25,11 +25,11 @@ from utils.defenses import apply_defense, requires_gradient_generation_defense
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import apply_lrb_preset
 from utils.peft_utils import (
-    SUPPORTED_PEFT_TRAINING_POST_GRADIENT_DEFENSES,
     apply_peft_config_to_args,
     normalize_peft_args,
     peft_active,
     save_peft_checkpoint,
+    validate_peft_training_defense_args,
 )
 from utils.representation_bottleneck import (
     rep_bottleneck_active,
@@ -209,10 +209,7 @@ def evaluate_model(model, eval_loader, device, dataset_name: str, wrapper=None) 
 
 
 def prepare_training_defense(model, args, trainable_params):
-    if peft_active(args) and args.defense not in SUPPORTED_PEFT_TRAINING_POST_GRADIENT_DEFENSES:
-        raise NotImplementedError(
-            f"train_method={args.train_method} does not currently support --defense {args.defense!r}."
-        )
+    validate_peft_training_defense_args(args)
     return TrainingDefenseModelWrapper(model, args, trainable_params)
 
 

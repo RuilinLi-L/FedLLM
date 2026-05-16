@@ -88,11 +88,11 @@ To run BERT (with heuristics disabled):
 To run DAGER on GPT-2 under LoRA finetuning (by default run at rank $r=256$):
 > ./scripts/lora.sh DATASET BATCH\_SIZE <--rank\_tol RANK\_TOL>
 
-For the general PEFT evaluation entrypoint (LoRA/IA3/Prefix; GPT-2, BERT, and supported Llama LoRA families):
-> ./scripts/peft_eval.sh DATASET BATCH\_SIZE MODEL\_PATH N\_INPUTS --peft_method lora|ia3|prefix --finetuned_path PATH [extra args...]
+For the general PEFT DAGER evaluation entrypoint (LoRA/IA3; Prefix is trainable but not supported by the current DAGER span eval):
+> ./scripts/peft_eval.sh DATASET BATCH\_SIZE MODEL\_PATH N\_INPUTS --peft_method lora|ia3 --finetuned_path PATH [extra args...]
 
 For the PEFT baseline sweep entrypoint:
-> ./scripts/peft\_baselines.sh DATASET BATCH\_SIZE MODEL\_PATH N\_INPUTS --peft_method lora|ia3|prefix --finetuned_path PATH [extra args...]
+> ./scripts/peft\_baselines.sh DATASET BATCH\_SIZE MODEL\_PATH N\_INPUTS --peft_method lora|ia3 --finetuned_path PATH [extra args...]
 
 For PEFT training:
 > ./scripts/train\_peft.sh DATASET BATCH\_SIZE MODEL\_PATH PEFT\_METHOD [extra train.py args...]

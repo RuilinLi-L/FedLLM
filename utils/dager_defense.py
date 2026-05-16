@@ -8,6 +8,7 @@ by breaking its core assumptions about low-rank structure and deterministic toke
 from __future__ import annotations
 
 import numpy as np
+import re
 import torch
 import torch.nn.functional as F
 from typing import Optional, Tuple, List, Dict, Any
@@ -18,6 +19,52 @@ def _make_generator(seed: int, device: torch.device) -> torch.Generator:
     gen = torch.Generator(device=device)
     gen.manual_seed(seed)
     return gen
+
+
+def _peft_active(args) -> bool:
+    return getattr(args, "train_method", "full") in {"peft", "lora"}
+
+
+def _peft_method(args) -> str:
+    method = getattr(args, "peft_method", None)
+    if method is None and getattr(args, "train_method", "full") == "lora":
+        return "lora"
+    return str(method or "lora").strip().lower().replace("-", "_")
+
+
+def _peft_dager_slicing_active(args) -> bool:
+    return _peft_active(args) and _peft_method(args) in {"lora", "ia3"}
+
+
+def _extract_transformer_layer_id(name: str) -> int | None:
+    lower = name.lower()
+    for pattern in (
+        r"\.h\.(\d+)\.",
+        r"\.layer\.(\d+)\.",
+        r"\.layers\.(\d+)\.",
+        r"\.block\.(\d+)\.",
+    ):
+        match = re.search(pattern, lower)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _is_peft_adapter_parameter(name: str) -> bool:
+    lower = name.lower()
+    if "modules_to_save" in lower:
+        return False
+    return any(part in lower for part in ("lora_", "ia3", "ia3_l"))
+
+
+def _unwrap_model_for_embedding_lookup(model_wrapper):
+    if model_wrapper is None:
+        return None
+    for attr in ("base_model", "model"):
+        model = getattr(model_wrapper, attr, None)
+        if model is not None:
+            return model
+    return model_wrapper
 
 
 class DAGERDefense:
@@ -146,7 +193,9 @@ class DAGERDefense:
         Returns:
             Gradients with position embedding offsets applied
         """
-        model = model_wrapper.model
+        model = _unwrap_model_for_embedding_lookup(model_wrapper)
+        if model is None:
+            return grads
         device = next(model.parameters()).device
         
         # Get the embedding layer
@@ -191,7 +240,8 @@ class DAGERDefense:
         send_last_n_layers: Optional[int] = None,
         random_slice: bool = False,
         slice_prob: float = 0.5,
-        seed: int = 0
+        seed: int = 0,
+        peft_layer_aware: bool = False,
     ) -> Tuple[torch.Tensor, ...]:
         """
         Selectively send gradients from certain layers to break DAGER's layer dependency.
@@ -219,6 +269,40 @@ class DAGERDefense:
         first_grad = next((grad for grad in out if grad is not None), None)
         device = first_grad.device if first_grad is not None else torch.device('cpu')
         gen = _make_generator(seed, device)
+
+        if peft_layer_aware:
+            layer_ids = [
+                _extract_transformer_layer_id(name) if _is_peft_adapter_parameter(name) else None
+                for name in layer_names
+            ]
+            available_layers = sorted({layer_id for layer_id in layer_ids if layer_id is not None})
+            if not available_layers:
+                return tuple(out)
+
+            if send_first_n_layers is not None:
+                keep_count = max(0, int(send_first_n_layers))
+                keep_layers = set(available_layers[:keep_count])
+                for i, layer_id in enumerate(layer_ids):
+                    if layer_id is not None and layer_id not in keep_layers and out[i] is not None:
+                        out[i] = torch.zeros_like(out[i])
+            elif send_last_n_layers is not None:
+                keep_count = max(0, int(send_last_n_layers))
+                keep_layers = set() if keep_count == 0 else set(available_layers[-keep_count:])
+                for i, layer_id in enumerate(layer_ids):
+                    if layer_id is not None and layer_id not in keep_layers and out[i] is not None:
+                        out[i] = torch.zeros_like(out[i])
+            elif random_slice:
+                for layer_id in available_layers:
+                    if torch.rand(1, device=device, generator=gen).item() > slice_prob:
+                        for i, current_layer_id in enumerate(layer_ids):
+                            if current_layer_id == layer_id and out[i] is not None:
+                                out[i] = torch.zeros_like(out[i])
+            else:
+                critical_layers = {layer_id for layer_id in available_layers if layer_id < 2}
+                for i, layer_id in enumerate(layer_ids):
+                    if layer_id in critical_layers and out[i] is not None:
+                        out[i] = torch.zeros_like(out[i])
+            return tuple(out)
         
         # Identify self-attention layers (especially first two)
         self_attn_layer_indices = []
@@ -367,13 +451,15 @@ class DAGERDefense:
         # 3. Gradient slicing (requires layer names)
         if defense_params['gradient_slicing'] and layer_names is not None and model_wrapper is not None:
             model = model_wrapper.model
+            peft_layer_aware = _peft_dager_slicing_active(args)
             if defense_params['slice_first_n'] is not None:
                 g = DAGERDefense.gradient_slicing(
                     g,
                     layer_names,
                     model,
                     send_first_n_layers=defense_params['slice_first_n'],
-                    seed=defense_params['seed']
+                    seed=defense_params['seed'],
+                    peft_layer_aware=peft_layer_aware,
                 )
             elif defense_params['slice_last_n'] is not None:
                 g = DAGERDefense.gradient_slicing(
@@ -381,7 +467,8 @@ class DAGERDefense:
                     layer_names,
                     model,
                     send_last_n_layers=defense_params['slice_last_n'],
-                    seed=defense_params['seed']
+                    seed=defense_params['seed'],
+                    peft_layer_aware=peft_layer_aware,
                 )
             elif defense_params['random_slice']:
                 g = DAGERDefense.gradient_slicing(
@@ -390,7 +477,8 @@ class DAGERDefense:
                     model,
                     random_slice=True,
                     slice_prob=defense_params['slice_prob'],
-                    seed=defense_params['seed']
+                    seed=defense_params['seed'],
+                    peft_layer_aware=peft_layer_aware,
                 )
         
         # 4. Rank-limiting defense

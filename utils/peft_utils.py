@@ -30,6 +30,13 @@ SUPPORTED_PEFT_DEFENSES = frozenset(
 SUPPORTED_PEFT_TRAINING_POST_GRADIENT_DEFENSES = frozenset(
     {"none", "noise", "topk", "compression", "lrb", "lrbprojonly"}
 )
+SUPPORTED_PEFT_TRAINING_DIRECT_DEFENSES = frozenset({"dpsgd", "soteria", "mixup"})
+SUPPORTED_PEFT_TRAINING_DAGER_DEFENSES = frozenset({"dager"})
+SUPPORTED_PEFT_TRAINING_DEFENSES = (
+    SUPPORTED_PEFT_TRAINING_POST_GRADIENT_DEFENSES
+    | SUPPORTED_PEFT_TRAINING_DIRECT_DEFENSES
+    | SUPPORTED_PEFT_TRAINING_DAGER_DEFENSES
+)
 
 LEGACY_LORA_STATE_SUFFIXES = frozenset({".pt", ".pth"})
 PEFT_ADAPTER_CONFIG = "adapter_config.json"
@@ -113,6 +120,36 @@ def normalize_peft_args(args):
 
 def peft_active(args) -> bool:
     return getattr(args, "train_method", "full") in {"peft", "lora"}
+
+
+def validate_peft_training_defense_args(args):
+    normalize_peft_args(args)
+    if not peft_active(args):
+        return args
+
+    defense = getattr(args, "defense", "none")
+    peft_method = normalize_peft_method_name(getattr(args, "peft_method", None)) or "lora"
+    if peft_method in {"lora", "ia3"}:
+        if defense not in SUPPORTED_PEFT_TRAINING_DEFENSES:
+            raise NotImplementedError(
+                "PEFT training currently supports these defenses for "
+                f"peft_method={peft_method!r}: {sorted(SUPPORTED_PEFT_TRAINING_DEFENSES)}; "
+                f"got defense={defense!r}."
+            )
+        return args
+
+    if peft_method == "prefix":
+        if defense not in SUPPORTED_PEFT_TRAINING_POST_GRADIENT_DEFENSES:
+            raise NotImplementedError(
+                "Prefix PEFT training currently supports only post-gradient defenses: "
+                f"{sorted(SUPPORTED_PEFT_TRAINING_POST_GRADIENT_DEFENSES)}; got defense={defense!r}. "
+                "Direct-generation and DAGER training defenses remain unsupported for prefix."
+            )
+        return args
+
+    raise NotImplementedError(
+        f"PEFT training defense validation does not support peft_method={peft_method!r}."
+    )
 
 
 def is_gpt2_lora_model(model_path: str) -> bool:

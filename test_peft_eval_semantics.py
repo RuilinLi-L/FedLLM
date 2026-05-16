@@ -560,14 +560,29 @@ def test_lora_training_allows_post_gradient_lrb():
     assert_true(wrapper is not None, "LoRA training should allow post-gradient LRB")
 
 
-def test_lora_training_rejects_direct_generation_defenses():
-    args = SimpleNamespace(train_method="peft", peft_method="lora", defense="dpsgd")
-    try:
-        prepare_training_defense(model=object(), args=args, trainable_params=[])
-    except NotImplementedError as exc:
-        assert_true("does not currently support" in str(exc), "LoRA direct defense rejection should be explicit")
-    else:
-        raise AssertionError("LoRA training should reject DP-SGD-style direct defenses until the per-example path is supported")
+def test_lora_ia3_training_allow_direct_and_dager_defenses():
+    for peft_method in ("lora", "ia3"):
+        for defense in ("dpsgd", "soteria", "mixup", "dager"):
+            args = SimpleNamespace(train_method="peft", peft_method=peft_method, defense=defense)
+            wrapper = prepare_training_defense(model=object(), args=args, trainable_params=[])
+            assert_true(
+                wrapper is not None,
+                f"{peft_method} training should allow {defense} defense",
+            )
+
+
+def test_prefix_training_rejects_direct_and_dager_defenses():
+    for defense in ("dpsgd", "soteria", "mixup", "dager"):
+        args = SimpleNamespace(train_method="peft", peft_method="prefix", defense=defense)
+        try:
+            prepare_training_defense(model=object(), args=args, trainable_params=[])
+        except NotImplementedError as exc:
+            assert_true(
+                "Prefix PEFT training currently supports only post-gradient defenses" in str(exc),
+                "Prefix direct/DAGER defense rejection should be explicit",
+            )
+        else:
+            raise AssertionError(f"Prefix training should reject {defense}")
 
 
 def main():
@@ -595,7 +610,8 @@ def main():
         test_adapter_is_not_exposed_as_cli_choice,
         test_peft_gradient_inventory_deduplicates_transformer_layers,
         test_lora_training_allows_post_gradient_lrb,
-        test_lora_training_rejects_direct_generation_defenses,
+        test_lora_ia3_training_allow_direct_and_dager_defenses,
+        test_prefix_training_rejects_direct_and_dager_defenses,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

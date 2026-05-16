@@ -78,10 +78,10 @@ def test_gradient_slicing():
         seed=42
     )
     
-    # First gradient should be zeroed, others should remain
-    assert torch.allclose(sliced_grads[0], torch.zeros_like(grads[0])), "First layer should be zeroed"
-    assert torch.allclose(sliced_grads[1], grads[1]), "Second layer should remain"
-    assert torch.allclose(sliced_grads[2], grads[2]), "Third layer should remain"
+    # Existing full-path semantics are index-based: keep the first n tensors.
+    assert torch.allclose(sliced_grads[0], grads[0]), "First tensor should remain"
+    assert torch.allclose(sliced_grads[1], torch.zeros_like(grads[1])), "Second tensor should be zeroed"
+    assert torch.allclose(sliced_grads[2], torch.zeros_like(grads[2])), "Third tensor should be zeroed"
     
     # Test random slicing
     sliced_grads = DAGERDefense.gradient_slicing(
@@ -108,6 +108,72 @@ def test_gradient_slicing():
     assert torch.allclose(sliced_grads[2], grads[2]), "Non-attention layers should remain"
     
     print("[PASS] Gradient slicing test passed")
+    return True
+
+
+def test_peft_gradient_slicing_uses_transformer_layer_ids():
+    """PEFT DAGER slicing should keep/drop whole adapter layers by layer id."""
+    print("Testing PEFT layer-aware gradient slicing...")
+
+    grads = (
+        torch.randn(2, 3),
+        torch.randn(2, 3),
+        torch.randn(2, 3),
+        torch.randn(2, 3),
+        torch.randn(2, 3),
+    )
+    layer_names = [
+        "base_model.model.bert.encoder.layer.0.attention.self.query.lora_A.default.weight",
+        "base_model.model.bert.encoder.layer.0.attention.self.value.lora_B.default.weight",
+        "base_model.model.bert.encoder.layer.1.attention.self.query.lora_A.default.weight",
+        "base_model.model.bert.encoder.layer.1.attention.self.value.lora_B.default.weight",
+        "base_model.model.classifier.modules_to_save.default.weight",
+    ]
+
+    sliced = DAGERDefense.gradient_slicing(
+        grads,
+        layer_names,
+        model=None,
+        send_first_n_layers=1,
+        seed=42,
+        peft_layer_aware=True,
+    )
+
+    assert torch.allclose(sliced[0], grads[0]), "Layer 0 adapter tensor should remain"
+    assert torch.allclose(sliced[1], grads[1]), "All layer 0 adapter tensors should remain"
+    assert torch.allclose(sliced[2], torch.zeros_like(grads[2])), "Layer 1 adapter tensor should be zeroed"
+    assert torch.allclose(sliced[3], torch.zeros_like(grads[3])), "All layer 1 adapter tensors should be zeroed"
+    assert torch.allclose(sliced[4], grads[4]), "modules_to_save classifier head should remain unchanged"
+
+    sliced = DAGERDefense.gradient_slicing(
+        grads,
+        layer_names,
+        model=None,
+        send_last_n_layers=0,
+        seed=42,
+        peft_layer_aware=True,
+    )
+    for idx in range(4):
+        assert torch.allclose(sliced[idx], torch.zeros_like(grads[idx])), "send_last_n_layers=0 should zero adapter tensors"
+    assert torch.allclose(sliced[4], grads[4]), "send_last_n_layers=0 should leave non-adapter heads unchanged"
+
+    ia3_names = [
+        "base_model.model.bert.encoder.layer.0.attention.self.query.ia3_l.default",
+        "base_model.model.bert.encoder.layer.1.attention.self.query.ia3_l.default",
+    ]
+    ia3_grads = (torch.randn(2), torch.randn(2))
+    sliced = DAGERDefense.gradient_slicing(
+        ia3_grads,
+        ia3_names,
+        model=None,
+        send_last_n_layers=1,
+        seed=42,
+        peft_layer_aware=True,
+    )
+    assert torch.allclose(sliced[0], torch.zeros_like(ia3_grads[0])), "IA3 layer 0 should be zeroed"
+    assert torch.allclose(sliced[1], ia3_grads[1]), "IA3 layer 1 should remain"
+
+    print("[PASS] PEFT layer-aware gradient slicing test passed")
     return True
 
 
@@ -236,6 +302,7 @@ def main():
     try:
         test_dynamic_basis_perturbation()
         test_gradient_slicing()
+        test_peft_gradient_slicing_uses_transformer_layer_ids()
         test_stochastic_offset_embedding_modifies_existing_position_gradient()
         test_combined_defense()
         test_apply_dager_defense()
