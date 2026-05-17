@@ -256,15 +256,16 @@ exposure_flags() {
       PARTIAL_ATTACK_VARIANT="dager_prefix_visible"
       UNSUPPORTED_REASON="n/a"
       ;;
-    last2)
-      EXPOSURE_EXTRA=( --gradient_layer_subset last2 --gradient_param_filter all )
-      PARTIAL_ATTACK_VARIANT="unsupported_nonprefix_dager"
-      UNSUPPORTED_REASON="nonprefix_layer_subset_requires_layer_aligned_decoder"
-      ;;
-    mid[0-9]*|middle[0-9]*)
+    last[0-9]*|mid[0-9]*|middle[0-9]*)
       EXPOSURE_EXTRA=( --gradient_layer_subset "$EXPOSURE" --gradient_param_filter all )
-      PARTIAL_ATTACK_VARIANT="unsupported_nonprefix_dager"
-      UNSUPPORTED_REASON="nonprefix_layer_subset_requires_layer_aligned_decoder"
+      PARTIAL_ATTACK_VARIANT="dager_nonprefix_visible"
+      UNSUPPORTED_REASON="n/a"
+      local layer_count
+      layer_count="${EXPOSURE//[!0-9]/}"
+      if [ -n "$layer_count" ] && [ "$layer_count" -lt 2 ]; then
+        PARTIAL_ATTACK_VARIANT="unsupported_nonprefix_dager"
+        UNSUPPORTED_REASON="nonprefix_dager_requires_at_least_two_visible_layers"
+      fi
       ;;
     qkv_only)
       EXPOSURE_EXTRA=( --gradient_layer_subset all --gradient_param_filter qkv_only )
@@ -522,6 +523,13 @@ GRADIENT_PARAM_FILTER="${EXPOSURE_EXTRA[3]}"
 if [ "$EXPOSURE" = "lora_only" ] && [ "$TRAIN_METHOD" != "lora" ] && [ "$TRAIN_METHOD" != "peft" ]; then
   echo "[partial-gradient] --exposure lora_only requires --train_method lora or peft." >&2
   exit 2
+fi
+
+if [ "$PARTIAL_ATTACK_VARIANT" = "dager_nonprefix_visible" ]; then
+  if [ "$TRAIN_METHOD" != "full" ] || { [ "$MODEL" != "gpt2" ] && [ "$MODEL" != "openai-community/gpt2-large" ]; }; then
+    PARTIAL_ATTACK_VARIANT="unsupported_nonprefix_dager"
+    UNSUPPORTED_REASON="nonprefix_layer_subset_requires_gpt2_full_decoder"
+  fi
 fi
 
 if ! has_attack_extra_flag "--finetuned_path"; then

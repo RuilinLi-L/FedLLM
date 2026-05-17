@@ -11,9 +11,12 @@ from utils.defenses import apply_defense, requires_gradient_generation_defense, 
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import lrb_preset_param_value
 from utils.partial_gradient import (
+    PARTIAL_ATTACK_DAGER_NONPREFIX,
     UnsupportedPartialGradientExposureError,
     apply_partial_gradient_filter,
     mark_partial_gradient_unsupported,
+    nonprefix_candidate_cap,
+    nonprefix_layer_indices,
     partial_gradient_summary_fields,
 )
 from utils.representation_bottleneck import rep_bottleneck_summary_fields
@@ -273,6 +276,160 @@ def filter_l1(args, model_wrapper, R_Qs):
         
     return res_pos, res_ids, res_types, sentence_ends
 
+
+def uses_nonprefix_dager(args):
+    info = getattr(args, 'partial_gradient_info', {})
+    return info.get('partial_attack_variant') == PARTIAL_ATTACK_DAGER_NONPREFIX
+
+
+def _decode_gpt2_nonprefix(args, model_wrapper, R_Qs, orig_batch):
+    tokenizer = model_wrapper.tokenizer
+    layer_indices = nonprefix_layer_indices(args)
+    cap = nonprefix_candidate_cap(args)
+    max_len = min(int(args.max_len), orig_batch['input_ids'].shape[1])
+    eos_id = model_wrapper.eos_token
+    pad_id = model_wrapper.pad_token
+
+    start_prefix = [model_wrapper.start_token] if model_wrapper.start_token is not None else []
+    beams = [(start_prefix, 0.0)]
+    completed = []
+    res_ids = []
+    res_pos = []
+    res_types = []
+
+    for pos in range(max_len):
+        print(f'Non-prefix partial position {pos}')
+        proposals = []
+        position_candidate_scores = {}
+        for prefix, prefix_score in beams:
+            if prefix and prefix[-1] == eos_id:
+                completed.append((prefix, prefix_score))
+                continue
+
+            prefix_tensor = torch.tensor(prefix, dtype=torch.long, device=args.device).unsqueeze(0)
+            prefix_layer = None
+            if prefix_tensor.shape[1] > 0:
+                attention_mask = torch.ones_like(prefix_tensor, device=args.device)
+                prefix_layer = model_wrapper.get_layer_inputs(
+                    prefix_tensor,
+                    attention_mask=attention_mask,
+                    layer_indices=[layer_indices[0]],
+                )[0]
+            chunk_scores = []
+            chunk_ids = []
+            chunk_size = max(1, int(getattr(args, 'parallel', 1000)))
+            vocab_size = len(tokenizer)
+            for start in range(0, vocab_size, chunk_size):
+                ids_chunk = torch.arange(
+                    start,
+                    min(start + chunk_size, vocab_size),
+                    dtype=torch.long,
+                    device=args.device,
+                )
+                if prefix_tensor.shape[1] > 0:
+                    candidate_batch = torch.cat(
+                        (prefix_tensor.repeat(ids_chunk.shape[0], 1), ids_chunk.unsqueeze(1)),
+                        dim=1,
+                    )
+                else:
+                    candidate_batch = ids_chunk.unsqueeze(1)
+                candidate_attention = torch.ones_like(candidate_batch, device=args.device)
+                candidate_layer = model_wrapper.get_layer_inputs(
+                    candidate_batch,
+                    attention_mask=candidate_attention,
+                    layer_indices=[layer_indices[0]],
+                )[0][:, -1:, :]
+                if prefix_layer is not None and prefix_layer.shape[1] > 0:
+                    candidate_layer = torch.cat(
+                        (prefix_layer.repeat(candidate_layer.shape[0], 1, 1), candidate_layer),
+                        dim=1,
+                    )
+                token_scores = check_if_in_span(R_Qs[0], candidate_layer, args.dist_norm)[:, -1].detach()
+                if pad_id is not None and start <= int(pad_id) < start + ids_chunk.shape[0]:
+                    token_scores[int(pad_id) - start] = torch.inf
+                keep = min(cap, token_scores.shape[0])
+                scores_chunk, ids_order = torch.topk(token_scores, k=keep, largest=False)
+                chunk_scores.append(scores_chunk)
+                chunk_ids.append(ids_chunk[ids_order])
+            top_pool_scores = torch.cat(chunk_scores)
+            top_pool_ids = torch.cat(chunk_ids)
+            keep = min(cap, top_pool_scores.shape[0])
+            top_scores, order = torch.topk(top_pool_scores, k=keep, largest=False)
+            top_ids = top_pool_ids[order]
+            for tok_score, tok_id in zip(top_scores.detach().cpu().tolist(), top_ids.detach().cpu().tolist()):
+                tok_id = int(tok_id)
+                prev_score = position_candidate_scores.get(tok_id)
+                if prev_score is None or tok_score < prev_score:
+                    position_candidate_scores[tok_id] = float(tok_score)
+
+            for tok_score, tok_id in zip(top_scores.detach().cpu().tolist(), top_ids.detach().cpu().tolist()):
+                sentence = prefix + [int(tok_id)]
+                sentence_tensor = torch.tensor(sentence, dtype=torch.long, device=args.device).unsqueeze(0)
+                sentence_attention = torch.ones_like(sentence_tensor, device=args.device)
+                layer_inputs = model_wrapper.get_layer_inputs(
+                    sentence_tensor,
+                    attention_mask=sentence_attention,
+                    layer_indices=[layer_indices[1]],
+                )[0]
+                span_scores = check_if_in_span(R_Qs[1], layer_inputs, args.dist_norm)
+                if sentence[0] == eos_id:
+                    seq_score = float(span_scores[:, 1:].mean().item()) if span_scores.shape[1] > 1 else float(tok_score)
+                else:
+                    seq_score = float(span_scores.mean().item())
+                proposals.append((sentence, prefix_score + seq_score, seq_score))
+
+        if position_candidate_scores:
+            ids = [
+                tok
+                for tok, _ in sorted(
+                    position_candidate_scores.items(),
+                    key=lambda item: item[1],
+                )
+            ]
+            res_ids.append(ids)
+            res_pos.extend([pos] * len(ids))
+            res_types.append([0] * len(ids))
+
+        if not proposals:
+            break
+        proposals.sort(key=lambda item: item[1])
+        next_beams = []
+        for sentence, score, _ in proposals:
+            if sentence[-1] == eos_id:
+                completed.append((sentence, score))
+            else:
+                next_beams.append((sentence, score))
+            if len(next_beams) >= cap:
+                break
+        beams = next_beams[:cap]
+        if not beams:
+            break
+
+    completed.extend(beams)
+    completed.sort(key=lambda item: item[1])
+    predicted_sentences = [sent for sent, _ in completed[:args.batch_size]]
+    predicted_scores = []
+    for sent in predicted_sentences:
+        if not sent:
+            predicted_scores.append(float('inf'))
+            continue
+        sentence_tensor = torch.tensor(sent, dtype=torch.long, device=args.device).unsqueeze(0)
+        sentence_attention = torch.ones_like(sentence_tensor, device=args.device)
+        layer_inputs = model_wrapper.get_layer_inputs(
+            sentence_tensor,
+            attention_mask=sentence_attention,
+            layer_indices=[layer_indices[1]],
+        )[0]
+        span_scores = check_if_in_span(R_Qs[1], layer_inputs, args.dist_norm)
+        if sent and sent[0] == eos_id and span_scores.shape[1] > 1:
+            predicted_scores.append(float(span_scores[:, 1:].mean().item()))
+        else:
+            predicted_scores.append(float(span_scores.mean().item()))
+    if not predicted_sentences and completed:
+        predicted_sentences = [completed[0][0]]
+        predicted_scores = [float(completed[0][1])]
+    return res_pos, res_ids, res_types, [], predicted_sentences, predicted_scores
+
 def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
     global total_correct_tokens, total_tokens, total_correct_maxB_tokens
 
@@ -327,7 +484,18 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
          
         del true_grads 
        
-        res_pos, res_ids, res_types, sentence_ends = filter_l1(args, model_wrapper, R_Qs)
+        nonprefix_dager = uses_nonprefix_dager(args)
+        if nonprefix_dager:
+            (
+                res_pos,
+                res_ids,
+                res_types,
+                sentence_ends,
+                predicted_sentences,
+                predicted_sentences_scores,
+            ) = _decode_gpt2_nonprefix(args, model_wrapper, R_Qs, orig_batch)
+        else:
+            res_pos, res_ids, res_types, sentence_ends = filter_l1(args, model_wrapper, R_Qs)
         
         print( orig_batch )
         print( orig_batch['input_ids'].T )
@@ -392,7 +560,12 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
                 input_layer1 = model_wrapper.get_layer_inputs(orig_sentence, token_type_ids)[0]
             else:
                 attention_mask = orig_batch['attention_mask'][s][:orig_sentence.shape[1]].reshape(1,-1)
-                input_layer1 = model_wrapper.get_layer_inputs(orig_sentence, attention_mask=attention_mask)[0]
+                layer_indices = [nonprefix_layer_indices(args)[1]] if nonprefix_dager else None
+                input_layer1 = model_wrapper.get_layer_inputs(
+                    orig_sentence,
+                    attention_mask=attention_mask,
+                    layer_indices=layer_indices,
+                )[0]
 
             sizesq2 = check_if_in_span(R_Q2, input_layer1, args.dist_norm)
             boolsq2 = sizesq2 < args.l2_span_thresh
@@ -418,7 +591,7 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
             rec_token=rec_token,
         )
              
-        if model_wrapper.is_decoder():
+        if model_wrapper.is_decoder() and not nonprefix_dager:
             max_ids = -1
             for i in range(len(res_ids)):
                 if len(res_ids[i]) > args.max_ids:
@@ -427,7 +600,7 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
             if len(predicted_sentences) < orig_batch['input_ids'].shape[0]:
                 predicted_sentences += top_B_incorrect_sentences
                 predicted_sentences_scores += top_B_incorrect_scores
-        else:
+        elif not model_wrapper.is_decoder():
             for l,token_type in sentence_ends:
                 
                 if args.l1_filter == 'maxB':
@@ -462,6 +635,11 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
     approx_sentences_ext = []
     approx_sentences_lens = []
     approx_scores = []
+    if len(predicted_sentences) == 0:
+        reference = []
+        for i in range(orig_batch['input_ids'].shape[0]):
+            reference += [remove_padding(tokenizer, orig_batch['input_ids'][i, :tokenizer.model_max_length], left=(args.pad=='left'))]
+        return ['' for _ in reference], reference
     max_len = max( [len(s) for s in predicted_sentences] )
     for sent, sc in zip( predicted_sentences, predicted_sentences_scores ): 
         if sc < args.l2_span_thresh:
@@ -482,6 +660,8 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
         
         predicted_sentences = correct_sentences.copy()
         for i in range(len(correct_sentences), args.batch_size):
+            if approx_scores.numel() == 0 or torch.isinf(approx_scores).all():
+                break
             idx = torch.argmin( approx_scores )
             predicted_sentences.append( approx_sentences[idx] )
             similar_sentences = (torch.tensor(approx_sentences_ext[idx]) == torch.tensor(approx_sentences_ext)).sum(1) >= max_len*args.distinct_thresh

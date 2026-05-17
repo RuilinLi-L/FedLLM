@@ -8,16 +8,19 @@ import warnings
 from utils.ext import update_causal_mask
 from utils.partial_models import add_partial_forward_gpt2, add_partial_forward_bert, add_partial_forward_llama
 from utils.partial_gradient import (
+    PARTIAL_ATTACK_DAGER_NONPREFIX,
     PARTIAL_ATTACK_DAGER_QKV,
     PARTIAL_ATTACK_LORA_ADAPTER,
     PARTIAL_ATTACK_UNSUPPORTED_INSUFFICIENT,
     PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
     UnsupportedPartialGradientExposureError,
+    dager_block_ids,
     infer_partial_attack_variant,
     mark_partial_gradient_unsupported,
     non_prefix_dager_block_ids,
     partial_gradient_active,
     select_visible_matrix_candidates,
+    supports_nonprefix_dager,
     update_dager_candidate_summary,
 )
 from utils.peft_utils import apply_peft_adapter, peft_active
@@ -199,7 +202,7 @@ class ModelWrapper():
         if args.model_path in ['gpt2', 'openai-community/gpt2-large']:        
             self.start_token = None
             self.eos_token = self.model.config.eos_token_id
-            self.layer_ids = list(range(4, 137, 12))
+            self.layer_ids = list(range(4, 4 + 12 * self.model.config.n_layer, 12))
             
             if args.task == 'seq_class' and args.finetuned_path is None:
                 self.model.score.weight.data.normal_( mean=0.0, std=1e-3, generator=g_cpu )
@@ -801,6 +804,7 @@ class ModelWrapper():
             grad_names = [str(idx) for idx in grad_indices]
 
         if partial_gradient_active(self.args):
+            setattr(self.args, 'partial_nonprefix_layer_indices', None)
             parameter_names = self._trainable_parameter_names()
             candidate_names = [
                 parameter_names[idx] if idx < len(parameter_names) else name
@@ -840,36 +844,41 @@ class ModelWrapper():
                 )
             non_prefix_ids = non_prefix_dager_block_ids(selected_names, self.args.n_layers)
             if non_prefix_ids is not None:
-                reason = 'nonprefix_layer_subset_requires_layer_aligned_decoder'
-                update_dager_candidate_summary(
-                    self.args,
-                    selected_names,
-                    variant=PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
-                    unsupported_reason=reason,
-                )
-                mark_partial_gradient_unsupported(
-                    self.args,
-                    variant=PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
-                    reason=reason,
-                )
-                raise UnsupportedPartialGradientExposureError(
-                    'Partial-gradient DAGER currently supports prefix transformer-layer exposures only. '
-                    'The selected visible matrix gradients map to transformer blocks '
-                    f'{non_prefix_ids}, but the decoder span checks consume blocks '
-                    f'{list(range(self.args.n_layers))}. Use --gradient_layer_subset firstN, '
-                    '--gradient_param_filter qkv_only, or --gradient_param_filter lora_only until '
-                    'non-prefix layer-aligned hidden-state decoding is implemented.',
-                    variant=PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
-                    reason=reason,
-                )
+                if not supports_nonprefix_dager(self.args):
+                    reason = 'nonprefix_layer_subset_requires_gpt2_full_decoder'
+                    update_dager_candidate_summary(
+                        self.args,
+                        selected_names,
+                        variant=PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+                        unsupported_reason=reason,
+                    )
+                    mark_partial_gradient_unsupported(
+                        self.args,
+                        variant=PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+                        reason=reason,
+                    )
+                    raise UnsupportedPartialGradientExposureError(
+                        'Partial-gradient non-prefix DAGER is currently implemented only for '
+                        'GPT-2 full-gradient decoder runs. The selected visible matrix gradients '
+                        f'map to transformer blocks {non_prefix_ids}; got '
+                        f'model_path={getattr(self.args, "model_path", None)!r}, '
+                        f'train_method={getattr(self.args, "train_method", "full")!r}.',
+                        variant=PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+                        reason=reason,
+                    )
             variant = infer_partial_attack_variant(self.args)
             if peft_active(self.args):
                 variant = PARTIAL_ATTACK_LORA_ADAPTER
+            elif non_prefix_ids is not None:
+                variant = PARTIAL_ATTACK_DAGER_NONPREFIX
+                setattr(self.args, 'partial_nonprefix_layer_indices', non_prefix_ids)
             elif getattr(self.args, 'gradient_param_filter', 'all') == 'qkv_only':
                 variant = PARTIAL_ATTACK_DAGER_QKV
             update_dager_candidate_summary(self.args, selected_names, variant=variant)
             grad_indices = selected_indices
             grad_names = selected_names
+        else:
+            setattr(self.args, 'partial_nonprefix_layer_indices', None)
 
         rank_cap = None
         for idx, name in zip(grad_indices[:self.args.n_layers], grad_names[:self.args.n_layers]):
@@ -909,6 +918,12 @@ class ModelWrapper():
             )
         
         R_Qs = []
+        if partial_gradient_active(self.args):
+            selected_block_ids = dager_block_ids(grad_names, self.args.n_layers)
+            if all(block_id is not None for block_id in selected_block_ids):
+                setattr(self.args, 'dager_selected_block_ids', selected_block_ids)
+        else:
+            setattr(self.args, 'dager_selected_block_ids', list(range(self.args.n_layers)))
         
         for i in range(self.args.n_layers):
             grad_Q = true_grads[grad_indices[i]]
@@ -935,7 +950,7 @@ class ModelWrapper():
             emb = self.embeddings_weight_nopos.to(self.args.device)
             return self.base_model.model.layers[0].input_layernorm(emb)
         
-    def get_layer_inputs(self, sentences, token_type_ids=None, attention_mask=None, layers=1):
+    def get_layer_inputs(self, sentences, token_type_ids=None, attention_mask=None, layers=1, layer_indices=None):
         if self.args.model_path in ['bert-base-uncased']:
             # if token_type_ids is None:
             #     raise ValueError('Token type must be defined when model is BERT')
@@ -948,7 +963,12 @@ class ModelWrapper():
             return self.base_model.bert.get_hidden_states(input_ids=sentences, token_type_ids=token_type_ids, n_layers=layers)
         
         elif self.args.model_path in ['gpt2', 'openai-community/gpt2-large']:
-            return self.base_model.transformer.get_hidden_states(input_ids=sentences, attention_mask=attention_mask, n_layers=layers)
+            return self.base_model.transformer.get_hidden_states(
+                input_ids=sentences,
+                attention_mask=attention_mask,
+                n_layers=layers,
+                layer_indices=layer_indices,
+            )
         
         elif self.args.model_path in ['meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-70b-hf', 'meta-llama/Meta-Llama-3-8B', 'meta-llama/Meta-Llama-3.1-8B', 'meta-llama/Meta-Llama-3-70B']:
             position_ids = torch.arange(sentences.size(1)).unsqueeze(0).repeat(sentences.size(0), 1).to(self.args.device)

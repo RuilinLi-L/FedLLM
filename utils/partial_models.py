@@ -19,10 +19,22 @@ def add_partial_forward_gpt2(model:GPT2Model) -> None:
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
-        n_layers: Optional[int] = 2
+        n_layers: Optional[int] = 2,
+        layer_indices: Optional[List[int]] = None,
     ) -> List[torch.FloatTensor]:
         output_attentions = self.config.output_attentions
         use_cache = self.config.use_cache
+        requested_layers = None
+        max_requested_layer = n_layers
+        if layer_indices is not None:
+            requested_layers = [int(idx) for idx in layer_indices]
+            if not requested_layers:
+                return []
+            if min(requested_layers) < 0 or max(requested_layers) >= len(self.h):
+                raise ValueError(
+                    f"layer_indices must be within [0, {len(self.h) - 1}], got {requested_layers}."
+                )
+            max_requested_layer = max(requested_layers)
 
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
@@ -131,10 +143,17 @@ def add_partial_forward_gpt2(model:GPT2Model) -> None:
                 if isinstance(head_mask, torch.Tensor):
                     head_mask = head_mask.to(hidden_states.device)
                     
-            all_hidden_states = all_hidden_states + [self.h[i].ln_1(hidden_states)]
+            layer_input = self.h[i].ln_1(hidden_states)
+            if requested_layers is None:
+                all_hidden_states = all_hidden_states + [layer_input]
+            elif i in requested_layers:
+                all_hidden_states = all_hidden_states + [layer_input]
 
-            if i >= n_layers or i==len(self.h)-1:
-                return all_hidden_states[1:]
+            if requested_layers is None:
+                if i >= n_layers or i==len(self.h)-1:
+                    return all_hidden_states[1:]
+            elif i >= max_requested_layer:
+                return all_hidden_states
             
             if self.gradient_checkpointing and self.training:
                 outputs = self._gradient_checkpointing_func(

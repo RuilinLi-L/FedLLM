@@ -9,11 +9,13 @@ DEFAULT_PARAM_FILTER = "all"
 VALID_PARAM_FILTERS = frozenset({"all", "qkv_only", "lora_only"})
 PARTIAL_ATTACK_FULL_VISIBLE = "full_gradient_visible"
 PARTIAL_ATTACK_DAGER_PREFIX = "dager_prefix_visible"
+PARTIAL_ATTACK_DAGER_NONPREFIX = "dager_nonprefix_visible"
 PARTIAL_ATTACK_DAGER_QKV = "dager_qkv_visible"
 PARTIAL_ATTACK_LORA_ADAPTER = "peft_adapter_visible"
 PARTIAL_ATTACK_PEFT_ADAPTER = PARTIAL_ATTACK_LORA_ADAPTER
 PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX = "unsupported_nonprefix_dager"
 PARTIAL_ATTACK_UNSUPPORTED_INSUFFICIENT = "unsupported_insufficient_visible_matrices"
+GPT2_NONPREFIX_DAGER_MODELS = frozenset({"gpt2", "openai-community/gpt2-large"})
 
 
 class UnsupportedPartialGradientExposureError(RuntimeError):
@@ -50,6 +52,8 @@ def infer_partial_attack_variant(args) -> str:
         return PARTIAL_ATTACK_FULL_VISIBLE
     mode, _ = _parse_layer_subset(layer_subset)
     if mode in {"last", "mid", "middle"}:
+        if supports_nonprefix_dager(args):
+            return PARTIAL_ATTACK_DAGER_NONPREFIX
         return PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX
     if param_filter == "lora_only":
         return PARTIAL_ATTACK_LORA_ADAPTER
@@ -65,6 +69,41 @@ def mark_partial_gradient_unsupported(args, *, variant: str, reason: str) -> Non
     info["partial_attack_variant"] = variant
     info["unsupported_reason"] = reason
     setattr(args, "partial_gradient_info", info)
+
+
+def supports_nonprefix_dager(args) -> bool:
+    layer_subset = getattr(args, "gradient_layer_subset", DEFAULT_LAYER_SUBSET)
+    param_filter = getattr(args, "gradient_param_filter", DEFAULT_PARAM_FILTER)
+    mode, n_layers = _parse_layer_subset(layer_subset)
+    if mode not in {"last", "mid", "middle"}:
+        return False
+    if n_layers is not None and n_layers < 2:
+        return False
+    if param_filter not in {DEFAULT_PARAM_FILTER, "qkv_only"}:
+        return False
+    if getattr(args, "model_path", None) not in GPT2_NONPREFIX_DAGER_MODELS:
+        return False
+    train_method = getattr(args, "train_method", "full")
+    return train_method == "full"
+
+
+def nonprefix_candidate_cap(args) -> int:
+    max_ids = getattr(args, "max_ids", -1)
+    if max_ids is not None and max_ids > 0:
+        return int(max_ids)
+    return int(max(1, getattr(args, "partial_nonprefix_candidate_cap", 64)))
+
+
+def nonprefix_layer_indices(args) -> list[int]:
+    layer_indices = getattr(args, "partial_nonprefix_layer_indices", None)
+    if layer_indices is None:
+        layer_indices = getattr(args, "dager_selected_block_ids", None)
+    if layer_indices is None:
+        raise ValueError("Missing non-prefix layer indices for partial-gradient DAGER decoding.")
+    layer_indices = [int(idx) for idx in layer_indices]
+    if len(layer_indices) < 2:
+        raise ValueError("Non-prefix partial-gradient DAGER requires at least two visible layers.")
+    return layer_indices
 
 
 def _default_partial_gradient_info(args=None):
@@ -196,13 +235,17 @@ def update_dager_candidate_summary(
 
 
 def non_prefix_dager_block_ids(candidate_names: Sequence[str], n_layers: int) -> list[int] | None:
-    block_ids = [_extract_block_id(name) for name in candidate_names[:n_layers]]
+    block_ids = dager_block_ids(candidate_names, n_layers)
     if any(layer_id is None for layer_id in block_ids):
         return None
     expected = list(range(n_layers))
     if block_ids != expected:
         return block_ids
     return None
+
+
+def dager_block_ids(candidate_names: Sequence[str], n_layers: int) -> list[int | None]:
+    return [_extract_block_id(name) for name in candidate_names[:n_layers]]
 
 
 def _parse_layer_subset(layer_subset: str):
@@ -302,6 +345,10 @@ def _summarize_block_ids(names: Sequence[str]) -> str:
 def _default_unsupported_reason(args) -> str:
     if args is None:
         return "n/a"
+    layer_subset = getattr(args, "gradient_layer_subset", DEFAULT_LAYER_SUBSET)
+    mode, n_layers = _parse_layer_subset(layer_subset)
+    if mode in {"last", "mid", "middle"} and n_layers is not None and n_layers < 2:
+        return "nonprefix_dager_requires_at_least_two_visible_layers"
     if infer_partial_attack_variant(args) == PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX:
-        return "nonprefix_layer_subset_requires_layer_aligned_decoder"
+        return "nonprefix_layer_subset_requires_gpt2_full_decoder"
     return "n/a"

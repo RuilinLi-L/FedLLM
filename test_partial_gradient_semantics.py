@@ -8,16 +8,20 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.partial_gradient import (
+    PARTIAL_ATTACK_DAGER_NONPREFIX,
     PARTIAL_ATTACK_DAGER_PREFIX,
     PARTIAL_ATTACK_DAGER_QKV,
     PARTIAL_ATTACK_LORA_ADAPTER,
     PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
     apply_partial_gradient_filter,
     infer_partial_attack_variant,
+    nonprefix_candidate_cap,
+    nonprefix_layer_indices,
     non_prefix_dager_block_ids,
     partial_gradient_active,
     partial_gradient_summary_fields,
     select_visible_matrix_candidates,
+    supports_nonprefix_dager,
     validate_partial_gradient_args,
 )
 
@@ -36,6 +40,8 @@ def _args(layer_subset="all", param_filter="all"):
     return SimpleNamespace(
         gradient_layer_subset=layer_subset,
         gradient_param_filter=param_filter,
+        model_path="gpt2",
+        train_method="full",
     )
 
 
@@ -96,8 +102,8 @@ def test_last2_keeps_last_two_transformer_blocks():
     kept = [idx for idx, grad in enumerate(filtered) if grad is not None]
     assert_true(kept == [2, 3], f"last2 kept wrong indices: {kept}")
     assert_true(
-        infer_partial_attack_variant(_args("last2")) == PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
-        "last2 should be classified as unsupported non-prefix DAGER",
+        infer_partial_attack_variant(_args("last2")) == PARTIAL_ATTACK_DAGER_NONPREFIX,
+        "GPT-2 full last2 should be classified as non-prefix DAGER",
     )
 
 
@@ -229,13 +235,63 @@ def test_invalid_layer_subset_fails_fast():
         raise AssertionError("invalid layer subset should fail validation")
 
 
-def test_middle_layer_subset_is_supported_as_unsupported_exposure():
+def test_middle_layer_subset_is_supported_for_gpt2_nonprefix():
     args = _args("middle2")
     validate_partial_gradient_args(args)
     assert_true(
-        infer_partial_attack_variant(args) == PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
-        "middle2 should parse but be marked unsupported by prefix DAGER",
+        infer_partial_attack_variant(args) == PARTIAL_ATTACK_DAGER_NONPREFIX,
+        "GPT-2 full middle2 should parse as non-prefix DAGER",
     )
+
+
+def test_nonprefix_support_is_gpt2_full_only():
+    gpt2_args = _args("last2")
+    gpt2_large_args = _args("last2")
+    gpt2_large_args.model_path = "openai-community/gpt2-large"
+    last1_args = _args("last1")
+    bert_args = _args("last2")
+    bert_args.model_path = "bert-base-uncased"
+    peft_args = _args("last2")
+    peft_args.train_method = "peft"
+
+    assert_true(supports_nonprefix_dager(gpt2_args), "GPT-2 full last2 should support non-prefix DAGER")
+    assert_true(supports_nonprefix_dager(gpt2_large_args), "GPT-2 large full last2 should support non-prefix DAGER")
+    assert_true(not supports_nonprefix_dager(last1_args), "non-prefix DAGER should require two visible layers")
+    assert_true(
+        dict(partial_gradient_summary_fields(last1_args))["unsupported_reason"]
+        == "nonprefix_dager_requires_at_least_two_visible_layers",
+        "last1 should explain that non-prefix DAGER needs two visible layers",
+    )
+    assert_true(not supports_nonprefix_dager(bert_args), "BERT last2 should stay unsupported in v1")
+    assert_true(not supports_nonprefix_dager(peft_args), "PEFT last2 should stay unsupported in v1")
+    assert_true(
+        infer_partial_attack_variant(bert_args) == PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+        "BERT last2 should be explicitly unsupported",
+    )
+    assert_true(
+        dict(partial_gradient_summary_fields(bert_args))["unsupported_reason"]
+        == "nonprefix_layer_subset_requires_gpt2_full_decoder",
+        "BERT last2 summary should explain the GPT-2 full-only non-prefix path",
+    )
+    assert_true(
+        infer_partial_attack_variant(peft_args) == PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+        "PEFT last2 should be explicitly unsupported",
+    )
+
+
+def test_nonprefix_attack_helpers_read_cap_and_layers():
+    args = SimpleNamespace(
+        max_ids=-1,
+        partial_nonprefix_candidate_cap=16,
+        partial_nonprefix_layer_indices=[10, 11],
+    )
+    assert_true(nonprefix_candidate_cap(args) == 16, "default non-prefix cap should come from the flag")
+    args.max_ids = 4
+    assert_true(nonprefix_candidate_cap(args) == 4, "max_ids should override the non-prefix cap")
+    assert_true(nonprefix_layer_indices(args) == [10, 11], "layer indices should be read from partial metadata")
+
+    args = SimpleNamespace(dager_selected_block_ids=[8, 9])
+    assert_true(nonprefix_layer_indices(args) == [8, 9], "selected block ids should be the fallback")
 
 
 def main():
@@ -252,7 +308,9 @@ def main():
         test_non_prefix_dager_candidates_are_detected,
         test_summary_fields_include_partial_variant_and_dager_names,
         test_invalid_layer_subset_fails_fast,
-        test_middle_layer_subset_is_supported_as_unsupported_exposure,
+        test_middle_layer_subset_is_supported_for_gpt2_nonprefix,
+        test_nonprefix_support_is_gpt2_full_only,
+        test_nonprefix_attack_helpers_read_cap_and_layers,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

@@ -77,6 +77,12 @@ def get_args(argv=None):
         choices=['all', 'qkv_only', 'lora_only'],
         help='Gradient exposure by parameter/module family.',
     )
+    parser.add_argument(
+        '--partial_nonprefix_candidate_cap',
+        type=int,
+        default=64,
+        help='Maximum token candidates per prefix for GPT-2 non-prefix partial-gradient decoding.',
+    )
     
     #DP
     parser.add_argument('--defense_noise', type=float, default=None) # add noise to true grads
