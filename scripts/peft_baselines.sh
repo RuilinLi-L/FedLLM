@@ -28,6 +28,7 @@ LRB_VARIANTS_RAW=""
 LRB_MAIN_K="0.5"
 PEFT_METHOD="lora"
 PEFT_EVAL_SCOPE="dager_eval"
+ADAPTIVE_ATTACK_CHECK=0
 EXTRA=()
 
 ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup dager lrb lrbprojonly )
@@ -111,6 +112,10 @@ parse_script_args() {
         ;;
       --lrb_main_k=*)
         LRB_MAIN_K="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --adaptive_attack_check)
+        ADAPTIVE_ATTACK_CHECK=1
         idx=$((idx + 1))
         ;;
       *)
@@ -343,6 +348,8 @@ rec_token_mean=n/a
 rec_maxb_token_mean=n/a
 error_type=runner_error
 error_message=missing_result_summary_or_process_failed
+adaptive_attack=$(if printf '%s' "$log_base" | grep -q '_adaptive'; then printf 'defense_aware'; else printf 'none'; fi)
+adaptive_attack_profile=$(if printf '%s' "$log_base" | grep -q '_adaptive'; then case "$defense" in topk) printf 'topk_support' ;; compression) printf 'quantization_robust' ;; lrb|lrbprojonly) printf 'projection_span' ;; *) printf 'generic_ranked_span' ;; esac; else printf 'none'; fi)
 script_variant=${log_base}
 script_start_time=${t_start}
 script_end_time=${t_end}
@@ -639,6 +646,10 @@ for defense in "${selected_defenses[@]}"; do
         --defense_lrb_preset "$variant"
         --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"
       )
+      if [ "$ADAPTIVE_ATTACK_CHECK" = "1" ]; then
+        log_base="${log_base}_adaptive"
+        DEF_EXTRA+=( --adaptive_attack defense_aware )
+      fi
       run_variant "$defense" "$log_base" "$param" "${DEF_EXTRA[@]}"
     done
     continue
@@ -690,6 +701,13 @@ for defense in "${selected_defenses[@]}"; do
           DEF_EXTRA=( --defense_lrb_keep_ratio_sensitive "$val" )
           ;;
       esac
+    fi
+    if [ "$ADAPTIVE_ATTACK_CHECK" = "1" ] && [ "$defense" != "none" ] && [ "$defense" != "dager" ]; then
+      log_base="${log_base}_adaptive"
+      DEF_EXTRA+=( --adaptive_attack defense_aware )
+      if [ "$defense" = "noise" ] || [ "$defense" = "dpsgd" ]; then
+        DEF_EXTRA+=( --defense_adaptive_decoding )
+      fi
     fi
     run_variant "$defense" "$log_base" "$param" "${DEF_EXTRA[@]}"
   done

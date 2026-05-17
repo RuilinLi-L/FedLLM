@@ -14,6 +14,7 @@
 # Script-only flags handled here and not forwarded to attack.py:
 #   --baseline_defense <none|noise|dpsgd|topk|compression|soteria|mixup|lrb|lrbprojonly>
 #   --baseline_param <value>
+#   --adaptive_attack_check
 #
 # Logging:
 # - Creates a run directory under log/runs/ by default.
@@ -37,6 +38,7 @@ fi
 
 BASELINE_DEFENSE=""
 BASELINE_PARAM=""
+ADAPTIVE_ATTACK_CHECK=0
 EXTRA=()
 
 ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb lrbprojonly )
@@ -68,6 +70,10 @@ parse_script_args() {
         ;;
       --baseline_param=*)
         BASELINE_PARAM="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --adaptive_attack_check)
+        ADAPTIVE_ATTACK_CHECK=1
         idx=$((idx + 1))
         ;;
       *)
@@ -233,6 +239,8 @@ rec_token_mean=n/a
 rec_maxb_token_mean=n/a
 error_type=runner_error
 error_message=missing_result_summary_or_process_failed
+adaptive_attack=$(if printf '%s' "$log_base" | grep -q '_adaptive'; then printf 'defense_aware'; else printf 'none'; fi)
+adaptive_attack_profile=$(if printf '%s' "$log_base" | grep -q '_adaptive'; then case "$defense" in topk) printf 'topk_support' ;; compression) printf 'quantization_robust' ;; lrb|lrbprojonly) printf 'projection_span' ;; *) printf 'generic_ranked_span' ;; esac; else printf 'none'; fi)
 script_variant=${log_base}
 script_start_time=${t_start}
 script_end_time=${t_end}
@@ -446,6 +454,13 @@ for defense in "${selected_defenses[@]}"; do
           DEF_EXTRA=( --defense_lrb_keep_ratio_sensitive "$val" )
           ;;
       esac
+    fi
+    if [ "$ADAPTIVE_ATTACK_CHECK" = "1" ] && [ "$defense" != "none" ]; then
+      log_base="${log_base}_adaptive"
+      DEF_EXTRA+=( --adaptive_attack defense_aware )
+      if [ "$defense" = "noise" ] || [ "$defense" = "dpsgd" ]; then
+        DEF_EXTRA+=( --defense_adaptive_decoding )
+      fi
     fi
     run_variant "$defense" "$log_base" "$param" "${DEF_EXTRA[@]}"
   done

@@ -1,12 +1,14 @@
 
 import copy
 import torch
-from utils.functional import check_if_in_span, get_span_dists, filter_outliers
+from utils.functional import filter_outliers
 from utils.defenses import uses_noisy_gradient_decoding
 import itertools
 from tqdm import tqdm
 import numpy as np
 def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
+    from utils.adaptive_attack import adaptive_check_if_in_span
+
     R_Q2 = R_Qs[1]
     res_ids = copy.deepcopy(res_ids)
     for i in range(len(res_ids)):
@@ -22,7 +24,13 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
         
     is_batch_incorrect = torch.zeros_like(batch).squeeze(1)
     
-    scores = check_if_in_span(R_Q2, model_wrapper.get_layer_inputs(batch.to(args.device))[0], args.dist_norm).mean(dim=1).to('cpu')
+    scores = adaptive_check_if_in_span(
+        args,
+        R_Q2,
+        model_wrapper.get_layer_inputs(batch.to(args.device))[0],
+        args.dist_norm,
+        layer_position=1,
+    ).mean(dim=1).to('cpu')
 
     predicted_sentences = []
     predicted_sentences_scores = []
@@ -192,11 +200,19 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
     return predicted_sentences, predicted_sentences_scores, top_B_incorrect_sentences, top_B_incorrect_scores
 
 def filter_decoder_step(args, model_wrapper, R_Qs, batch, p):
+    from utils.adaptive_attack import adaptive_check_if_in_span, adaptive_get_span_dists
+
     if not uses_noisy_gradient_decoding(args):
         R_Q2 = R_Qs[1]
         attention_mask = torch.where(batch != model_wrapper.pad_token, 1, 0)
         input_layer1 = model_wrapper.get_layer_inputs(batch, attention_mask = attention_mask)[0]
-        sizesq2 = check_if_in_span(R_Q2, input_layer1, args.dist_norm)
+        sizesq2 = adaptive_check_if_in_span(
+            args,
+            R_Q2,
+            input_layer1,
+            args.dist_norm,
+            layer_position=1,
+        )
         boolsq2 = sizesq2 < args.l2_span_thresh
         
         if model_wrapper.has_rope():
@@ -214,4 +230,4 @@ def filter_decoder_step(args, model_wrapper, R_Qs, batch, p):
     else:
         attention_mask = torch.where(batch != model_wrapper.pad_token, 1, 0)
         input_layers = model_wrapper.get_layer_inputs(batch, attention_mask = attention_mask, layers=args.n_layers-1)
-        return get_span_dists(args, model_wrapper, R_Qs, input_layers, stage='sequence')
+        return adaptive_get_span_dists(args, model_wrapper, R_Qs, input_layers, stage='sequence')

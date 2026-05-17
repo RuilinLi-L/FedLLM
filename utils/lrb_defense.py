@@ -429,10 +429,18 @@ def apply_lrb_defense(
         projection_mode=projection_mode,
     )
     out = []
+    layer_info = []
 
     for idx, grad in enumerate(grads):
         if grad is None:
             out.append(None)
+            layer_info.append(
+                {
+                    "idx": idx,
+                    "name": layer_names[idx] if layer_names is not None and idx < len(layer_names) else f"layer_{idx}",
+                    "active": False,
+                }
+            )
             continue
 
         sensitivity = sensitivities[idx]
@@ -458,5 +466,20 @@ def apply_lrb_defense(
             projection_mode=projection_mode,
         )
         out.append(projected + noise)
+        layer_info.append(
+            {
+                "idx": idx,
+                "name": layer_names[idx] if layer_names is not None and idx < len(layer_names) else f"layer_{idx}",
+                "active": True,
+                "sensitivity": float(sensitivity),
+                "keep_ratio": float(keep_ratio),
+                "clip_scale": float(clip_scale),
+                "noise_scale": float(noise_scale),
+                "projection_seed": int(layer_seed),
+                "projection_mode": projection_mode,
+                "shape": tuple(int(dim) for dim in grad.shape),
+            }
+        )
 
+    setattr(args, "lrb_defense_layer_info", layer_info)
     return tuple(out)

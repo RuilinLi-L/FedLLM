@@ -6,14 +6,18 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import torch
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import collect_experiment_logs as cel  # noqa: E402
-from utils.defense_common import defense_param_spec, grad_similarity_metrics  # noqa: E402
+if torch is not None:
+    from utils.defense_common import defense_param_spec, grad_similarity_metrics  # noqa: E402
 
 
 def assert_true(condition, message):
@@ -276,15 +280,157 @@ def test_tradeoff_join_distinguishes_peft_method_and_rep_bottleneck():
     assert_true(row["privacy_score"] == "0.750000", "attack row should join through PEFT/rep keys")
 
 
+def test_attack_anchor_keeps_adaptive_attack_separate():
+    rows = [
+        {
+            "log_kind": "attack_dager",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "defense": "lrbprojonly",
+            "defense_param_value": "0.500000",
+            "adaptive_attack": "none",
+            "adaptive_attack_profile": "none",
+            "rec_token_mean": "0.000000",
+        },
+        {
+            "log_kind": "attack_dager",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "defense": "lrbprojonly",
+            "defense_param_value": "0.500000",
+            "adaptive_attack": "defense_aware",
+            "adaptive_attack_profile": "projection_span",
+            "rec_token_mean": "0.250000",
+        },
+    ]
+    anchors = cel.build_attack_anchor_results(rows)
+    assert_true(len(anchors) == 2, "adaptive and non-adaptive attack rows should not be averaged together")
+    adaptive = next(row for row in anchors if row.get("adaptive_attack") == "defense_aware")
+    assert_true(adaptive["adaptive_attack_profile"] == "projection_span", "adaptive profile should survive aggregation")
+    assert_true(adaptive["rec_token_mean"] == "0.250000", "adaptive row should keep its own leakage metric")
+
+
+def test_tradeoff_join_emits_adaptive_and_nonadaptive_rows():
+    rows = [
+        {
+            "log_kind": "train",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "lora_r": "",
+            "defense": "none",
+            "defense_param_value": "n/a",
+            "result_status": "ok",
+            "steps_completed": "10",
+            "eval_accuracy": "0.900000",
+        },
+        {
+            "log_kind": "train",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "lora_r": "",
+            "defense": "lrbprojonly",
+            "defense_param_value": "0.500000",
+            "result_status": "ok",
+            "steps_completed": "10",
+            "eval_accuracy": "0.880000",
+        },
+        {
+            "log_kind": "attack_dager",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "defense": "lrbprojonly",
+            "defense_param_value": "0.500000",
+            "adaptive_attack": "none",
+            "adaptive_attack_profile": "none",
+            "result_status": "ok",
+            "n_inputs_requested": "3",
+            "n_inputs_completed": "3",
+            "rec_token_mean": "0.000000",
+        },
+        {
+            "log_kind": "attack_dager",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "defense": "lrbprojonly",
+            "defense_param_value": "0.500000",
+            "adaptive_attack": "defense_aware",
+            "adaptive_attack_profile": "projection_span",
+            "result_status": "ok",
+            "n_inputs_requested": "3",
+            "n_inputs_completed": "3",
+            "rec_token_mean": "0.250000",
+        },
+    ]
+    tradeoff = cel.build_privacy_utility_tradeoff(rows)
+    method_rows = [row for row in tradeoff if row.get("defense") == "lrbprojonly"]
+
+    assert_true(len(method_rows) == 2, "tradeoff should include both adaptive and non-adaptive privacy rows")
+    assert_true(
+        {row.get("adaptive_attack") for row in method_rows} == {"none", "defense_aware"},
+        "adaptive attack should distinguish tradeoff rows",
+    )
+
+
+def test_utility_aggregation_filters_failed_runs():
+    rows = [
+        {
+            "log_kind": "train",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "defense": "lrbprojonly",
+            "defense_param_value": "0.500000",
+            "result_status": "ok",
+            "steps_completed": "10",
+            "eval_accuracy": "0.880000",
+        },
+        {
+            "log_kind": "train",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "defense": "lrbprojonly",
+            "defense_param_value": "0.500000",
+            "result_status": "failed",
+            "steps_completed": "0",
+            "eval_accuracy": "0.100000",
+        },
+    ]
+    utility = cel.build_utility_results(rows)
+    row = utility[0]
+
+    assert_true(row["result_status"] == "mixed", "mixed successful/failed utility runs should be marked mixed")
+    assert_true(row["failed_runs"] == "1", "failed utility runs should be counted")
+    assert_true(row["n_valid_runs"] == "1", "valid utility runs should be counted separately")
+    assert_true(row["eval_accuracy"] == "0.880000", "failed utility metrics should not enter the mean")
+
+
 def main():
-    tests = [
-        test_defense_param_spec_tracks_shared_cli_mapping,
-        test_grad_similarity_metrics_returns_cosine_and_norm_retention,
+    tests = []
+    if torch is not None:
+        tests.extend(
+            [
+                test_defense_param_spec_tracks_shared_cli_mapping,
+                test_grad_similarity_metrics_returns_cosine_and_norm_retention,
+            ]
+        )
+    else:
+        print("Skipping torch-backed utility tests: torch is not installed in this Python environment.")
+    tests.extend([
         test_collect_parser_splits_multi_variant_attack_summaries,
         test_collect_parser_reads_train_and_proxy_summaries,
         test_tradeoff_join_uses_none_as_utility_anchor,
         test_tradeoff_join_distinguishes_peft_method_and_rep_bottleneck,
-    ]
+        test_attack_anchor_keeps_adaptive_attack_separate,
+        test_tradeoff_join_emits_adaptive_and_nonadaptive_rows,
+        test_utility_aggregation_filters_failed_runs,
+    ])
     for test in tests:
         print(f"Running {test.__name__}...")
         test()

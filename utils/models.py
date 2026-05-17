@@ -924,6 +924,8 @@ class ModelWrapper():
                 setattr(self.args, 'dager_selected_block_ids', selected_block_ids)
         else:
             setattr(self.args, 'dager_selected_block_ids', list(range(self.args.n_layers)))
+        setattr(self.args, 'dager_selected_gradient_indices', list(grad_indices[:self.args.n_layers]))
+        setattr(self.args, 'dager_selected_gradient_names', list(grad_names[:self.args.n_layers]))
         
         for i in range(self.args.n_layers):
             grad_Q = true_grads[grad_indices[i]]

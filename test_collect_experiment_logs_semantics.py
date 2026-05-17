@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from scripts.collect_experiment_logs import build_privacy_utility_tradeoff, build_utility_results
+from scripts.collect_experiment_logs import classify_and_parse, build_attack_anchor_results
 
 
 def assert_true(condition, message):
@@ -138,12 +140,42 @@ def test_prefix_scope_ignores_na_placeholders_when_metadata_is_available():
     assert_true(tradeoff[0]["peft_eval_scope"] == "training_only", "n/a scope placeholder should not hide prefix metadata")
 
 
+def test_adaptive_fallback_summary_stays_in_adaptive_group():
+    text = """
+===== VARIANT START defense=lrbprojonly param=lrbprojonly@k=0.5 dataset=sst2 batch=2 model=gpt2 start=now =====
+===== RESULT SUMMARY START =====
+summary_version=2
+result_status=failed
+dataset=sst2
+batch_size=2
+train_method=full
+defense=lrbprojonly
+defense_param_value=0.500000
+n_inputs_requested=3
+n_inputs_completed=0
+error_type=runner_error
+script_variant=lrbprojonly_0_5_adaptive
+script_exit_code=137
+===== RESULT SUMMARY END =====
+===== VARIANT END end=later exit_code=137 =====
+""".strip()
+
+    rows = classify_and_parse(Path("lrbprojonly_0_5_adaptive.txt"), text)
+    anchors = build_attack_anchor_results(rows)
+
+    assert_true(rows[0]["adaptive_attack"] == "defense_aware", "adaptive fallback summary should infer adaptive attack")
+    assert_true(anchors[0]["adaptive_attack"] == "defense_aware", "failed adaptive run should aggregate under adaptive group")
+    assert_true(anchors[0]["result_status"] == "failed", "exit 137 fallback should not be successful")
+    assert_true(anchors[0]["failed_or_incomplete_privacy_runs"] == "1", "failed adaptive run should be counted")
+
+
 def main():
     tests = [
         test_prefix_utility_rows_are_training_only_not_failed_privacy,
         test_prefix_scope_is_inferred_without_explicit_scope_field,
         test_prefix_scope_is_inferred_from_adapter_metadata,
         test_prefix_scope_ignores_na_placeholders_when_metadata_is_available,
+        test_adaptive_fallback_summary_stays_in_adaptive_group,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

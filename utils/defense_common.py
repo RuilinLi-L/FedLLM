@@ -7,6 +7,7 @@ import torch
 
 from utils.lrb_presets import LRB_PRESET_CHOICES, lrb_preset_param_value
 from utils.representation_bottleneck import REP_BOTTLENECK_CHOICES
+from utils.adaptive_attack import ADAPTIVE_ATTACK_CHOICES
 
 
 DEFENSE_CHOICES = [
@@ -93,6 +94,25 @@ def add_shared_defense_args(parser: ArgumentParser, *, default_grad_mode: str = 
         action="store_true",
         default=False,
         help="Use noisy/outlier DAGER decoding for non-noise defenses when running adaptive checks.",
+    )
+    parser.add_argument(
+        "--adaptive_attack",
+        type=str,
+        default="none",
+        choices=ADAPTIVE_ATTACK_CHOICES,
+        help="Defense-aware attack profile used by attack.py.",
+    )
+    parser.add_argument(
+        "--adaptive_candidate_multiplier",
+        type=int,
+        default=50,
+        help="Multiples of batch_size kept as adaptive L1 candidates.",
+    )
+    parser.add_argument(
+        "--adaptive_candidate_cap",
+        type=int,
+        default=None,
+        help="Optional hard cap on adaptive ranked L1 candidates per position.",
     )
     parser.add_argument(
         "--defense_lrb_preset",

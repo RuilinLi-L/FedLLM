@@ -6,6 +6,7 @@ from utils.lrb_presets import LRB_PRESET_CHOICES, apply_lrb_preset
 from utils.peft_utils import normalize_peft_args, validate_peft_eval_args
 from utils.partial_gradient import validate_partial_gradient_args
 from utils.representation_bottleneck import REP_BOTTLENECK_CHOICES, validate_rep_bottleneck_args
+from utils.adaptive_attack import ADAPTIVE_ATTACK_CHOICES, validate_adaptive_attack_args
 
 def get_args(argv=None):
     parser = argparse.ArgumentParser(description='DAGER attack')
@@ -102,6 +103,28 @@ def get_args(argv=None):
         action='store_true',
         default=False,
         help='Use noisy/outlier DAGER decoding for non-noise defenses when running adaptive checks.',
+    )
+    parser.add_argument(
+        '--adaptive_attack',
+        type=str,
+        default='none',
+        choices=ADAPTIVE_ATTACK_CHOICES,
+        help=(
+            'Defense-aware attack profile. auto preserves legacy adaptive decoding; '
+            'defense_aware adds support-aware/top-k, quantization-robust, and LRB projection-aware span checks.'
+        ),
+    )
+    parser.add_argument(
+        '--adaptive_candidate_multiplier',
+        type=int,
+        default=50,
+        help='When adaptive span ranking is active, keep this many multiples of batch_size as L1 candidates.',
+    )
+    parser.add_argument(
+        '--adaptive_candidate_cap',
+        type=int,
+        default=None,
+        help='Optional hard cap on adaptive ranked L1 candidates per position.',
     )
 
     # Unified defense baselines (FL-LLM.md)
@@ -341,6 +364,7 @@ def get_args(argv=None):
 
     validate_partial_gradient_args(args)
     validate_rep_bottleneck_args(args)
+    validate_adaptive_attack_args(args)
     validate_peft_eval_args(args)
     apply_lrb_preset(args)
 

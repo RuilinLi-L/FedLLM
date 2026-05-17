@@ -2,7 +2,7 @@ import torch
 import itertools
 import numpy as np
 from tqdm import tqdm
-from utils.functional import check_if_in_span
+from utils.adaptive_attack import adaptive_check_if_in_span
 
 def filter_encoder(args, model_wrapper, R_Q2, l, token_type, res_ids, sentence_filter, approx_sentence_filter, approx_sentence_score, max_ids, B):
     predicted_sentences = [ [-1]*(l+1) for i in range(B) ]
@@ -69,7 +69,13 @@ def filter_encoder(args, model_wrapper, R_Q2, l, token_type, res_ids, sentence_f
             input_layer1 = model_wrapper.get_layer_inputs(sentences)[0]
             
         
-        sizesq2 = check_if_in_span(R_Q2, input_layer1, args.dist_norm).mean(dim=1)
+        sizesq2 = adaptive_check_if_in_span(
+            args,
+            R_Q2,
+            input_layer1,
+            args.dist_norm,
+            layer_position=1,
+        ).mean(dim=1)
         
         # Remove repeated versions of approximate sentences
         for b_idx in range(len(approx_sentence_filter)):

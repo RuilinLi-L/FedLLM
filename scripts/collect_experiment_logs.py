@@ -52,6 +52,8 @@ PROXY_SUMMARY_BLOCK_RE = re.compile(
     r"^===== PROXY UTILITY SUMMARY START =====\s*\n(?P<body>.*?)^===== PROXY UTILITY SUMMARY END =====\s*$",
     re.MULTILINE | re.DOTALL,
 )
+VARIANT_START_RE = re.compile(r"^===== VARIANT START (?P<body>.*?) =====$", re.MULTILINE)
+VARIANT_END_RE = re.compile(r"^===== VARIANT END .*?exit_code=(?P<exit_code>\d+) =====$", re.MULTILINE)
 
 TAG_DATASET_BATCH = frozenset(
     {
@@ -110,6 +112,8 @@ def _parse_cli_flags(joined: str) -> dict[str, str]:
         out[m.group(1)] = m.group(2)
     for m in re.finditer(r"--([\w_]+)=(\S+)", joined):
         out[m.group(1)] = m.group(2)
+    for m in re.finditer(r"--([\w_]+)(?=\s|$)", joined):
+        out.setdefault(m.group(1), "true")
     return out
 
 
@@ -140,6 +144,51 @@ def _parse_summary_blocks(text: str, block_re: re.Pattern[str]) -> list[dict[str
         if summary:
             rows.append(summary)
     return rows
+
+
+def _parse_variant_attrs(text: str) -> dict[str, str]:
+    m = VARIANT_START_RE.search(text)
+    if not m:
+        return {}
+    attrs: dict[str, str] = {}
+    for part in m.group("body").split():
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        attrs[key] = value
+    return attrs
+
+
+def _variant_exit_code(text: str) -> str:
+    last = None
+    for match in VARIANT_END_RE.finditer(text):
+        last = match
+    return last.group("exit_code") if last else ""
+
+
+def _infer_adaptive_attack(row: dict, text: str = "") -> None:
+    if row.get("adaptive_attack") not in (None, ""):
+        return
+    variant = row.get("script_variant") or row.get("variant") or _parse_variant_attrs(text).get("variant", "")
+    guessed = row.get("adaptive_attack_guess", "")
+    if guessed:
+        row["adaptive_attack"] = guessed
+    elif "_adaptive" in str(variant):
+        row["adaptive_attack"] = "defense_aware"
+    elif row.get("defense_adaptive_decoding_guess") == "true":
+        row["adaptive_attack"] = "auto"
+    if row.get("adaptive_attack") == "defense_aware" and not row.get("adaptive_attack_profile"):
+        defense = row.get("defense", "")
+        if defense == "topk":
+            row["adaptive_attack_profile"] = "topk_support"
+        elif defense == "compression":
+            row["adaptive_attack_profile"] = "quantization_robust"
+        elif defense in {"lrb", "lrbprojonly"}:
+            row["adaptive_attack_profile"] = "projection_span"
+        else:
+            row["adaptive_attack_profile"] = "generic_ranked_span"
+    elif row.get("adaptive_attack") == "auto" and not row.get("adaptive_attack_profile"):
+        row["adaptive_attack_profile"] = "outlier_decode"
 
 
 def _parse_aggregate_section(section: str) -> dict[str, float]:
@@ -211,6 +260,8 @@ def _meta_from_text(path: Path, text: str) -> dict[str, str]:
         meta["defense_rep_bottleneck_guess"] = flags.get("defense_rep_bottleneck", "")
         meta["defense_rep_keep_ratio_guess"] = flags.get("defense_rep_keep_ratio", "")
         meta["defense_rep_dropout_p_guess"] = flags.get("defense_rep_dropout_p", "")
+        meta["adaptive_attack_guess"] = flags.get("adaptive_attack", "")
+        meta["defense_adaptive_decoding_guess"] = "true" if "defense_adaptive_decoding" in flags else ""
     else:
         meta.update(
             {
@@ -230,6 +281,8 @@ def _meta_from_text(path: Path, text: str) -> dict[str, str]:
                 "defense_rep_bottleneck_guess": "",
                 "defense_rep_keep_ratio_guess": "",
                 "defense_rep_dropout_p_guess": "",
+                "adaptive_attack_guess": "",
+                "defense_adaptive_decoding_guess": "",
             }
         )
     return meta
@@ -242,11 +295,16 @@ def parse_attack_dager(text: str, meta: dict) -> list[dict]:
         for summary in summaries:
             row = {**meta, **summary}
             row["log_kind"] = "attack_dager"
+            exit_code = _variant_exit_code(text)
+            if exit_code and "script_exit_code" not in row:
+                row["script_exit_code"] = exit_code
+            _infer_adaptive_attack(row, text)
             _annotate_peft_eval_scope(row)
             rows.append(row)
         return rows
 
     row = {**meta, "log_kind": "attack_dager"}
+    _infer_adaptive_attack(row, text)
     _annotate_peft_eval_scope(row)
     rec_pairs = REC_LINE_RE.findall(text)
     if rec_pairs:
@@ -430,6 +488,16 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "rep_keep_ratio",
         "rep_dropout_p",
         "rep_bottleneck_with_lrb",
+        "adaptive_attack",
+        "adaptive_attack_active",
+        "adaptive_attack_profile",
+        "adaptive_candidate_multiplier",
+        "adaptive_candidate_cap",
+        "adaptive_span_transform",
+        "adaptive_support_density_mean",
+        "adaptive_quantization_levels_mean",
+        "adaptive_lrb_keep_ratio_mean",
+        "adaptive_selected_gradients",
         "gradient_layer_subset",
         "gradient_param_filter",
         "partial_filter_active",
@@ -546,9 +614,26 @@ def _to_int(value) -> int | None:
 def _is_complete_successful_attack(row: dict) -> bool:
     if row.get("result_status", "ok") != "ok":
         return False
+    exit_code = _to_int(row.get("script_exit_code"))
+    if exit_code not in (None, 0):
+        return False
     requested = _to_int(row.get("n_inputs_requested"))
     completed = _to_int(row.get("n_inputs_completed"))
     if requested is not None and completed is not None and completed < requested:
+        return False
+    if requested is not None and requested > 0 and completed is None:
+        return False
+    return True
+
+
+def _is_complete_successful_utility(row: dict) -> bool:
+    if row.get("result_status", "ok") != "ok":
+        return False
+    exit_code = _to_int(row.get("script_exit_code"))
+    if exit_code not in (None, 0):
+        return False
+    steps = _to_int(row.get("steps_completed"))
+    if steps is not None and steps <= 0:
         return False
     return True
 
@@ -774,30 +859,31 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
             "seeds": " ".join(sorted({item.get("seed", "") for item in items if item.get("seed", "")})),
         }
 
-        statuses = [item.get("result_status", "ok") for item in items]
-        if statuses and all(status == "ok" for status in statuses):
+        valid_items = [item for item in items if _is_complete_successful_utility(item)]
+        failed = [item for item in items if not _is_complete_successful_utility(item)]
+        if items and len(valid_items) == len(items):
             row["result_status"] = "ok"
-        elif statuses and all(status != "ok" for status in statuses):
+        elif not valid_items:
             row["result_status"] = "failed"
         else:
             row["result_status"] = "mixed"
 
         for field in ("eval_accuracy", "eval_macro_f1", "eval_loss", "final_train_loss"):
-            values = [_to_float(item.get(field)) for item in items]
+            values = [_to_float(item.get(field)) for item in valid_items]
             clean_values = [value for value in values if value is not None]
             mean, std = _stats(clean_values)
             row[field] = mean
             row[f"{field}_std"] = std
 
-        time_values = [_time_to_seconds(item.get("total_train_time")) for item in items]
+        time_values = [_time_to_seconds(item.get("total_train_time")) for item in valid_items]
         clean_time_values = [value for value in time_values if value is not None]
         row["total_train_time_seconds"], row["total_train_time_seconds_std"] = _stats(clean_time_values)
         row["total_train_time"] = _seconds_to_hms(
             statistics.mean(clean_time_values) if clean_time_values else None
         )
 
-        failed = [item for item in items if item.get("result_status") != "ok"]
         row["failed_runs"] = str(len(failed))
+        row["n_valid_runs"] = str(len(valid_items))
         if failed:
             row["error_types"] = "; ".join(
                 sorted({item.get("error_type", "") for item in failed if item.get("error_type", "")})
@@ -818,6 +904,8 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             row.get("lora_r", row.get("lora_r_guess", "")),
             _normalized_lora_target_modules(row),
             *_rep_bottleneck_key(row),
+            row.get("adaptive_attack", "none"),
+            row.get("adaptive_attack_profile", "none"),
             row.get("defense", "none"),
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
@@ -836,6 +924,8 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             rep_bottleneck_type,
             rep_keep_ratio,
             rep_dropout_p,
+            adaptive_attack,
+            adaptive_attack_profile,
             defense,
             param_name,
             param_value,
@@ -853,6 +943,8 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             "rep_bottleneck_type": rep_bottleneck_type,
             "rep_keep_ratio": rep_keep_ratio,
             "rep_dropout_p": rep_dropout_p,
+            "adaptive_attack": adaptive_attack,
+            "adaptive_attack_profile": adaptive_attack_profile,
             "defense": defense,
             "defense_param_name": param_name,
             "defense_param_value": param_value,
@@ -915,6 +1007,8 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("rep_bottleneck_type", "none"),
             row.get("rep_keep_ratio", "n/a"),
             row.get("rep_dropout_p", "n/a"),
+            row.get("adaptive_attack", "none"),
+            row.get("adaptive_attack_profile", "none"),
             row.get("defense", ""),
             row.get("defense_param_value", ""),
         ): row
@@ -936,8 +1030,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         if row.get("defense") == "none"
     }
 
-    out: list[dict] = []
-    for utility in utility_rows:
+    def make_tradeoff_row(utility: dict, attack: dict | None) -> dict:
         dataset = utility.get("dataset", "")
         batch_size = utility.get("batch_size", "")
         train_method = utility.get("train_method", "full")
@@ -945,34 +1038,25 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         lora_r = utility.get("lora_r", "")
         lora_target_modules = _normalized_lora_target_modules(utility)
         rep_bottleneck_type, rep_keep_ratio, rep_dropout_p = _rep_bottleneck_key(utility)
-        defense = utility.get("defense", "")
-        param_value = utility.get("defense_param_value", "")
 
         row = dict(utility)
         row["peft_eval_scope"] = _peft_eval_scope(utility)
-        attack = attack_index.get(
-            (
-                dataset,
-                batch_size,
-                train_method,
-                peft_method,
-                lora_r,
-                lora_target_modules,
-                rep_bottleneck_type,
-                rep_keep_ratio,
-                rep_dropout_p,
-                defense,
-                param_value,
-            )
-        )
         if attack is not None:
             row["rec_token_mean"] = attack.get("rec_token_mean", "")
             row["agg_rouge1_fm"] = attack.get("agg_rouge1_fm", "")
             row["agg_rouge2_fm"] = attack.get("agg_rouge2_fm", "")
             row["agg_r1fm_r2fm"] = attack.get("agg_r1fm_r2fm", "")
+            row["adaptive_attack"] = attack.get("adaptive_attack", row.get("adaptive_attack", "none"))
+            row["adaptive_attack_profile"] = attack.get("adaptive_attack_profile", row.get("adaptive_attack_profile", "none"))
+            row["privacy_result_status"] = attack.get("result_status", "")
+            row["n_privacy_runs"] = attack.get("n_privacy_runs", "")
+            row["n_privacy_valid_runs"] = attack.get("n_privacy_valid_runs", "")
+            row["failed_or_incomplete_privacy_runs"] = attack.get("failed_or_incomplete_privacy_runs", "")
         elif row["peft_eval_scope"] in {"training_only", "v2_planned"}:
             row["privacy_eval_status"] = row["peft_eval_scope"]
             row["privacy_eval_note"] = "not_in_v1_dager_partial_eval_scope"
+            row["adaptive_attack"] = row.get("adaptive_attack", "none")
+            row["adaptive_attack_profile"] = row.get("adaptive_attack_profile", "none")
 
         acc = _to_float(row.get("eval_accuracy"))
         none_acc = _to_float(
@@ -994,7 +1078,79 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         rec_token = _to_float(row.get("rec_token_mean"))
         row["utility_drop"] = f"{(none_acc - acc):.6f}" if acc is not None and none_acc is not None else ""
         row["privacy_score"] = f"{(1.0 - rec_token):.6f}" if rec_token is not None else ""
-        out.append(row)
+        return row
+
+    out: list[dict] = []
+    used_attack_keys: set[tuple[str, ...]] = set()
+    for utility in utility_rows:
+        dataset = utility.get("dataset", "")
+        batch_size = utility.get("batch_size", "")
+        train_method = utility.get("train_method", "full")
+        peft_method = utility.get("peft_method", "")
+        lora_r = utility.get("lora_r", "")
+        lora_target_modules = _normalized_lora_target_modules(utility)
+        rep_bottleneck_type, rep_keep_ratio, rep_dropout_p = _rep_bottleneck_key(utility)
+        defense = utility.get("defense", "")
+        param_value = utility.get("defense_param_value", "")
+        base_key = (
+            dataset,
+            batch_size,
+            train_method,
+            peft_method,
+            lora_r,
+            lora_target_modules,
+            rep_bottleneck_type,
+            rep_keep_ratio,
+            rep_dropout_p,
+        )
+        matching_attacks = [
+            (key, attack)
+            for key, attack in attack_index.items()
+            if key[:9] == base_key and key[11] == defense and key[12] == param_value
+        ]
+        if matching_attacks:
+            for key, attack in sorted(matching_attacks):
+                used_attack_keys.add(key)
+                out.append(make_tradeoff_row(utility, attack))
+            continue
+
+        attack = attack_index.get((*base_key, "none", "none", defense, param_value))
+        if attack is None:
+            attack = attack_index.get((*base_key, "", "", defense, param_value))
+        if attack is not None:
+            used_attack_keys.add(
+                (
+                    *base_key,
+                    attack.get("adaptive_attack", "none"),
+                    attack.get("adaptive_attack_profile", "none"),
+                    defense,
+                    param_value,
+                )
+            )
+        out.append(make_tradeoff_row(utility, attack))
+
+    utility_index = {
+        (
+            row.get("dataset", ""),
+            row.get("batch_size", ""),
+            row.get("train_method", "full"),
+            row.get("peft_method", ""),
+            row.get("lora_r", ""),
+            _normalized_lora_target_modules(row),
+            row.get("rep_bottleneck_type", "none"),
+            row.get("rep_keep_ratio", "n/a"),
+            row.get("rep_dropout_p", "n/a"),
+            row.get("defense", ""),
+            row.get("defense_param_value", ""),
+        ): row
+        for row in utility_rows
+    }
+    for key, attack in sorted(attack_index.items()):
+        if key in used_attack_keys:
+            continue
+        utility = utility_index.get((*key[:9], key[11], key[12]))
+        if utility is not None:
+            out.append(make_tradeoff_row(utility, attack))
 
     _mark_pareto(out)
     return out

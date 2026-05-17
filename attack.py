@@ -6,10 +6,17 @@ from utils.models import ModelWrapper
 from utils.data import TextDataset
 from utils.filtering_encoder import filter_encoder
 from utils.filtering_decoder import filter_decoder
-from utils.functional import get_top_B_in_span, check_if_in_span, remove_padding, filter_outliers, get_span_dists
+from utils.functional import remove_padding, filter_outliers
 from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import lrb_preset_param_value
+from utils.adaptive_attack import (
+    adaptive_attack_summary_fields,
+    adaptive_check_if_in_span,
+    adaptive_get_span_dists,
+    adaptive_get_top_B_in_span,
+    prepare_adaptive_attack,
+)
 from utils.partial_gradient import (
     PARTIAL_ATTACK_DAGER_NONPREFIX,
     UnsupportedPartialGradientExposureError,
@@ -174,6 +181,7 @@ def _emit_result_summary(args):
         ('defense_param_value', defense_param_value),
         *rep_bottleneck_summary_fields(args),
         *partial_gradient_summary_fields(args),
+        *adaptive_attack_summary_fields(args),
         ('n_inputs_requested', tracker.get('n_inputs_requested')),
         ('n_inputs_completed', tracker.get('n_inputs_completed')),
         ('last_input_idx', tracker.get('last_input_idx')),
@@ -244,15 +252,31 @@ def filter_l1(args, model_wrapper, R_Qs):
         embeds = model_wrapper.get_embeddings(p)
         if model_wrapper.is_bert():
             if not uses_noisy_gradient_decoding(args):
-                _, res_ids_new, res_types_new = get_top_B_in_span(R_Qs[0], embeds, args.batch_size, args.l1_span_thresh, args.dist_norm)
+                _, res_ids_new, res_types_new = adaptive_get_top_B_in_span(
+                    args,
+                    R_Qs[0],
+                    embeds,
+                    args.batch_size,
+                    args.l1_span_thresh,
+                    args.dist_norm,
+                    layer_position=0,
+                )
             else:
                 raise NotImplementedError
         else:
             if not uses_noisy_gradient_decoding(args):
-                _, res_ids_new = get_top_B_in_span(R_Qs[0], embeds, args.batch_size, args.l1_span_thresh, args.dist_norm)
+                _, res_ids_new = adaptive_get_top_B_in_span(
+                    args,
+                    R_Qs[0],
+                    embeds,
+                    args.batch_size,
+                    args.l1_span_thresh,
+                    args.dist_norm,
+                    layer_position=0,
+                )
             else:
                 std_thrs = args.p1_std_thrs if p==0 else None
-                d = get_span_dists(args, model_wrapper, R_Qs, embeds, p)
+                d = adaptive_get_span_dists(args, model_wrapper, R_Qs, embeds, p)
                 res_ids_new = filter_outliers(d, std_thrs=std_thrs, maxB=max(50*model_wrapper.args.batch_size, int(0.05*len(model_wrapper.tokenizer))))
             res_types_new = torch.zeros_like(res_ids_new)
         res_pos_new = torch.ones_like( res_ids_new ) * p
@@ -263,6 +287,8 @@ def filter_l1(args, model_wrapper, R_Qs):
         ids = res_ids_new.tolist()
         if len(ids) == 0 or p > tokenizer.model_max_length or p > args.max_len:
             break
+        stop_after_current_position = bool(getattr(args, "_adaptive_l1_stop_after_current_position", False))
+        setattr(args, "_adaptive_l1_stop_after_current_position", False)
         while model_wrapper.eos_token in ids:
             end_token_ind = ids.index(model_wrapper.eos_token)
             sentence_token_type = res_types[-1][ end_token_ind ]
@@ -274,6 +300,8 @@ def filter_l1(args, model_wrapper, R_Qs):
         n_tokens += len(ids)
         p += 1
         if model_wrapper.has_rope():
+            break
+        if stop_after_current_position:
             break
         
     return res_pos, res_ids, res_types, sentence_ends
@@ -346,7 +374,13 @@ def _decode_gpt2_nonprefix(args, model_wrapper, R_Qs, orig_batch):
                         (prefix_layer.repeat(candidate_layer.shape[0], 1, 1), candidate_layer),
                         dim=1,
                     )
-                token_scores = check_if_in_span(R_Qs[0], candidate_layer, args.dist_norm)[:, -1].detach()
+                token_scores = adaptive_check_if_in_span(
+                    args,
+                    R_Qs[0],
+                    candidate_layer,
+                    args.dist_norm,
+                    layer_position=0,
+                )[:, -1].detach()
                 if pad_id is not None and start <= int(pad_id) < start + ids_chunk.shape[0]:
                     token_scores[int(pad_id) - start] = torch.inf
                 keep = min(cap, token_scores.shape[0])
@@ -373,7 +407,13 @@ def _decode_gpt2_nonprefix(args, model_wrapper, R_Qs, orig_batch):
                     attention_mask=sentence_attention,
                     layer_indices=[layer_indices[1]],
                 )[0]
-                span_scores = check_if_in_span(R_Qs[1], layer_inputs, args.dist_norm)
+                span_scores = adaptive_check_if_in_span(
+                    args,
+                    R_Qs[1],
+                    layer_inputs,
+                    args.dist_norm,
+                    layer_position=1,
+                )
                 if sentence[0] == eos_id:
                     seq_score = float(span_scores[:, 1:].mean().item()) if span_scores.shape[1] > 1 else float(tok_score)
                 else:
@@ -422,7 +462,13 @@ def _decode_gpt2_nonprefix(args, model_wrapper, R_Qs, orig_batch):
             attention_mask=sentence_attention,
             layer_indices=[layer_indices[1]],
         )[0]
-        span_scores = check_if_in_span(R_Qs[1], layer_inputs, args.dist_norm)
+        span_scores = adaptive_check_if_in_span(
+            args,
+            R_Qs[1],
+            layer_inputs,
+            args.dist_norm,
+            layer_position=1,
+        )
         if sent and sent[0] == eos_id and span_scores.shape[1] > 1:
             predicted_scores.append(float(span_scores[:, 1:].mean().item()))
         else:
@@ -460,6 +506,11 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
     #import pdb;pdb.set_trace() 
     with torch.no_grad():
         B, R_Qs = model_wrapper.get_matrices_expansions(true_grads, B=None, tol=args.rank_tol)
+        prepare_adaptive_attack(
+            args,
+            true_grads,
+            parameter_names=model_wrapper.trainable_parameter_names(),
+        )
         R_Q = R_Qs[0]
         R_Q2 = R_Qs[1]
         
@@ -569,7 +620,13 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
                     layer_indices=layer_indices,
                 )[0]
 
-            sizesq2 = check_if_in_span(R_Q2, input_layer1, args.dist_norm)
+            sizesq2 = adaptive_check_if_in_span(
+                args,
+                R_Q2,
+                input_layer1,
+                args.dist_norm,
+                layer_position=1,
+            )
             boolsq2 = sizesq2 < args.l2_span_thresh
             print( sizesq2 )
         
