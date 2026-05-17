@@ -20,6 +20,7 @@ from utils.partial_gradient import (
     partial_gradient_summary_fields,
 )
 from utils.representation_bottleneck import rep_bottleneck_summary_fields
+from utils.peft_utils import peft_eval_scope
 from args_factory import get_args
 import time
 
@@ -148,6 +149,7 @@ def _emit_result_summary(args):
         ('train_method', getattr(args, 'train_method', 'full')),
         ('peft_method', getattr(args, 'peft_method', None)),
         ('peft_type', getattr(args, 'peft_type', None)),
+        ('peft_eval_scope', getattr(args, 'peft_eval_scope', peft_eval_scope(getattr(args, 'peft_method', None)))),
         ('peft_target_modules', getattr(args, 'peft_target_modules', None)),
         ('peft_feedforward_modules', getattr(args, 'peft_feedforward_modules', None)),
         ('peft_num_virtual_tokens', getattr(args, 'peft_num_virtual_tokens', None)),

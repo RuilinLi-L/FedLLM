@@ -23,7 +23,15 @@ LLAMA_PEFT_MODELS = frozenset(
 
 SUPPORTED_PEFT_MODELS = GPT2_PEFT_MODELS | BERT_PEFT_MODELS | LLAMA_PEFT_MODELS
 SUPPORTED_PEFT_METHODS = frozenset({"lora", "ia3", "prefix"})
-SUPPORTED_PEFT_DAGER_METHODS = frozenset({"lora", "ia3"})
+SUPPORTED_PEFT_EVAL_METHODS = frozenset({"lora", "ia3"})
+SUPPORTED_PEFT_DAGER_METHODS = SUPPORTED_PEFT_EVAL_METHODS
+PEFT_TRAINING_ONLY_METHODS = frozenset({"prefix"})
+PEFT_V2_PLANNED_METHODS = frozenset({"adapter"})
+PEFT_EVAL_SCOPE_DAGER = "dager_eval"
+PEFT_EVAL_SCOPE_TRAINING_ONLY = "training_only"
+PEFT_EVAL_SCOPE_V2_PLANNED = "v2_planned"
+PEFT_EVAL_SCOPE_NA = "n/a"
+PEFT_EVAL_SCOPE_UNKNOWN = "unknown"
 SUPPORTED_PEFT_DEFENSES = frozenset(
     {"none", "noise", "dpsgd", "topk", "compression", "soteria", "mixup", "lrb", "lrbprojonly"}
 )
@@ -89,6 +97,39 @@ def normalize_peft_method_name(value: str | None) -> str | None:
         "adapter": "adapter",
     }
     return aliases.get(raw, raw)
+
+
+def peft_eval_scope(peft_method: str | None) -> str:
+    method = normalize_peft_method_name(peft_method)
+    if method is None:
+        return PEFT_EVAL_SCOPE_NA
+    if method in SUPPORTED_PEFT_EVAL_METHODS:
+        return PEFT_EVAL_SCOPE_DAGER
+    if method in PEFT_TRAINING_ONLY_METHODS:
+        return PEFT_EVAL_SCOPE_TRAINING_ONLY
+    if method in PEFT_V2_PLANNED_METHODS:
+        return PEFT_EVAL_SCOPE_V2_PLANNED
+    return PEFT_EVAL_SCOPE_UNKNOWN
+
+
+def peft_eval_scope_message(peft_method: str | None) -> str:
+    method = normalize_peft_method_name(peft_method)
+    scope = peft_eval_scope(method)
+    if scope == PEFT_EVAL_SCOPE_TRAINING_ONLY:
+        return (
+            "PEFT DAGER/partial eval v1 supports only LoRA/IA3. "
+            "Prefix tuning is training-only in v1 and excluded from DAGER/partial-gradient eval matrices."
+        )
+    if scope == PEFT_EVAL_SCOPE_V2_PLANNED:
+        return (
+            "Houlsby-style adapter is v2 planned and not part of v1 PEFT DAGER/partial eval."
+        )
+    if scope == PEFT_EVAL_SCOPE_DAGER:
+        return "PEFT DAGER/partial eval v1 supports this method."
+    return (
+        "Unsupported PEFT method for v1 eval. PEFT DAGER/partial eval v1 supports only LoRA/IA3; "
+        f"got peft_method={method!r}."
+    )
 
 
 def _method_to_peft_type(method: str | None) -> str | None:
@@ -467,7 +508,7 @@ def resolve_peft_config(
     metadata = peft_checkpoint_metadata(checkpoint_path)
     method = _resolve_method(peft_method, metadata)
     if method == "adapter":
-        raise NotImplementedError("Houlsby-style adapter is planned for v2 but not enabled in v1.")
+        raise NotImplementedError(peft_eval_scope_message(method))
     if method not in SUPPORTED_PEFT_METHODS:
         raise NotImplementedError(
             f"Unsupported --peft_method {method!r}; v1 supports {sorted(SUPPORTED_PEFT_METHODS)}."
@@ -605,6 +646,7 @@ def apply_peft_config_to_args(args, *, require_checkpoint: bool = False):
     args.peft_adapter_base_model = base_model
     args.peft_adapter_peft_type = resolved.metadata.peft_type
     args.peft_type = resolved.metadata.peft_type or _method_to_peft_type(resolved.peft_method)
+    args.peft_eval_scope = peft_eval_scope(resolved.peft_method)
 
     # Backward-compatible LoRA summary fields.
     args.lora_checkpoint_type = args.peft_checkpoint_type
@@ -835,11 +877,8 @@ def validate_peft_eval_args(args):
     if not peft_active(args):
         return args
     apply_peft_config_to_args(args, require_checkpoint=True)
-    if getattr(args, "peft_method", None) not in SUPPORTED_PEFT_DAGER_METHODS:
-        raise NotImplementedError(
-            "PEFT DAGER eval currently supports LoRA and IA3 adapter-gradient spans; "
-            f"got peft_method={getattr(args, 'peft_method', None)!r}."
-        )
+    if peft_eval_scope(getattr(args, "peft_method", None)) != PEFT_EVAL_SCOPE_DAGER:
+        raise NotImplementedError(peft_eval_scope_message(getattr(args, "peft_method", None)))
     defense = getattr(args, "defense", "none")
     if defense not in SUPPORTED_PEFT_DEFENSES:
         raise NotImplementedError(

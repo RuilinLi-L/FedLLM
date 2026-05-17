@@ -27,6 +27,7 @@ BASELINE_PARAM=""
 LRB_VARIANTS_RAW=""
 LRB_MAIN_K="0.5"
 PEFT_METHOD="lora"
+PEFT_EVAL_SCOPE="dager_eval"
 EXTRA=()
 
 ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup dager lrb lrbprojonly )
@@ -305,6 +306,7 @@ finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
 train_method=peft
 peft_method=${PEFT_METHOD}
+peft_eval_scope=${PEFT_EVAL_SCOPE}
 peft_type=n/a
 peft_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
 peft_feedforward_modules=n/a
@@ -364,6 +366,7 @@ finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
 train_method=peft
 peft_method=${PEFT_METHOD}
+peft_eval_scope=${PEFT_EVAL_SCOPE}
 peft_type=n/a
 peft_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
 peft_feedforward_modules=n/a
@@ -430,13 +433,14 @@ parse_script_args
 
 case "$PEFT_METHOD" in
   lora|ia3)
+    PEFT_EVAL_SCOPE="dager_eval"
     ;;
   prefix)
-    echo "[dager] --peft_method prefix is trainable but not supported by DAGER span eval in v1." >&2
+    echo "[dager] --peft_method prefix is training-only in v1 and excluded from DAGER/partial-gradient eval matrices." >&2
     exit 2
     ;;
   adapter)
-    echo "[dager] --peft_method adapter is planned for v2 but not enabled in v1." >&2
+    echo "[dager] --peft_method adapter is v2 planned and not part of v1 PEFT DAGER/partial eval." >&2
     exit 2
     ;;
   *)
@@ -539,6 +543,7 @@ header_line="===== run start $(date '+%Y-%m-%d %H:%M:%S') tag=peft_baselines arg
   echo "selected_defenses=${selected_defenses[*]}"
   echo "train_method=peft"
   echo "peft_method=${PEFT_METHOD}"
+  echo "peft_eval_scope=${PEFT_EVAL_SCOPE}"
   echo "supported_peft_defenses=${SUPPORTED_PEFT_DEFENSES[*]}"
   echo "lora_eval_semantics=dpsgd=DP-SGD-style_no_accountant;soteria=Soteria-style_representation_masking_eval_only;mixup=manifold_MixUp-style_representation_interpolation"
 } >"${run_dir}/_run_header.txt"

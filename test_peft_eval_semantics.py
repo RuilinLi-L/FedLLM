@@ -19,6 +19,12 @@ from utils.models import select_lora_gradient_indices, select_peft_gradient_indi
 from utils.peft_utils import (
     apply_peft_config_to_args,
     apply_lora_config_to_args,
+    PEFT_EVAL_SCOPE_DAGER,
+    PEFT_EVAL_SCOPE_NA,
+    PEFT_EVAL_SCOPE_TRAINING_ONLY,
+    PEFT_EVAL_SCOPE_V2_PLANNED,
+    peft_eval_scope,
+    peft_eval_scope_message,
     parse_lora_target_modules,
     is_peft_adapter_dir,
     lora_modules_to_save,
@@ -445,7 +451,12 @@ def test_prefix_eval_is_rejected_for_dager_span():
         try:
             validate_peft_eval_args(args)
         except NotImplementedError as exc:
-            assert_true("LoRA and IA3" in str(exc), "Prefix DAGER rejection should mention supported methods")
+            msg = str(exc)
+            assert_true("training-only" in msg, "Prefix DAGER rejection should say prefix is training-only")
+            assert_true(
+                "excluded from DAGER/partial-gradient eval matrices" in msg,
+                "Prefix DAGER rejection should mention the v1 eval matrix exclusion",
+            )
         else:
             raise AssertionError("Prefix PEFT eval should be rejected until DAGER span support exists")
     finally:
@@ -512,6 +523,28 @@ def test_adapter_is_not_exposed_as_cli_choice():
         except SystemExit:
             continue
         raise AssertionError("adapter should not be accepted as a PEFT CLI choice in v1")
+
+
+def test_peft_eval_scope_helper_classifies_v1_policy():
+    assert_true(peft_eval_scope("lora") == PEFT_EVAL_SCOPE_DAGER, "LoRA should be in PEFT DAGER eval scope")
+    assert_true(peft_eval_scope("ia3") == PEFT_EVAL_SCOPE_DAGER, "IA3 should be in PEFT DAGER eval scope")
+    assert_true(peft_eval_scope(None) == PEFT_EVAL_SCOPE_NA, "Non-PEFT runs should report n/a eval scope")
+    assert_true(
+        peft_eval_scope("prefix") == PEFT_EVAL_SCOPE_TRAINING_ONLY,
+        "Prefix should be training-only in v1",
+    )
+    assert_true(
+        peft_eval_scope("adapter") == PEFT_EVAL_SCOPE_V2_PLANNED,
+        "Houlsby-style adapter should remain v2 planned",
+    )
+    assert_true(
+        "training-only" in peft_eval_scope_message("prefix"),
+        "Prefix scope message should be explicit",
+    )
+    assert_true(
+        "v2 planned" in peft_eval_scope_message("adapter"),
+        "Adapter scope message should be explicit",
+    )
 
 
 def test_peft_gradient_inventory_deduplicates_transformer_layers():
@@ -608,6 +641,7 @@ def main():
         test_prefix_virtual_token_override_validates_positive,
         test_prefix_virtual_token_override_rejects_adapter_mismatch,
         test_adapter_is_not_exposed_as_cli_choice,
+        test_peft_eval_scope_helper_classifies_v1_policy,
         test_peft_gradient_inventory_deduplicates_transformer_layers,
         test_lora_training_allows_post_gradient_lrb,
         test_lora_ia3_training_allow_direct_and_dager_defenses,

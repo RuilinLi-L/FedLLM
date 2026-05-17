@@ -55,7 +55,7 @@ case "$PEFT_METHOD" in
   lora|ia3|prefix)
     ;;
   adapter)
-    echo "[dager] --peft_method adapter is planned for v2 but not enabled in v1." >&2
+    echo "[dager] --peft_method adapter is v2 planned and not part of v1 PEFT DAGER/partial eval." >&2
     exit 2
     ;;
   *)

@@ -28,6 +28,7 @@ from utils.peft_utils import (
     apply_peft_config_to_args,
     normalize_peft_args,
     peft_active,
+    peft_eval_scope,
     save_peft_checkpoint,
     validate_peft_training_defense_args,
 )
@@ -134,6 +135,7 @@ def emit_train_result_summary(args, tracker: dict) -> None:
         ("train_method", tracker.get("train_method")),
         ("peft_method", tracker.get("peft_method")),
         ("peft_type", tracker.get("peft_type")),
+        ("peft_eval_scope", getattr(args, "peft_eval_scope", peft_eval_scope(tracker.get("peft_method")))),
         ("peft_target_modules", getattr(args, "peft_target_modules", None)),
         ("peft_feedforward_modules", getattr(args, "peft_feedforward_modules", None)),
         ("peft_num_virtual_tokens", getattr(args, "peft_num_virtual_tokens", None)),

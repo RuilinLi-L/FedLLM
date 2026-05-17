@@ -29,6 +29,7 @@ fi
 EXPOSURE=""
 TRAIN_METHOD="full"
 PEFT_METHOD=""
+PEFT_EVAL_SCOPE="n/a"
 BASELINE_DEFENSE=""
 BASELINE_PARAM=""
 LRB_VARIANTS_RAW=""
@@ -350,6 +351,7 @@ finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
 train_method=${TRAIN_METHOD}
 peft_method=${PEFT_METHOD:-n/a}
+peft_eval_scope=${PEFT_EVAL_SCOPE}
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -394,6 +396,7 @@ finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
 train_method=${TRAIN_METHOD}
 peft_method=${PEFT_METHOD:-n/a}
+peft_eval_scope=${PEFT_EVAL_SCOPE}
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -434,6 +437,7 @@ finetuned_path=$(attack_extra_value --finetuned_path || printf 'n/a')
 batch_size=${BATCH}
 train_method=${TRAIN_METHOD}
 peft_method=${PEFT_METHOD:-n/a}
+peft_eval_scope=${PEFT_EVAL_SCOPE}
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -500,13 +504,14 @@ esac
 if [ -n "$PEFT_METHOD" ]; then
   case "$PEFT_METHOD" in
     lora|ia3)
+      PEFT_EVAL_SCOPE="dager_eval"
       ;;
     prefix)
-      echo "[partial-gradient] --peft_method prefix is trainable but not supported by DAGER span eval in v1." >&2
+      echo "[partial-gradient] --peft_method prefix is training-only in v1 and excluded from DAGER/partial-gradient eval matrices." >&2
       exit 2
       ;;
     adapter)
-      echo "[partial-gradient] --peft_method adapter is planned for v2 but not enabled in v1." >&2
+      echo "[partial-gradient] --peft_method adapter is v2 planned and not part of v1 PEFT DAGER/partial eval." >&2
       exit 2
       ;;
     *)
@@ -586,6 +591,7 @@ fi
 
 if [ "$TRAIN_METHOD" = "peft" ]; then
   PEFT_METHOD="${PEFT_METHOD:-lora}"
+  PEFT_EVAL_SCOPE="dager_eval"
 fi
 
 if [ "$TRAIN_METHOD" = "peft" ]; then
@@ -634,6 +640,7 @@ header_line="===== run start $(date '+%Y-%m-%d %H:%M:%S') tag=partial_gradient_b
   echo "allow_unsupported_exposure=${ALLOW_UNSUPPORTED_EXPOSURE}"
   echo "train_method=${TRAIN_METHOD}"
   echo "peft_method=${PEFT_METHOD:-n/a}"
+  echo "peft_eval_scope=${PEFT_EVAL_SCOPE}"
   echo "focus_baseline_defense=${BASELINE_DEFENSE:-all}"
   echo "focus_baseline_param=${BASELINE_PARAM:-all}"
   echo "lrb_variants=${LRB_VARIANTS_RAW:-none}"

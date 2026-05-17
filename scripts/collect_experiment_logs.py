@@ -242,10 +242,12 @@ def parse_attack_dager(text: str, meta: dict) -> list[dict]:
         for summary in summaries:
             row = {**meta, **summary}
             row["log_kind"] = "attack_dager"
+            _annotate_peft_eval_scope(row)
             rows.append(row)
         return rows
 
     row = {**meta, "log_kind": "attack_dager"}
+    _annotate_peft_eval_scope(row)
     rec_pairs = REC_LINE_RE.findall(text)
     if rec_pairs:
         maxb = [float(a) for a, _ in rec_pairs]
@@ -330,6 +332,7 @@ def parse_train(text: str, meta: dict) -> list[dict]:
         row["loss_train_last"] = f"{losses[-1]:.6f}"
         row.setdefault("final_train_loss", f"{losses[-1]:.6f}")
 
+    _annotate_peft_eval_scope(row)
     return [row]
 
 
@@ -338,6 +341,7 @@ def parse_proxy_utility(text: str, meta: dict) -> list[dict]:
     summaries = _parse_summary_blocks(text, PROXY_SUMMARY_BLOCK_RE)
     if summaries:
         row.update(summaries[-1])
+    _annotate_peft_eval_scope(row)
     return [row]
 
 
@@ -397,6 +401,7 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "train_method",
         "peft_method",
         "peft_type",
+        "peft_eval_scope",
         "peft_target_modules",
         "peft_feedforward_modules",
         "peft_num_virtual_tokens",
@@ -591,6 +596,10 @@ def _row_value(row: dict, key: str, fallback_key: str | None = None, default: st
     return str(value)
 
 
+def _is_missing_value(value: str) -> bool:
+    return str(value or "").strip().lower() in {"", "n/a", "none", "null"}
+
+
 def _model_default_lora_target_modules(model_path: str) -> str:
     if model_path in {"gpt2", "openai-community/gpt2-large"}:
         return "c_attn"
@@ -609,12 +618,56 @@ def _model_default_lora_target_modules(model_path: str) -> str:
 
 def _peft_method(row: dict, fallback_key: str | None = None) -> str:
     method = _row_value(row, "peft_method", fallback_key)
-    if not method:
+    if _is_missing_value(method):
         method = _row_value(row, "peft_method_guess")
-    if method:
-        return method
+    if _is_missing_value(method):
+        method = _row_value(row, "peft_adapter_peft_type", "train_peft_adapter_peft_type")
+    if not _is_missing_value(method):
+        normalized = str(method).strip().lower().replace("-", "_")
+        normalized = normalized.replace("pefttype.", "")
+        aliases = {
+            "prefix_tuning": "prefix",
+        }
+        return aliases.get(normalized, normalized)
     train_method = _row_value(row, "train_method", "train_method_guess")
     return "lora" if train_method == "lora" else ""
+
+
+def _peft_eval_scope_for_method(method: str) -> str:
+    normalized = str(method or "").strip().lower().replace("-", "_")
+    normalized = normalized.replace("pefttype.", "")
+    aliases = {
+        "prefix_tuning": "prefix",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized in {"lora", "ia3"}:
+        return "dager_eval"
+    if normalized == "prefix":
+        return "training_only"
+    if normalized == "adapter":
+        return "v2_planned"
+    return "n/a" if not normalized else "unknown"
+
+
+def _peft_eval_scope(row: dict, fallback_key: str | None = None) -> str:
+    value = _row_value(row, "peft_eval_scope", fallback_key)
+    if not _is_missing_value(value):
+        return value
+    train_method = _row_value(row, "train_method", "train_train_method")
+    if _is_missing_value(train_method):
+        train_method = _row_value(row, "train_method_guess", default="full")
+    if train_method not in {"lora", "peft"}:
+        return "n/a"
+    method = _peft_method(row, "train_peft_method")
+    if _is_missing_value(method):
+        method = _row_value(row, "peft_adapter_peft_type", "train_peft_adapter_peft_type")
+    return _peft_eval_scope_for_method(method)
+
+
+def _annotate_peft_eval_scope(row: dict) -> dict:
+    if _is_missing_value(_row_value(row, "peft_eval_scope")):
+        row["peft_eval_scope"] = _peft_eval_scope(row)
+    return row
 
 
 def _rep_bottleneck_key(row: dict) -> tuple[str, str, str]:
@@ -708,6 +761,7 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
             "batch_size": batch_size,
             "train_method": train_method,
             "peft_method": peft_method,
+            "peft_eval_scope": _peft_eval_scope(items[0]) if items else "n/a",
             "lora_r": lora_r,
             "lora_target_modules": lora_target_modules,
             "rep_bottleneck_type": rep_bottleneck_type,
@@ -793,6 +847,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             "batch_size": batch_size,
             "train_method": train_method,
             "peft_method": peft_method,
+            "peft_eval_scope": _peft_eval_scope(items[0]) if items else "n/a",
             "lora_r": lora_r,
             "lora_target_modules": lora_target_modules,
             "rep_bottleneck_type": rep_bottleneck_type,
@@ -894,6 +949,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         param_value = utility.get("defense_param_value", "")
 
         row = dict(utility)
+        row["peft_eval_scope"] = _peft_eval_scope(utility)
         attack = attack_index.get(
             (
                 dataset,
@@ -914,6 +970,9 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row["agg_rouge1_fm"] = attack.get("agg_rouge1_fm", "")
             row["agg_rouge2_fm"] = attack.get("agg_rouge2_fm", "")
             row["agg_r1fm_r2fm"] = attack.get("agg_r1fm_r2fm", "")
+        elif row["peft_eval_scope"] in {"training_only", "v2_planned"}:
+            row["privacy_eval_status"] = row["peft_eval_scope"]
+            row["privacy_eval_note"] = "not_in_v1_dager_partial_eval_scope"
 
         acc = _to_float(row.get("eval_accuracy"))
         none_acc = _to_float(

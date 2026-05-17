@@ -75,11 +75,11 @@ case "$PEFT_METHOD" in
   lora|ia3)
     ;;
   prefix)
-    echo "[dager] --peft_method prefix is trainable but not supported by DAGER span eval in v1." >&2
+    echo "[dager] --peft_method prefix is training-only in v1 and excluded from DAGER/partial-gradient eval matrices." >&2
     exit 2
     ;;
   adapter)
-    echo "[dager] --peft_method adapter is planned for v2 but not enabled in v1." >&2
+    echo "[dager] --peft_method adapter is v2 planned and not part of v1 PEFT DAGER/partial eval." >&2
     exit 2
     ;;
   *)
