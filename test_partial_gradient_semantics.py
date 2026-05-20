@@ -18,6 +18,7 @@ from utils.partial_gradient import (
     nonprefix_candidate_cap,
     nonprefix_layer_indices,
     non_prefix_dager_block_ids,
+    partial_gradient_unsupported_reason,
     partial_gradient_active,
     partial_gradient_summary_fields,
     select_visible_matrix_candidates,
@@ -277,6 +278,41 @@ def test_nonprefix_support_is_gpt2_full_only():
         infer_partial_attack_variant(peft_args) == PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
         "PEFT last2 should be explicitly unsupported",
     )
+    assert_true(
+        partial_gradient_unsupported_reason(peft_args) == "nonprefix_layer_subset_requires_gpt2_full_decoder",
+        "PEFT last2 should explain that non-prefix is GPT-2 full-only",
+    )
+
+
+def test_nonprefix_support_rejects_llama_and_single_layer():
+    llama_args = _args("mid2")
+    llama_args.model_path = "meta-llama/Meta-Llama-3.1-8B"
+    last1_args = _args("last1")
+
+    assert_true(not supports_nonprefix_dager(llama_args), "Llama mid2 should stay unsupported in v1")
+    assert_true(
+        infer_partial_attack_variant(llama_args) == PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+        "Llama mid2 should be explicitly unsupported",
+    )
+    assert_true(
+        partial_gradient_unsupported_reason(llama_args) == "nonprefix_layer_subset_requires_gpt2_full_decoder",
+        "Llama mid2 should explain the GPT-2 full-only non-prefix path",
+    )
+    assert_true(
+        partial_gradient_unsupported_reason(last1_args) == "nonprefix_dager_requires_at_least_two_visible_layers",
+        "last1 should fail fast as a single-layer non-prefix exposure",
+    )
+
+
+def test_peft_adapter_only_variant_is_for_lora_and_ia3_v1():
+    for peft_method in ("lora", "ia3"):
+        args = _args(param_filter="lora_only")
+        args.train_method = "peft"
+        args.peft_method = peft_method
+        assert_true(
+            infer_partial_attack_variant(args) == PARTIAL_ATTACK_LORA_ADAPTER,
+            f"{peft_method} adapter-only exposure should use the PEFT adapter-visible variant",
+        )
 
 
 def test_nonprefix_attack_helpers_read_cap_and_layers():
@@ -310,6 +346,8 @@ def main():
         test_invalid_layer_subset_fails_fast,
         test_middle_layer_subset_is_supported_for_gpt2_nonprefix,
         test_nonprefix_support_is_gpt2_full_only,
+        test_nonprefix_support_rejects_llama_and_single_layer,
+        test_peft_adapter_only_variant_is_for_lora_and_ia3_v1,
         test_nonprefix_attack_helpers_read_cap_and_layers,
     ]
     for test in tests:

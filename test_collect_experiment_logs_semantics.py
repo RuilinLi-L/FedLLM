@@ -140,6 +140,107 @@ def test_prefix_scope_ignores_na_placeholders_when_metadata_is_available():
     assert_true(tradeoff[0]["peft_eval_scope"] == "training_only", "n/a scope placeholder should not hide prefix metadata")
 
 
+def test_adapter_scope_is_v2_planned_not_failed_privacy():
+    rows = [
+        {
+            "log_kind": "train",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "peft",
+            "peft_method": "adapter",
+            "peft_eval_scope": "v2_planned",
+            "lora_r": "n/a",
+            "lora_target_modules": "n/a",
+            "rep_bottleneck_type": "none",
+            "rep_keep_ratio": "n/a",
+            "rep_dropout_p": "n/a",
+            "defense": "none",
+            "defense_param_name": "n/a",
+            "defense_param_value": "n/a",
+            "result_status": "ok",
+            "eval_accuracy": "0.900000",
+        }
+    ]
+
+    tradeoff = build_privacy_utility_tradeoff(rows)
+    assert_true(tradeoff[0]["peft_eval_scope"] == "v2_planned", "adapter should keep v2 planned scope")
+    assert_true(tradeoff[0]["privacy_eval_status"] == "v2_planned", "adapter should not be a failed privacy run")
+    assert_true(
+        tradeoff[0]["privacy_eval_note"] == "not_in_v1_dager_partial_eval_scope",
+        "adapter should explain that it is outside the v1 eval matrix",
+    )
+
+
+def test_partial_attack_surfaces_do_not_mix_in_privacy_aggregation():
+    rows = [
+        {
+            "log_kind": "attack_dager",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "defense": "none",
+            "defense_param_value": "n/a",
+            "result_status": "ok",
+            "n_inputs_requested": "1",
+            "n_inputs_completed": "1",
+            "rec_token_mean": "0.8",
+            "gradient_layer_subset": "all",
+            "gradient_param_filter": "all",
+            "partial_attack_variant": "full_gradient_visible",
+        },
+        {
+            "log_kind": "attack_dager",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "defense": "none",
+            "defense_param_value": "n/a",
+            "result_status": "ok",
+            "n_inputs_requested": "1",
+            "n_inputs_completed": "1",
+            "rec_token_mean": "0.2",
+            "gradient_layer_subset": "all",
+            "gradient_param_filter": "qkv_only",
+            "partial_attack_variant": "dager_qkv_visible",
+        },
+    ]
+
+    anchors = build_attack_anchor_results(rows)
+    assert_true(len(anchors) == 2, f"full and qkv partial attacks should not aggregate together: {anchors}")
+    surfaces = sorted((row["attack_surface"], row["partial_attack_variant"]) for row in anchors)
+    assert_true(
+        surfaces == [("full_gradient", "full_gradient_visible"), ("partial_gradient", "dager_qkv_visible")],
+        f"unexpected attack surface grouping: {surfaces}",
+    )
+
+
+def test_unsupported_partial_attack_status_is_preserved():
+    rows = [
+        {
+            "log_kind": "attack_dager",
+            "dataset": "sst2",
+            "batch_size": "2",
+            "train_method": "full",
+            "defense": "none",
+            "defense_param_value": "n/a",
+            "result_status": "unsupported",
+            "n_inputs_requested": "1",
+            "n_inputs_completed": "0",
+            "gradient_layer_subset": "last1",
+            "gradient_param_filter": "all",
+            "partial_attack_variant": "unsupported_nonprefix_dager",
+            "unsupported_reason": "nonprefix_dager_requires_at_least_two_visible_layers",
+        }
+    ]
+
+    anchors = build_attack_anchor_results(rows)
+    assert_true(anchors[0]["result_status"] == "unsupported", "unsupported partial exposure should not become failed")
+    assert_true(
+        anchors[0]["partial_attack_variant"] == "unsupported_nonprefix_dager",
+        "unsupported partial variant should remain visible in the aggregate row",
+    )
+
+
 def test_adaptive_fallback_summary_stays_in_adaptive_group():
     text = """
 ===== VARIANT START defense=lrbprojonly param=lrbprojonly@k=0.5 dataset=sst2 batch=2 model=gpt2 start=now =====
@@ -175,6 +276,9 @@ def main():
         test_prefix_scope_is_inferred_without_explicit_scope_field,
         test_prefix_scope_is_inferred_from_adapter_metadata,
         test_prefix_scope_ignores_na_placeholders_when_metadata_is_available,
+        test_adapter_scope_is_v2_planned_not_failed_privacy,
+        test_partial_attack_surfaces_do_not_mix_in_privacy_aggregation,
+        test_unsupported_partial_attack_status_is_preserved,
         test_adaptive_fallback_summary_stays_in_adaptive_group,
     ]
     for test in tests:

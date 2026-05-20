@@ -547,6 +547,19 @@ def test_peft_eval_scope_helper_classifies_v1_policy():
     )
 
 
+def test_v1_privacy_matrix_is_lora_ia3_only():
+    in_scope = [method for method in ("lora", "ia3", "prefix", "adapter") if peft_eval_scope(method) == PEFT_EVAL_SCOPE_DAGER]
+    assert_true(in_scope == ["lora", "ia3"], f"v1 PEFT privacy matrix should include only LoRA/IA3: {in_scope}")
+    assert_true(
+        peft_eval_scope("prefix") == PEFT_EVAL_SCOPE_TRAINING_ONLY,
+        "Prefix should remain training/smoke only",
+    )
+    assert_true(
+        peft_eval_scope("adapter") == PEFT_EVAL_SCOPE_V2_PLANNED,
+        "Houlsby adapter should remain v2 planned",
+    )
+
+
 def test_peft_gradient_inventory_deduplicates_transformer_layers():
     names = [
         "base_model.model.bert.encoder.layer.0.attention.self.query.ia3_l.default",
@@ -642,6 +655,7 @@ def main():
         test_prefix_virtual_token_override_rejects_adapter_mismatch,
         test_adapter_is_not_exposed_as_cli_choice,
         test_peft_eval_scope_helper_classifies_v1_policy,
+        test_v1_privacy_matrix_is_lora_ia3_only,
         test_peft_gradient_inventory_deduplicates_transformer_layers,
         test_lora_training_allows_post_gradient_lrb,
         test_lora_ia3_training_allow_direct_and_dager_defenses,

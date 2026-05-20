@@ -488,6 +488,7 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "rep_keep_ratio",
         "rep_dropout_p",
         "rep_bottleneck_with_lrb",
+        "attack_surface",
         "adaptive_attack",
         "adaptive_attack_active",
         "adaptive_attack_profile",
@@ -513,6 +514,12 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "steps_completed",
         "n_inputs_requested",
         "n_inputs_completed",
+        "privacy_eval_status",
+        "privacy_eval_note",
+        "privacy_result_status",
+        "n_privacy_runs",
+        "n_privacy_valid_runs",
+        "failed_or_incomplete_privacy_runs",
         "last_rec_status",
         "rec_l1_mean",
         "rec_l1_maxb_mean",
@@ -806,6 +813,56 @@ def _normalized_lora_target_modules(
     return _model_default_lora_target_modules(model_path)
 
 
+def _gradient_layer_subset(row: dict) -> str:
+    value = _row_value(row, "gradient_layer_subset")
+    return "all" if _is_missing_value(value) else value
+
+
+def _gradient_param_filter(row: dict) -> str:
+    value = _row_value(row, "gradient_param_filter")
+    return "all" if _is_missing_value(value) else value
+
+
+def _partial_attack_variant(row: dict) -> str:
+    value = _row_value(row, "partial_attack_variant")
+    if not _is_missing_value(value):
+        return value
+    layer_subset = _gradient_layer_subset(row)
+    param_filter = _gradient_param_filter(row)
+    if param_filter == "lora_only":
+        return "peft_adapter_visible"
+    if param_filter == "qkv_only":
+        return "dager_qkv_visible"
+    if str(layer_subset).startswith("first"):
+        return "dager_prefix_visible"
+    if str(layer_subset).startswith(("last", "mid", "middle")):
+        return "dager_nonprefix_visible"
+    return "full_gradient_visible"
+
+
+def _partial_filter_active(row: dict) -> bool:
+    value = _row_value(row, "partial_filter_active")
+    if str(value).strip().lower() in {"true", "1", "yes"}:
+        return True
+    return _gradient_layer_subset(row) != "all" or _gradient_param_filter(row) != "all"
+
+
+def _attack_surface(row: dict) -> str:
+    train_method = _row_value(row, "train_method", "train_method_guess", default="full")
+    peft_scope = _peft_eval_scope(row)
+    variant = _partial_attack_variant(row)
+    param_filter = _gradient_param_filter(row)
+    if train_method in {"lora", "peft"}:
+        if peft_scope in {"training_only", "v2_planned"}:
+            return peft_scope
+        if variant == "peft_adapter_visible" or param_filter == "lora_only":
+            return "peft_adapter_partial"
+        return "peft_dager"
+    if _partial_filter_active(row) or variant != "full_gradient_visible":
+        return "partial_gradient"
+    return "full_gradient"
+
+
 def build_utility_results(rows: list[dict]) -> list[dict]:
     train_rows = [row for row in rows if row.get("log_kind") == "train"]
     grouped: dict[tuple[str, ...], list[dict]] = {}
@@ -904,6 +961,10 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             row.get("lora_r", row.get("lora_r_guess", "")),
             _normalized_lora_target_modules(row),
             *_rep_bottleneck_key(row),
+            _attack_surface(row),
+            _gradient_layer_subset(row),
+            _gradient_param_filter(row),
+            _partial_attack_variant(row),
             row.get("adaptive_attack", "none"),
             row.get("adaptive_attack_profile", "none"),
             row.get("defense", "none"),
@@ -924,6 +985,10 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             rep_bottleneck_type,
             rep_keep_ratio,
             rep_dropout_p,
+            attack_surface,
+            gradient_layer_subset,
+            gradient_param_filter,
+            partial_attack_variant,
             adaptive_attack,
             adaptive_attack_profile,
             defense,
@@ -943,6 +1008,10 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             "rep_bottleneck_type": rep_bottleneck_type,
             "rep_keep_ratio": rep_keep_ratio,
             "rep_dropout_p": rep_dropout_p,
+            "attack_surface": attack_surface,
+            "gradient_layer_subset": gradient_layer_subset,
+            "gradient_param_filter": gradient_param_filter,
+            "partial_attack_variant": partial_attack_variant,
             "adaptive_attack": adaptive_attack,
             "adaptive_attack_profile": adaptive_attack_profile,
             "defense": defense,
@@ -952,8 +1021,11 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             "n_privacy_valid_runs": str(len(valid_items)),
             "failed_or_incomplete_privacy_runs": str(len(incomplete)),
         }
+        item_statuses = {item.get("result_status", "ok") for item in items}
         if valid_items:
             row["result_status"] = "ok" if not incomplete else "mixed"
+        elif item_statuses == {"unsupported"}:
+            row["result_status"] = "unsupported"
         else:
             row["result_status"] = "failed"
         if incomplete:
@@ -1007,6 +1079,10 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("rep_bottleneck_type", "none"),
             row.get("rep_keep_ratio", "n/a"),
             row.get("rep_dropout_p", "n/a"),
+            row.get("attack_surface", _attack_surface(row)),
+            _gradient_layer_subset(row),
+            _gradient_param_filter(row),
+            _partial_attack_variant(row),
             row.get("adaptive_attack", "none"),
             row.get("adaptive_attack_profile", "none"),
             row.get("defense", ""),
@@ -1042,21 +1118,35 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         row = dict(utility)
         row["peft_eval_scope"] = _peft_eval_scope(utility)
         if attack is not None:
+            row["attack_surface"] = attack.get("attack_surface", _attack_surface(attack))
+            row["gradient_layer_subset"] = _gradient_layer_subset(attack)
+            row["gradient_param_filter"] = _gradient_param_filter(attack)
+            row["partial_attack_variant"] = _partial_attack_variant(attack)
             row["rec_token_mean"] = attack.get("rec_token_mean", "")
             row["agg_rouge1_fm"] = attack.get("agg_rouge1_fm", "")
             row["agg_rouge2_fm"] = attack.get("agg_rouge2_fm", "")
             row["agg_r1fm_r2fm"] = attack.get("agg_r1fm_r2fm", "")
             row["adaptive_attack"] = attack.get("adaptive_attack", row.get("adaptive_attack", "none"))
             row["adaptive_attack_profile"] = attack.get("adaptive_attack_profile", row.get("adaptive_attack_profile", "none"))
+            row["privacy_eval_status"] = attack.get("result_status", "")
             row["privacy_result_status"] = attack.get("result_status", "")
             row["n_privacy_runs"] = attack.get("n_privacy_runs", "")
             row["n_privacy_valid_runs"] = attack.get("n_privacy_valid_runs", "")
             row["failed_or_incomplete_privacy_runs"] = attack.get("failed_or_incomplete_privacy_runs", "")
         elif row["peft_eval_scope"] in {"training_only", "v2_planned"}:
+            row["attack_surface"] = _attack_surface(row)
+            row["gradient_layer_subset"] = _gradient_layer_subset(row)
+            row["gradient_param_filter"] = _gradient_param_filter(row)
+            row["partial_attack_variant"] = _partial_attack_variant(row)
             row["privacy_eval_status"] = row["peft_eval_scope"]
             row["privacy_eval_note"] = "not_in_v1_dager_partial_eval_scope"
             row["adaptive_attack"] = row.get("adaptive_attack", "none")
             row["adaptive_attack_profile"] = row.get("adaptive_attack_profile", "none")
+        else:
+            row["attack_surface"] = _attack_surface(row)
+            row["gradient_layer_subset"] = _gradient_layer_subset(row)
+            row["gradient_param_filter"] = _gradient_param_filter(row)
+            row["partial_attack_variant"] = _partial_attack_variant(row)
 
         acc = _to_float(row.get("eval_accuracy"))
         none_acc = _to_float(
@@ -1106,7 +1196,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         matching_attacks = [
             (key, attack)
             for key, attack in attack_index.items()
-            if key[:9] == base_key and key[11] == defense and key[12] == param_value
+            if key[:9] == base_key and key[15] == defense and key[16] == param_value
         ]
         if matching_attacks:
             for key, attack in sorted(matching_attacks):
@@ -1114,13 +1204,37 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
                 out.append(make_tradeoff_row(utility, attack))
             continue
 
-        attack = attack_index.get((*base_key, "none", "none", defense, param_value))
+        attack = attack_index.get((
+            *base_key,
+            "full_gradient",
+            "all",
+            "all",
+            "full_gradient_visible",
+            "none",
+            "none",
+            defense,
+            param_value,
+        ))
         if attack is None:
-            attack = attack_index.get((*base_key, "", "", defense, param_value))
+            attack = attack_index.get((
+                *base_key,
+                "full_gradient",
+                "all",
+                "all",
+                "full_gradient_visible",
+                "",
+                "",
+                defense,
+                param_value,
+            ))
         if attack is not None:
             used_attack_keys.add(
                 (
                     *base_key,
+                    attack.get("attack_surface", _attack_surface(attack)),
+                    _gradient_layer_subset(attack),
+                    _gradient_param_filter(attack),
+                    _partial_attack_variant(attack),
                     attack.get("adaptive_attack", "none"),
                     attack.get("adaptive_attack_profile", "none"),
                     defense,
@@ -1148,7 +1262,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
     for key, attack in sorted(attack_index.items()):
         if key in used_attack_keys:
             continue
-        utility = utility_index.get((*key[:9], key[11], key[12]))
+        utility = utility_index.get((*key[:9], key[15], key[16]))
         if utility is not None:
             out.append(make_tradeoff_row(utility, attack))
 
