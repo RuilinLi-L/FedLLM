@@ -17,9 +17,17 @@ class TrainingDefenseModelWrapper:
         self.base_model = self._unwrap_model(model)
         self.args = args
         self._trainable_params = tuple(trainable_params)
+        name_by_param_id = {id(param): name for name, param in self.model.named_parameters()}
+        self._trainable_param_names = tuple(
+            name_by_param_id.get(id(param), f"layer_{idx}")
+            for idx, param in enumerate(self._trainable_params)
+        )
 
     def trainable_parameters(self):
         return self._trainable_params
+
+    def trainable_parameter_names(self):
+        return list(self._trainable_param_names)
 
     def _unwrap_model(self, model):
         if hasattr(model, "base_model") and hasattr(model.base_model, "model"):

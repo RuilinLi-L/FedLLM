@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -34,9 +35,11 @@ from utils.lrb_defense import (
     _adaptive_avg_pool2d_manual,
     _adaptive_bin_bounds,
     _estimate_layer_sensitivities,
+    _layer_projection_seed,
     _project_low_resolution,
+    apply_lrb_defense,
 )
-from utils.lrb_presets import apply_lrb_preset
+from utils.lrb_presets import NO_CLIP, apply_lrb_preset
 from utils.training_defense_wrapper import TrainingDefenseModelWrapper
 
 
@@ -516,6 +519,34 @@ def test_lrb_matrix_projection_path_matches_cpu_reference():
     assert_true(torch.isfinite(projected).all(), "signed-pool projection should stay finite")
 
 
+def test_lrb_signed_matrix_projection_preserves_legacy_rng_order_with_cache():
+    matrix = torch.arange(1, 31, dtype=torch.float32).view(5, 6)
+    seed = 31
+    keep_ratio = 0.6
+
+    first = _project_low_resolution(matrix, keep_ratio, seed=seed, mode="signed_pool")
+    second = _project_low_resolution(matrix, keep_ratio, seed=seed, mode="signed_pool")
+
+    gen = torch.Generator(device=matrix.device)
+    gen.manual_seed(seed)
+    row_signs = torch.empty((matrix.shape[0], 1), device=matrix.device, dtype=torch.float32)
+    row_signs.bernoulli_(0.5, generator=gen)
+    row_signs = row_signs.mul_(2.0).sub_(1.0)
+    col_signs = torch.empty((1, matrix.shape[1]), device=matrix.device, dtype=torch.float32)
+    col_signs.bernoulli_(0.5, generator=gen)
+    col_signs = col_signs.mul_(2.0).sub_(1.0)
+
+    km = max(1, int(round(matrix.shape[0] * keep_ratio)))
+    kn = max(1, int(round(matrix.shape[1] * keep_ratio)))
+    signed = matrix * row_signs * col_signs
+    pooled = _adaptive_avg_pool2d_manual(signed, (km, kn)).reshape(1, 1, km, kn)
+    expected = F.interpolate(pooled, size=matrix.shape, mode="bilinear", align_corners=False).view_as(matrix)
+    expected = expected * row_signs * col_signs
+
+    assert_true(torch.allclose(first, expected), "cached signed-pool projection should preserve legacy RNG order")
+    assert_true(torch.allclose(second, expected), "repeated signed-pool projection should reuse the same basis")
+
+
 def test_lrb_adaptive_bin_bounds_use_exact_integer_math():
     input_size = 50257
     output_size = 45231
@@ -551,6 +582,72 @@ def test_lrb_hybrid_sensitivity_uses_empirical_calibration():
     assert_true(scores[0] > scores[1], "empirical calibration should score the more concentrated layer as more sensitive")
 
 
+def test_lrb_projection_only_fast_path_matches_manual_projection_and_metadata():
+    grads = (
+        torch.tensor(
+            [
+                [4.0, 0.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            dtype=torch.float32,
+        ),
+        torch.tensor([1.0, -2.0, 3.0, -4.0, 5.0], dtype=torch.float32),
+    )
+    layer_names = [
+        "transformer.h.0.attn.c_attn.weight",
+        "transformer.h.8.mlp.c_fc.bias",
+    ]
+    args = SimpleNamespace(
+        defense="lrbprojonly",
+        defense_lrb_preset="custom",
+        defense_lrb_keep_ratio_sensitive=0.5,
+        defense_lrb_sensitive_n_layers=2,
+        defense_lrb_calibration_samples=16,
+        rng_seed=23,
+    )
+    apply_lrb_preset(args)
+
+    defended = apply_lrb_defense(grads, args, layer_names=layer_names)
+    sensitivities = _estimate_layer_sensitivities(
+        grads,
+        layer_names=layer_names,
+        sensitive_n_layers=args.defense_lrb_sensitive_n_layers,
+        empirical_weight=args.defense_lrb_empirical_weight,
+        calibration_keep_ratio=0.5 * (args.defense_lrb_keep_ratio_sensitive + args.defense_lrb_keep_ratio_other),
+        calibration_samples=args.defense_lrb_calibration_samples,
+        base_seed=args.rng_seed,
+        projection_mode=args.defense_lrb_projection,
+    )
+
+    assert_true(args.defense_lrb_clip_scale_sensitive == NO_CLIP, "projection-only preset should keep no-clip sentinel")
+    assert_true(args.defense_lrb_clip_scale_other == NO_CLIP, "projection-only preset should keep no-clip sentinel")
+    assert_true(args.defense_lrb_noise_sensitive == 0.0, "projection-only preset should keep zero noise")
+    assert_true(args.defense_lrb_noise_other == 0.0, "projection-only preset should keep zero noise")
+
+    for idx, grad in enumerate(grads):
+        sensitivity = sensitivities[idx]
+        keep_ratio = (
+            args.defense_lrb_keep_ratio_other * (1.0 - sensitivity)
+            + args.defense_lrb_keep_ratio_sensitive * sensitivity
+        )
+        seed = _layer_projection_seed(args.rng_seed, idx)
+        expected = _project_low_resolution(
+            grad,
+            keep_ratio,
+            seed=seed,
+            mode=args.defense_lrb_projection,
+        )
+        assert_true(torch.allclose(defended[idx], expected), "projection-only fast path should match manual projection")
+
+        info = args.lrb_defense_layer_info[idx]
+        assert_true(info["active"] is True, "LRB metadata should mark active layers")
+        assert_true(abs(info["keep_ratio"] - keep_ratio) <= 1e-12, "LRB metadata should preserve keep ratio")
+        assert_true(info["projection_seed"] == seed, "LRB metadata should preserve projection seed")
+        assert_true(info["projection_mode"] == "signed_pool", "LRB metadata should preserve projection mode")
+        assert_true(info["shape"] == tuple(int(dim) for dim in grad.shape), "LRB metadata should preserve shape")
+
+
 def test_lrbprojonly_alias_normalizes_to_projection_only_preset():
     args = SimpleNamespace(
         defense="lrbprojonly",
@@ -583,8 +680,10 @@ def main():
         test_mixup_falls_back_for_small_batches_and_non_seq_class,
         test_lrb_signed_projection_is_reproducible_and_not_plain_pooling,
         test_lrb_matrix_projection_path_matches_cpu_reference,
+        test_lrb_signed_matrix_projection_preserves_legacy_rng_order_with_cache,
         test_lrb_adaptive_bin_bounds_use_exact_integer_math,
         test_lrb_hybrid_sensitivity_uses_empirical_calibration,
+        test_lrb_projection_only_fast_path_matches_manual_projection_and_metadata,
         test_lrbprojonly_alias_normalizes_to_projection_only_preset,
     ]
     for test in tests:

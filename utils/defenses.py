@@ -67,6 +67,19 @@ def _defense_call_seed(args) -> int:
     return base_seed + UPDATE_SEED_STRIDE * int(step)
 
 
+def _trainable_parameter_names(model_wrapper):
+    if model_wrapper is None:
+        return None
+    names_fn = getattr(model_wrapper, "trainable_parameter_names", None)
+    if callable(names_fn):
+        return list(names_fn())
+    names = []
+    for name, p in model_wrapper.model.named_parameters():
+        if p.requires_grad:
+            names.append(name)
+    return names
+
+
 def _apply_random_mask(grads, pct_mask: float, seed: int = 0):
     """Element-wise: keep with probability (1 - pct_mask), same semantics as train.py."""
     out = []
@@ -348,18 +361,10 @@ def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
     elif defense == "dager":
         if model_wrapper is None or batch is None or labels is None:
             raise ValueError("dager defense requires model_wrapper, batch, labels")
-        layer_names = []
-        for name, p in model_wrapper.model.named_parameters():
-            if p.requires_grad:
-                layer_names.append(name)
+        layer_names = _trainable_parameter_names(model_wrapper)
         g = apply_dager_defense(g, args, model_wrapper, batch, labels, layer_names)
     elif defense in {"lrb", "lrbprojonly"}:
-        layer_names = None
-        if model_wrapper is not None:
-            layer_names = []
-            for name, p in model_wrapper.model.named_parameters():
-                if p.requires_grad:
-                    layer_names.append(name)
+        layer_names = _trainable_parameter_names(model_wrapper)
         g = apply_lrb_defense(g, args, layer_names=layer_names)
     else:
         raise ValueError(f"Unknown defense: {defense}")

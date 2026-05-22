@@ -13,12 +13,39 @@ layer-wise clipping/compression/noise template, but upgrades two pieces:
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 import math
 import re
 from typing import List, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
+
+
+_CACHE_LIMIT = 512
+_NO_CLIP_SENTINEL = 1_000_000.0
+_BIN_BOUNDS_CACHE: OrderedDict[tuple, tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
+_SIGN_CACHE: OrderedDict[tuple, torch.Tensor] = OrderedDict()
+
+
+def _cache_get(cache: OrderedDict, key: tuple):
+    value = cache.get(key)
+    if value is None:
+        return None
+    cache.move_to_end(key)
+    return value
+
+
+def _cache_put(cache: OrderedDict, key: tuple, value):
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > _CACHE_LIMIT:
+        cache.popitem(last=False)
+
+
+def _device_cache_key(device: torch.device) -> tuple[str, int | None]:
+    normalized = torch.device(device)
+    return normalized.type, normalized.index
 
 
 def _make_generator(seed: int, device: torch.device) -> torch.Generator:
@@ -33,12 +60,18 @@ def _adaptive_bin_bounds(input_size: int, output_size: int, *, device: torch.dev
     if output_size <= 0:
         raise ValueError("output_size must be positive")
 
+    cache_key = (_device_cache_key(device), int(input_size), int(output_size))
+    cached = _cache_get(_BIN_BOUNDS_CACHE, cache_key)
+    if cached is not None:
+        return cached
+
     positions = torch.arange(output_size, device=device, dtype=torch.long)
     starts = (positions * input_size) // output_size
     ends = ((positions + 1) * input_size + output_size - 1) // output_size
     starts = starts.clamp(min=0, max=input_size - 1)
     ends = torch.maximum(ends, starts + 1)
     ends = ends.clamp(max=input_size)
+    _cache_put(_BIN_BOUNDS_CACHE, cache_key, (starts, ends))
     return starts, ends
 
 
@@ -194,6 +227,21 @@ def _rademacher(shape, *, device: torch.device, generator: torch.Generator) -> t
     return out.mul_(2.0).sub_(1.0)
 
 
+def _cached_rademacher(shape, *, device: torch.device, seed: int, prior_shapes=()) -> torch.Tensor:
+    normalized_shape = tuple(int(dim) for dim in shape)
+    normalized_prior = tuple(tuple(int(dim) for dim in prior_shape) for prior_shape in prior_shapes)
+    cache_key = (_device_cache_key(device), normalized_shape, int(seed), normalized_prior)
+    cached = _cache_get(_SIGN_CACHE, cache_key)
+    if cached is not None:
+        return cached
+    gen = _make_generator(seed, device)
+    for prior_shape in normalized_prior:
+        _rademacher(prior_shape, device=device, generator=gen)
+    signs = _rademacher(normalized_shape, device=device, generator=gen)
+    _cache_put(_SIGN_CACHE, cache_key, signs)
+    return signs
+
+
 def _pool_interpolate_flat(flat: torch.Tensor, keep_ratio: float) -> torch.Tensor:
     n = flat.shape[0]
     k = max(1, int(round(n * keep_ratio)))
@@ -231,8 +279,7 @@ def _project_low_resolution(
         if mode == "pool":
             projected = _pool_interpolate_flat(x.reshape(-1), keep_ratio)
         else:
-            gen = _make_generator(seed, tensor.device)
-            signs = _rademacher(x.shape, device=tensor.device, generator=gen)
+            signs = _cached_rademacher(x.shape, device=tensor.device, seed=seed)
             projected = _pool_interpolate_flat(x * signs, keep_ratio) * signs
         return projected.view_as(x).to(dtype=tensor.dtype)
 
@@ -240,9 +287,10 @@ def _project_low_resolution(
         if mode == "pool":
             projected = _pool_interpolate_matrix(x, keep_ratio)
         else:
-            gen = _make_generator(seed, tensor.device)
-            row_signs = _rademacher((x.shape[0], 1), device=tensor.device, generator=gen)
-            col_signs = _rademacher((1, x.shape[1]), device=tensor.device, generator=gen)
+            row_shape = (x.shape[0], 1)
+            col_shape = (1, x.shape[1])
+            row_signs = _cached_rademacher(row_shape, device=tensor.device, seed=seed)
+            col_signs = _cached_rademacher(col_shape, device=tensor.device, seed=seed, prior_shapes=(row_shape,))
             projected = _pool_interpolate_matrix(x * row_signs * col_signs, keep_ratio)
             projected = projected * row_signs * col_signs
         return projected.view_as(x).to(dtype=tensor.dtype)
@@ -251,8 +299,7 @@ def _project_low_resolution(
     if mode == "pool":
         projected = _pool_interpolate_flat(flat, keep_ratio)
     else:
-        gen = _make_generator(seed, tensor.device)
-        signs = _rademacher(flat.shape, device=tensor.device, generator=gen)
+        signs = _cached_rademacher(flat.shape, device=tensor.device, seed=seed)
         projected = _pool_interpolate_flat(flat * signs, keep_ratio) * signs
     return projected.view_as(x).to(dtype=tensor.dtype)
 
@@ -416,7 +463,9 @@ def apply_lrb_defense(
     projection_mode = str(getattr(args, "defense_lrb_projection", "signed_pool"))
     base_seed = int(getattr(args, "rng_seed", 0))
 
-    median_norm = _median_layer_norm(grads)
+    clipping_disabled = sensitive_clip >= _NO_CLIP_SENTINEL and other_clip >= _NO_CLIP_SENTINEL
+    noise_disabled = sensitive_noise <= 0.0 and other_noise <= 0.0
+    median_norm = None if clipping_disabled and noise_disabled else _median_layer_norm(grads)
     calibration_keep_ratio = 0.5 * (sensitive_keep + other_keep)
     sensitivities = _estimate_layer_sensitivities(
         grads,
@@ -449,23 +498,29 @@ def apply_lrb_defense(
         noise_scale = _mix_by_sensitivity(other_noise, sensitive_noise, sensitivity)
         layer_seed = _layer_projection_seed(base_seed, idx)
 
-        max_norm = median_norm * clip_scale
-        clipped = _clip_tensor(grad, max_norm)
+        max_norm = None if median_norm is None else median_norm * clip_scale
+        clipped = grad if clipping_disabled else _clip_tensor(grad, float(max_norm))
         projected = _project_low_resolution(
             clipped,
             keep_ratio,
             seed=layer_seed,
             mode=projection_mode,
         )
-        noise = _orthogonal_residual_noise(
-            clipped,
-            keep_ratio=keep_ratio,
-            noise_scale=noise_scale,
-            seed=layer_seed,
-            reference_norm=float(clipped.float().norm().item()) or max_norm,
-            projection_mode=projection_mode,
-        )
-        out.append(projected + noise)
+        if noise_disabled or noise_scale <= 0.0:
+            defended = projected
+        else:
+            reference_norm = float(clipped.float().norm().item())
+            if reference_norm <= 0.0 and max_norm is not None:
+                reference_norm = float(max_norm)
+            defended = projected + _orthogonal_residual_noise(
+                clipped,
+                keep_ratio=keep_ratio,
+                noise_scale=noise_scale,
+                seed=layer_seed,
+                reference_norm=reference_norm,
+                projection_mode=projection_mode,
+            )
+        out.append(defended)
         layer_info.append(
             {
                 "idx": idx,
