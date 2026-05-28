@@ -27,7 +27,7 @@ from utils.partial_gradient import (
     partial_gradient_summary_fields,
 )
 from utils.representation_bottleneck import rep_bottleneck_summary_fields
-from utils.peft_utils import peft_eval_scope
+from utils.peft_utils import peft_active, peft_eval_scope
 from args_factory import get_args
 import time
 
@@ -736,6 +736,9 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
         reference += [remove_padding(tokenizer, orig_batch['input_ids'][i, :tokenizer.model_max_length], left=(args.pad=='left'))]
     if len(prediction) > len(reference):
         prediction = prediction[:len(reference)]
+
+    if model_wrapper.is_decoder() and peft_active(args) and len(prediction) == 0:
+        return ['' for _ in reference], reference
 
     if model_wrapper.is_decoder():
         new_prediction = []
