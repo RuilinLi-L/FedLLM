@@ -6,6 +6,20 @@ from utils.defenses import uses_noisy_gradient_decoding
 import itertools
 from tqdm import tqdm
 import numpy as np
+
+
+def _decoder_candidate_chunk_size(args, n_ends):
+    parallel = max(1, int(getattr(args, "parallel", 1000)))
+    n_ends = int(n_ends)
+    if n_ends <= 0:
+        return parallel
+
+    if uses_noisy_gradient_decoding(args):
+        return parallel
+
+    return max((parallel // n_ends), 1) * n_ends
+
+
 def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
     from utils.adaptive_attack import adaptive_check_if_in_span
 
@@ -53,6 +67,8 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
             ends = ends[ends != model_wrapper.pad_token]
         else:
             ends = torch.Tensor(res_ids[i])
+        if ends.numel() == 0:
+            break
         
         lst = itertools.product(range(batch.shape[0]), range(len(ends)))
         it_lst = iter(lst)
@@ -67,7 +83,7 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
         while True:
             els_b = []
             els_ends = []
-            for _ in range(max((args.parallel//ends.shape[0]), 1)*ends.shape[0]):
+            for _ in range(_decoder_candidate_chunk_size(args, ends.shape[0])):
                 el = next(it_lst, None)
                 if el is None:
                     break
@@ -79,9 +95,12 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
                 break
             elif els_b.shape[0] == 0:
                 idxs = np.array(list(itertools.product(range(batch.shape[0]), range(len(ends)))))
-                new_batch = torch.cat((torch.tensor(batch[idxs[:, 0]]).long(),\
-                                       torch.tensor(ends[idxs[:, 1]]).long().unsqueeze(1)), dim=-1).to(args.device)
-                is_new_batch_incorrect = is_batch_incorrect[idxs[:, 0]].to(args.device)
+                idxs = torch.as_tensor(idxs, dtype=torch.long)
+                new_batch = torch.cat(
+                    (batch[idxs[:, 0]].long(), ends[idxs[:, 1]].long().unsqueeze(1)),
+                    dim=-1,
+                )
+                is_new_batch_incorrect = is_batch_incorrect[idxs[:, 0]]
                 sizesq2 = torch.cat(ds)
                 sizesq2, correct_sentences = filter_outliers(sizesq2, stage='sequence', std_thrs=args.l2_std_thrs, maxB=args.batch_size)
                 is_complete = True
@@ -94,6 +113,7 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
                     sizesq2, correct_sentences = filter_decoder_step(args, model_wrapper, R_Qs, new_batch, i)
                 else:
                     ds.append(filter_decoder_step(args, model_wrapper, R_Qs, new_batch, i))
+                    progress_bar.update(new_batch.shape[0])
                     continue    
             
             
@@ -110,6 +130,8 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
             else:
                 next_scores.append(sizesq2.mean(dim=1)[correct_sentences].to('cpu'))
             is_next_batch_incorrect.append(is_new_batch_incorrect[correct_sentences].to('cpu'))
+            if not uses_noisy_gradient_decoding(args):
+                progress_bar.update(new_batch.shape[0])
             
             curr_sentence += len(els_b)//ends.shape[0]
                 
@@ -149,7 +171,6 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
                         top_B_incorrect_sentences_len = top_B_incorrect_sentences_len[:predicted_idx] + sentences_best_batch[b_idx:b_idx+1] + top_B_incorrect_sentences_len[predicted_idx:rep_idx] +top_B_incorrect_sentences_len[rep_idx+1:]
                         top_B_incorrect_scores_len = top_B_incorrect_scores_len[:predicted_idx] + scores_best_batch[b_idx:b_idx+1] + top_B_incorrect_scores_len[predicted_idx:rep_idx] + top_B_incorrect_scores_len[rep_idx+1:]
                         break
-            progress_bar.update(new_batch.shape[0])
         
         batch = torch.cat(next_batch)
         if len(batch) == 0:
