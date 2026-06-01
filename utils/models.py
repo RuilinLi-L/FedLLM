@@ -194,7 +194,24 @@ class ModelWrapper():
         tokenizer_kwargs = {"use_fast": True, "cache_dir": args.cache_dir}
         if access_token:
             tokenizer_kwargs["token"] = access_token
-        self.tokenizer = AutoTokenizer.from_pretrained(args.model_path, **tokenizer_kwargs)
+        tokenizer_sources = []
+        if args.finetuned_path is not None:
+            tokenizer_sources.append(args.finetuned_path)
+        if args.model_path not in tokenizer_sources:
+            tokenizer_sources.append(args.model_path)
+
+        last_tokenizer_error = None
+        for tokenizer_source in tokenizer_sources:
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, **tokenizer_kwargs)
+                break
+            except OSError as exc:
+                last_tokenizer_error = exc
+        else:
+            attempted = ", ".join(repr(source) for source in tokenizer_sources)
+            raise OSError(
+                f"Can't load tokenizer. Tried tokenizer sources: {attempted}."
+            ) from last_tokenizer_error
         self.tokenizer.model_max_length = 512
         
         if args.pad == 'left':
