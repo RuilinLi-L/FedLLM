@@ -128,6 +128,12 @@ run_variant() {
     lrb)
       extra_flag=( --defense_lrb_keep_ratio_sensitive "$param" )
       ;;
+    lrbprojonly)
+      extra_flag=( --defense_lrb_keep_ratio_sensitive "$param" )
+      ;;
+    signed_bottleneck)
+      extra_flag=( --defense_lrb_preset signed_bottleneck --defense_lrb_keep_ratio_sensitive "$param" )
+      ;;
     *)
       echo "[proxy-baselines] unsupported defense ${defense}" >&2
       return 0

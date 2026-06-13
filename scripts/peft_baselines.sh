@@ -32,7 +32,7 @@ ADAPTIVE_ATTACK_CHECK=0
 EXTRA=()
 
 ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup dager lrb lrbprojonly )
-SUPPORTED_PEFT_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb lrbprojonly )
+SUPPORTED_PEFT_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb lrbprojonly signed_bottleneck )
 KNOWN_LRB_PRESETS=(
   identity_lrb
   clip_only
@@ -208,6 +208,9 @@ dager_param_name() {
     lrbprojonly)
       printf 'defense_lrb_preset'
       ;;
+    signed_bottleneck)
+      printf 'defense_lrb_preset'
+      ;;
     *)
       printf 'n/a'
       ;;
@@ -237,6 +240,9 @@ dager_set_param_values() {
       ;;
     lrb|lrbprojonly)
       param_vals=( 0.05 0.1 0.2 0.35 0.5 )
+      ;;
+    signed_bottleneck)
+      param_vals=( 0.9 0.95 0.99 )
       ;;
     *)
       echo "[dager] Unknown defense for sweep: ${defense}" >&2
@@ -349,7 +355,7 @@ rec_maxb_token_mean=n/a
 error_type=runner_error
 error_message=missing_result_summary_or_process_failed
 adaptive_attack=$(if printf '%s' "$log_base" | grep -q '_adaptive'; then printf 'defense_aware'; else printf 'none'; fi)
-adaptive_attack_profile=$(if printf '%s' "$log_base" | grep -q '_adaptive'; then case "$defense" in topk) printf 'topk_support' ;; compression) printf 'quantization_robust' ;; lrb|lrbprojonly) printf 'projection_span' ;; *) printf 'generic_ranked_span' ;; esac; else printf 'none'; fi)
+adaptive_attack_profile=$(if printf '%s' "$log_base" | grep -q '_adaptive'; then case "$defense" in topk) printf 'topk_support' ;; compression) printf 'quantization_robust' ;; lrb|lrbprojonly|signed_bottleneck) printf 'projection_span' ;; *) printf 'generic_ranked_span' ;; esac; else printf 'none'; fi)
 script_variant=${log_base}
 script_start_time=${t_start}
 script_end_time=${t_end}
@@ -409,7 +415,7 @@ rec_l2_mean=n/a
 rec_token_mean=n/a
 rec_maxb_token_mean=n/a
 error_type=unsupported_defense
-error_message=PEFT eval currently supports only defenses: none, noise, dpsgd, topk, compression, soteria, mixup, lrb, lrbprojonly
+error_message=PEFT eval currently supports only defenses: none, noise, dpsgd, topk, compression, soteria, mixup, lrb, lrbprojonly, signed_bottleneck
 ===== RESULT SUMMARY END =====
 EOF
 }
@@ -458,7 +464,7 @@ esac
 
 if [ -n "$BASELINE_DEFENSE" ]; then
   case "$BASELINE_DEFENSE" in
-    none|noise|dpsgd|topk|compression|soteria|mixup|dager|lrb|lrbprojonly)
+    none|noise|dpsgd|topk|compression|soteria|mixup|dager|lrb|lrbprojonly|signed_bottleneck)
       ;;
     *)
       echo "[dager] Unsupported --baseline_defense: ${BASELINE_DEFENSE}" >&2
@@ -655,8 +661,8 @@ for defense in "${selected_defenses[@]}"; do
     continue
   fi
 
-  if [ "$defense" = "lrbprojonly" ] && [ "${#LRB_VARIANTS[@]}" -gt 0 ]; then
-    echo "[dager] --lrb_variants applies to --baseline_defense lrb, not lrbprojonly." >&2
+  if { [ "$defense" = "lrbprojonly" ] || [ "$defense" = "signed_bottleneck" ]; } && [ "${#LRB_VARIANTS[@]}" -gt 0 ]; then
+    echo "[dager] --lrb_variants applies to --baseline_defense lrb, not ${defense}." >&2
     exit 2
   fi
 
@@ -699,6 +705,10 @@ for defense in "${selected_defenses[@]}"; do
         lrbprojonly)
           param="lrbprojonly@k=${val}"
           DEF_EXTRA=( --defense_lrb_keep_ratio_sensitive "$val" )
+          ;;
+        signed_bottleneck)
+          param="signed_bottleneck@k=${val}"
+          DEF_EXTRA=( --defense_lrb_preset signed_bottleneck --defense_lrb_keep_ratio_sensitive "$val" )
           ;;
       esac
     fi

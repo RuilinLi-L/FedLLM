@@ -349,6 +349,47 @@ def test_focused_lrb_sensitivity_adds_extra_point_without_sweep():
     result["tmpdir"].cleanup()
 
 
+def test_focus_signed_bottleneck_runs_uniform_projection_preset():
+    result = _run_utility_script(["--baseline_defense", "signed_bottleneck", "--baseline_param", "0.99"])
+    proc = result["proc"]
+    assert_true(proc.returncode == 0, proc.stderr or proc.stdout)
+
+    proxy_calls, train_calls, _ = _split_calls(result["calls"])
+    proxy_labels = {_call_label(call) for call in proxy_calls}
+    train_labels = {_call_label(call) for call in train_calls}
+    assert_true(
+        proxy_labels == {"proxy_none", "proxy_signed_bottleneck_0.99"},
+        f"unexpected signed_bottleneck proxy labels: {proxy_labels}",
+    )
+    assert_true(
+        train_labels == {
+            "train_none_seed101",
+            "train_none_seed202",
+            "train_none_seed303",
+            "train_signed_bottleneck_0.99_seed101",
+            "train_signed_bottleneck_0.99_seed202",
+            "train_signed_bottleneck_0.99_seed303",
+        },
+        f"unexpected signed_bottleneck train labels: {train_labels}",
+    )
+
+    signed_calls = [
+        call
+        for call in proxy_calls + train_calls
+        if _arg_value(call, "--defense_lrb_preset") == "signed_bottleneck"
+    ]
+    assert_true(len(signed_calls) == 4, "focused signed_bottleneck run should pass the preset to proxy and train calls")
+    assert_true(
+        all(_arg_value(call, "--defense") == "signed_bottleneck" for call in signed_calls),
+        "focused signed_bottleneck run should use the top-level defense alias",
+    )
+    assert_true(
+        all(_arg_value(call, "--defense_lrb_keep_ratio_sensitive") == "0.99" for call in signed_calls),
+        "focused signed_bottleneck run should pass the requested keep ratio",
+    )
+    result["tmpdir"].cleanup()
+
+
 def main():
     if WORKING_BASH is None:
         print("Skipping utility baseline semantics tests: no functional bash executable available.")
@@ -361,6 +402,7 @@ def main():
         test_focus_param_override_reaches_proxy_and_train,
         test_malformed_cli_combinations_exit_with_code_2,
         test_focused_lrb_sensitivity_adds_extra_point_without_sweep,
+        test_focus_signed_bottleneck_runs_uniform_projection_preset,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

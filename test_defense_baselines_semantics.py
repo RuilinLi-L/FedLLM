@@ -664,6 +664,38 @@ def test_lrbprojonly_alias_normalizes_to_projection_only_preset():
     assert_true(args.defense_lrb_projection == "signed_pool", "lrbprojonly should use signed-pool projection")
 
 
+def test_signed_bottleneck_alias_maps_to_uniform_projection_preset():
+    args = SimpleNamespace(
+        defense="lrb",
+        defense_lrb_preset="signed_bottleneck",
+        defense_lrb_keep_ratio_sensitive=0.99,
+    )
+    apply_lrb_preset(args)
+
+    assert_true(args.defense_lrb_preset == "signed_bottleneck", "signed_bottleneck should keep its own preset label")
+    assert_true(args.defense_lrb_keep_ratio_sensitive == 0.99, "signed_bottleneck should preserve the requested keep ratio")
+    assert_true(args.defense_lrb_keep_ratio_other == 0.99, "signed_bottleneck should be uniform across layers")
+    assert_true(args.defense_lrb_clip_scale_sensitive == NO_CLIP, "signed_bottleneck should disable clipping")
+    assert_true(args.defense_lrb_noise_sensitive == 0.0, "signed_bottleneck should disable noise")
+    assert_true(args.defense_lrb_projection == "signed_pool", "signed_bottleneck should use signed-pool projection")
+
+    top_level_args = SimpleNamespace(
+        defense="signed_bottleneck",
+        defense_lrb_preset="custom",
+        defense_lrb_keep_ratio_sensitive=0.995,
+    )
+    apply_lrb_preset(top_level_args)
+
+    assert_true(
+        top_level_args.defense_lrb_preset == "signed_bottleneck",
+        "top-level signed_bottleneck defense should normalize to the signed_bottleneck preset",
+    )
+    assert_true(
+        top_level_args.defense_lrb_keep_ratio_other == 0.995,
+        "top-level signed_bottleneck defense should use a uniform keep ratio",
+    )
+
+
 def main():
     tests = [
         test_noise_rng_behavior,
@@ -685,6 +717,7 @@ def main():
         test_lrb_hybrid_sensitivity_uses_empirical_calibration,
         test_lrb_projection_only_fast_path_matches_manual_projection_and_metadata,
         test_lrbprojonly_alias_normalizes_to_projection_only_preset,
+        test_signed_bottleneck_alias_maps_to_uniform_projection_preset,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

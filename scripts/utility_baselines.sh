@@ -94,7 +94,7 @@ utility_default_param() {
     lrb)
       printf '0.2'
       ;;
-    lrbprojonly)
+    lrbprojonly|signed_bottleneck)
       printf '0.5'
       ;;
     topk)
@@ -172,7 +172,7 @@ parse_script_args
 
 if [ -n "$BASELINE_DEFENSE" ]; then
   case "$BASELINE_DEFENSE" in
-    none|noise|dpsgd|topk|compression|soteria|mixup|lrb|lrbprojonly)
+    none|noise|dpsgd|topk|compression|soteria|mixup|lrb|lrbprojonly|signed_bottleneck)
       ;;
     *)
       echo "[utility] Unsupported --baseline_defense: ${BASELINE_DEFENSE}" >&2
@@ -234,6 +234,7 @@ run_variant() {
   local param="$2"
   local tag="$3"
   local extra_flag=()
+  local run_defense="$defense"
 
   case "$defense" in
     none)
@@ -257,6 +258,9 @@ run_variant() {
     lrb|lrbprojonly)
       extra_flag=( --defense_lrb_keep_ratio_sensitive "$param" )
       ;;
+    signed_bottleneck)
+      extra_flag=( --defense_lrb_preset signed_bottleneck --defense_lrb_keep_ratio_sensitive "$param" )
+      ;;
     *)
       echo "[utility] unsupported defense ${defense}" >&2
       return 0
@@ -274,7 +278,7 @@ run_variant() {
     --val_size 256 \
     --eval_batch_size 16 \
     --train_method full \
-    --defense "$defense" \
+    --defense "$run_defense" \
     "${extra_flag[@]}" \
     "${EXTRA[@]}"
 
@@ -291,7 +295,7 @@ run_variant() {
       --train_method full \
       --rng_seed "$seed" \
       --output_dir "${RUN_DIR}/models/${tag}_seed${seed}" \
-      --defense "$defense" \
+      --defense "$run_defense" \
       "${extra_flag[@]}" \
       "${EXTRA[@]}"
   done

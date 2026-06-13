@@ -12,8 +12,8 @@ from utils.lrb_defense import _layer_projection_seed
 
 
 ADAPTIVE_ATTACK_CHOICES = ("none", "auto", "defense_aware")
-LRB_PROJECTION_DEFENSES = {"lrb", "lrbprojonly"}
-RANKED_SPAN_DEFENSES = {"topk", "compression", "lrb", "lrbprojonly"}
+LRB_PROJECTION_DEFENSES = {"lrb", "lrbprojonly", "signed_bottleneck"}
+RANKED_SPAN_DEFENSES = {"topk", "compression", "lrb", "lrbprojonly", "signed_bottleneck"}
 
 
 def normalize_adaptive_attack_args(args):

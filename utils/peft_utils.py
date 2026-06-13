@@ -33,10 +33,10 @@ PEFT_EVAL_SCOPE_V2_PLANNED = "v2_planned"
 PEFT_EVAL_SCOPE_NA = "n/a"
 PEFT_EVAL_SCOPE_UNKNOWN = "unknown"
 SUPPORTED_PEFT_DEFENSES = frozenset(
-    {"none", "noise", "dpsgd", "topk", "compression", "soteria", "mixup", "lrb", "lrbprojonly"}
+    {"none", "noise", "dpsgd", "topk", "compression", "soteria", "mixup", "lrb", "lrbprojonly", "signed_bottleneck"}
 )
 SUPPORTED_PEFT_TRAINING_POST_GRADIENT_DEFENSES = frozenset(
-    {"none", "noise", "topk", "compression", "lrb", "lrbprojonly"}
+    {"none", "noise", "topk", "compression", "lrb", "lrbprojonly", "signed_bottleneck"}
 )
 SUPPORTED_PEFT_TRAINING_DIRECT_DEFENSES = frozenset({"dpsgd", "soteria", "mixup"})
 SUPPORTED_PEFT_TRAINING_DAGER_DEFENSES = frozenset({"dager"})

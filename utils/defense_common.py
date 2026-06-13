@@ -21,6 +21,7 @@ DEFENSE_CHOICES = [
     "dager",
     "lrb",
     "lrbprojonly",
+    "signed_bottleneck",
 ]
 
 
@@ -304,6 +305,10 @@ def defense_param_spec(args) -> tuple[str, object]:
             preset_value if preset_value is not None else getattr(args, "defense_lrb_keep_ratio_sensitive", None),
         ),
         "lrbprojonly": (
+            "defense_lrb_preset" if preset_value is not None else "defense_lrb_keep_ratio_sensitive",
+            preset_value if preset_value is not None else getattr(args, "defense_lrb_keep_ratio_sensitive", None),
+        ),
+        "signed_bottleneck": (
             "defense_lrb_preset" if preset_value is not None else "defense_lrb_keep_ratio_sensitive",
             preset_value if preset_value is not None else getattr(args, "defense_lrb_keep_ratio_sensitive", None),
         ),

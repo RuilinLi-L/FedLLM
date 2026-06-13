@@ -132,7 +132,7 @@ def get_args(argv=None):
         '--defense',
         type=str,
         default='none',
-        choices=['none', 'noise', 'dpsgd', 'topk', 'compression', 'soteria', 'mixup', 'dager', 'lrb', 'lrbprojonly'],
+        choices=['none', 'noise', 'dpsgd', 'topk', 'compression', 'soteria', 'mixup', 'dager', 'lrb', 'lrbprojonly', 'signed_bottleneck'],
         help='Defense applied to client gradients before attack reconstruction; some defenses generate gradients directly.',
     )
     parser.add_argument(

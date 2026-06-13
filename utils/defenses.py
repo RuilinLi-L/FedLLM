@@ -363,7 +363,7 @@ def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
             raise ValueError("dager defense requires model_wrapper, batch, labels")
         layer_names = _trainable_parameter_names(model_wrapper)
         g = apply_dager_defense(g, args, model_wrapper, batch, labels, layer_names)
-    elif defense in {"lrb", "lrbprojonly"}:
+    elif defense in {"lrb", "lrbprojonly", "signed_bottleneck"}:
         layer_names = _trainable_parameter_names(model_wrapper)
         g = apply_lrb_defense(g, args, layer_names=layer_names)
     else:

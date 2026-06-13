@@ -183,7 +183,7 @@ def _infer_adaptive_attack(row: dict, text: str = "") -> None:
             row["adaptive_attack_profile"] = "topk_support"
         elif defense == "compression":
             row["adaptive_attack_profile"] = "quantization_robust"
-        elif defense in {"lrb", "lrbprojonly"}:
+        elif defense in {"lrb", "lrbprojonly", "signed_bottleneck"}:
             row["adaptive_attack_profile"] = "projection_span"
         else:
             row["adaptive_attack_profile"] = "generic_ranked_span"

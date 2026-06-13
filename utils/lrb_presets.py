@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-LRB_DEFENSE_NAMES = {"lrb", "lrbprojonly"}
+LRB_DEFENSE_NAMES = {"lrb", "lrbprojonly", "signed_bottleneck"}
 
 LRB_PRESET_CHOICES = [
     "custom",
@@ -20,6 +20,7 @@ LRB_PRESET_CHOICES = [
     "proj_rule_only",
     "proj_empirical_only",
     "proj_uniform",
+    "signed_bottleneck",
     "proj_no_empirical",
 ]
 
@@ -68,6 +69,14 @@ def apply_lrb_preset(args: Any) -> Any:
                 f"--defense_lrb_preset {preset!r}; use --defense lrb for other LRB presets."
             )
         preset = "lrbprojonly"
+        args.defense_lrb_preset = preset
+    elif defense == "signed_bottleneck":
+        if preset not in {"custom", "signed_bottleneck"}:
+            raise ValueError(
+                "--defense signed_bottleneck cannot be combined with "
+                f"--defense_lrb_preset {preset!r}; use --defense lrb for other LRB presets."
+            )
+        preset = "signed_bottleneck"
         args.defense_lrb_preset = preset
 
     if defense not in LRB_DEFENSE_NAMES or preset == "custom":
@@ -119,7 +128,7 @@ def apply_lrb_preset(args: Any) -> Any:
             projection="signed_pool",
         )
 
-    if preset == "proj_uniform":
+    if preset in {"proj_uniform", "signed_bottleneck"}:
         return _set_lrb_args(
             args,
             keep_sensitive=k,

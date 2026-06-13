@@ -51,6 +51,7 @@ ALL_VARIANTS=(
   proj_rule_only
   proj_empirical_only
   proj_uniform
+  signed_bottleneck
   proj_no_empirical
 )
 
@@ -79,7 +80,8 @@ Execution control:
                               Variants: none,identity_lrb,clip_only,proj_only,proj_clip,
                                         full_lrb,pool_full,rule_only,empirical_only,
                                         uniform_all_sensitive,proj_rule_only,
-                                        proj_empirical_only,proj_uniform,proj_no_empirical
+                                        proj_empirical_only,proj_uniform,signed_bottleneck,
+                                        proj_no_empirical
   --skip_existing             Skip a log if it already contains a result summary
   --dry_run                   Print commands without running
   --no_collect                Do not collect/summarize logs at the end
@@ -236,7 +238,7 @@ variant_args() {
       DEFENSE="none"
       DEF_EXTRA=()
       ;;
-    identity_lrb|clip_only|proj_only|proj_clip|full_lrb|pool_full|rule_only|empirical_only|uniform_all_sensitive|proj_rule_only|proj_empirical_only|proj_uniform|proj_no_empirical)
+    identity_lrb|clip_only|proj_only|proj_clip|full_lrb|pool_full|rule_only|empirical_only|uniform_all_sensitive|proj_rule_only|proj_empirical_only|proj_uniform|signed_bottleneck|proj_no_empirical)
       DEF_EXTRA=(
         --defense_lrb_preset "$variant"
         --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"

@@ -16,7 +16,7 @@ def rep_bottleneck_summary_fields(args):
         ("rep_bottleneck_type", getattr(args, "defense_rep_bottleneck", "none")),
         ("rep_keep_ratio", getattr(args, "defense_rep_keep_ratio", None)),
         ("rep_dropout_p", getattr(args, "defense_rep_dropout_p", None)),
-        ("rep_bottleneck_with_lrb", rep_bottleneck_active(args) and getattr(args, "defense", "none") in {"lrb", "lrbprojonly"}),
+        ("rep_bottleneck_with_lrb", rep_bottleneck_active(args) and getattr(args, "defense", "none") in {"lrb", "lrbprojonly", "signed_bottleneck"}),
     ]
 
 
