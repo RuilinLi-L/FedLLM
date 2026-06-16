@@ -696,6 +696,50 @@ def test_signed_bottleneck_alias_maps_to_uniform_projection_preset():
     )
 
 
+def _peftleak_post_gradient_args(defense):
+    args = SimpleNamespace(
+        defense=defense,
+        defense_noise=0.01 if defense == "noise" else None,
+        defense_pct_mask=None,
+        defense_topk_ratio=0.5,
+        defense_n_bits=4,
+        defense_lrb_preset="custom",
+        defense_lrb_sensitive_n_layers=2,
+        defense_lrb_keep_ratio_sensitive=0.5,
+        defense_lrb_keep_ratio_other=0.75,
+        defense_lrb_clip_scale_sensitive=1_000_000.0,
+        defense_lrb_clip_scale_other=1_000_000.0,
+        defense_lrb_noise_sensitive=0.0,
+        defense_lrb_noise_other=0.0,
+        defense_lrb_empirical_weight=0.0,
+        defense_lrb_calibration_samples=16,
+        defense_lrb_projection="signed_pool",
+        rng_seed=17,
+    )
+    apply_lrb_preset(args)
+    return args
+
+
+def test_peftleak_post_gradient_defenses_preserve_shape_and_none():
+    grads = (torch.randn(2, 3), None, torch.randn(4))
+    for defense in ("none", "noise", "topk", "compression", "lrb", "lrbprojonly", "signed_bottleneck"):
+        args = _peftleak_post_gradient_args(defense)
+        defended = apply_defense(grads, args)
+        assert_true(len(defended) == len(grads), f"{defense} should preserve gradient tuple length")
+        assert_true(defended[1] is None, f"{defense} should preserve None gradients")
+        assert_true(defended[0].shape == grads[0].shape, f"{defense} should preserve matrix shape")
+        assert_true(defended[2].shape == grads[2].shape, f"{defense} should preserve vector shape")
+
+
+def test_peftleak_baseline_script_excludes_dager_main_matrix():
+    script = Path(__file__).with_name("scripts").joinpath("peftleak_baselines.sh").read_text(encoding="utf8")
+    attack_entry = Path(__file__).with_name("attack_peftleak.py").read_text(encoding="utf8")
+
+    defense_line = next(line for line in script.splitlines() if line.startswith("DEFENSES=("))
+    assert_true("dager" not in defense_line, "PEFTLeak baseline matrix should exclude DAGER defense")
+    assert_true("DAGER defense is DAGER-specific" in attack_entry, "entrypoint should still emit explicit unsupported DAGER summary")
+
+
 def main():
     tests = [
         test_noise_rng_behavior,
@@ -718,6 +762,8 @@ def main():
         test_lrb_projection_only_fast_path_matches_manual_projection_and_metadata,
         test_lrbprojonly_alias_normalizes_to_projection_only_preset,
         test_signed_bottleneck_alias_maps_to_uniform_projection_preset,
+        test_peftleak_post_gradient_defenses_preserve_shape_and_none,
+        test_peftleak_baseline_script_excludes_dager_main_matrix,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")
