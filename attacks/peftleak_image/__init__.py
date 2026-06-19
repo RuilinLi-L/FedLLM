@@ -9,6 +9,7 @@ from .core import (
     cluster_and_reassemble,
     design_malicious_adapter_parameters,
     load_public_patch_statistics,
+    move_patch_statistics,
     optimize_patch_baseline,
     recover_patch_from_adapter_grads,
     recover_patches_from_batch,

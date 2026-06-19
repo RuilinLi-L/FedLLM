@@ -108,6 +108,22 @@ def load_public_patch_statistics(path: str | Path) -> PatchStatistics:
     )
 
 
+def move_patch_statistics(
+    stats: PatchStatistics,
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype | None = None,
+) -> PatchStatistics:
+    target_dtype = dtype or stats.mean.dtype
+    return PatchStatistics(
+        mean=stats.mean.to(device=device, dtype=target_dtype),
+        std=stats.std.to(device=device, dtype=target_dtype).clamp_min(1e-12),
+        num_images=int(stats.num_images),
+        num_patches=int(stats.num_patches),
+        patch_size=int(stats.patch_size),
+    )
+
+
 def normalize_patches_with_public_stats(patches: torch.Tensor, stats: PatchStatistics) -> torch.Tensor:
     if int(stats.patch_size) <= 0:
         raise ValueError("stats.patch_size must be positive.")
@@ -407,11 +423,11 @@ def build_vit_adapter_gradients(
         allow_unused=True,
     )
     return VitAdapterGradientResult(
-        grads=tuple(None if grad is None else grad.detach().cpu() for grad in grads),
+        grads=tuple(None if grad is None else grad.detach() for grad in grads),
         names=model.adapter_parameter_names(),
-        normalized_patches=normalized.detach().cpu(),
-        raw_patches=raw_patches.detach().cpu(),
-        logits=logits.detach().cpu(),
+        normalized_patches=normalized.detach(),
+        raw_patches=raw_patches.detach(),
+        logits=logits.detach(),
         loss=float(loss.detach().item()),
     )
 
@@ -562,7 +578,7 @@ def deterministic_kmeans(
             else:
                 new_centers.append(centers[cluster_idx])
         centers = torch.stack(new_centers, dim=0)
-    return assignments.detach().cpu()
+    return assignments.detach()
 
 
 def cluster_and_reassemble(

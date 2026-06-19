@@ -14,6 +14,7 @@ python attack_peftleak_image.py --mode vit_adapter \
 ```
 
 This entrypoint reports `attack=peftleak_image_repro`. `--mode synthetic_ratio` is kept only for fast semantic/debug checks of the adapter gradient-ratio kernel.
+The image-side entrypoint now runs on a resolved `--device` (default `cuda` with GPU auto-selection) and keeps tensors on that device through gradient generation, recovery, and reassembly.
 
 The non-DAGER FedLLM PEFT text adaptation is separate:
 

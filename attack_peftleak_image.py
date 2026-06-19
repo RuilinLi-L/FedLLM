@@ -12,6 +12,7 @@ from attacks.peftleak_image.core import (
     extract_image_patches,
     fold_image_patches,
     load_public_patch_statistics,
+    move_patch_statistics,
     mse_psnr,
     recover_patch_from_adapter_grads,
     recover_patches_from_named_adapter_grads,
@@ -19,6 +20,7 @@ from attacks.peftleak_image.core import (
 )
 from utils.defense_common import add_shared_defense_args, defense_param_spec, fmt_summary_value
 from utils.defenses import dpsgd_defense, gradient_compression, noise_injection, topk_sparsification
+from utils.gpu import resolve_cuda_device
 from utils.lrb_defense import apply_lrb_defense
 from utils.lrb_presets import apply_lrb_preset
 
@@ -45,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", type=str, default="cifar100", choices=["cifar100", "synthetic"])
     parser.add_argument("--data_root", type=str, default="./models_cache")
     parser.add_argument("--cache_dir", type=str, default=None)
+    parser.add_argument("--device", type=str, default="cuda", help="Runtime device. Bare 'cuda' auto-selects an idle visible GPU and falls back to CPU if CUDA is unavailable.")
     parser.add_argument("--model_path", type=str, default="torchvision_vit_small", help="Backbone selector such as torchvision_vit_small or vit_b_16.")
     parser.add_argument("--finetuned_path", type=str, default=None)
     parser.add_argument("--public_stats_path", type=str, default=None)
@@ -153,8 +156,16 @@ def _mixup_patches(patches: torch.Tensor, alpha: float) -> torch.Tensor:
     if patches.shape[0] < 2:
         return patches
     lam = float(torch.distributions.Beta(float(alpha), float(alpha)).sample().item())
-    perm = torch.arange(patches.shape[0] - 1, -1, -1)
+    perm = torch.arange(patches.shape[0] - 1, -1, -1, device=patches.device)
     return lam * patches + (1.0 - lam) * patches[perm]
+
+
+def _resolve_runtime_device(requested_device: str) -> torch.device:
+    resolved = resolve_cuda_device(requested_device)
+    if str(resolved).startswith("cuda") and not torch.cuda.is_available():
+        print("[peftleak-image] CUDA unavailable; falling back to CPU.", flush=True)
+        return torch.device("cpu")
+    return torch.device(resolved)
 
 
 def _defend_gradient_tuple(args, raw_grads, names):
@@ -213,7 +224,7 @@ def _run_synthetic_ratio(args, images: torch.Tensor):
         raw_grads, names = _make_raw_gradient_tuple(patches, args.adapter_hidden_dim)
     defended_grads, _names = _defend_gradient_tuple(args, raw_grads, names)
     recovered_flat = _recover_from_gradient_tuple(defended_grads)
-    return recovered_flat.view(patches.shape), patches, None, len(names)
+    return recovered_flat.view(patches.shape), patches, None, None, len(names)
 
 
 def _run_vit_adapter(args, images: torch.Tensor, labels: torch.Tensor, stats):
@@ -253,6 +264,7 @@ def _run_vit_adapter(args, images: torch.Tensor, labels: torch.Tensor, stats):
         defended_grads = dpsgd_defense(per_example, args.defense_clip_norm, args.defense_noise or 0.0, seed=args.rng_seed)
         names = full_result.names
         loss = full_result.loss
+        logits = full_result.logits
     else:
         result = build_vit_adapter_gradients(
             grad_images,
@@ -267,6 +279,7 @@ def _run_vit_adapter(args, images: torch.Tensor, labels: torch.Tensor, stats):
         )
         defended_grads, names = _defend_gradient_tuple(args, result.grads, result.names)
         loss = result.loss
+        logits = result.logits
     recovered = recover_patches_from_named_adapter_grads(
         defended_grads,
         names,
@@ -275,7 +288,8 @@ def _run_vit_adapter(args, images: torch.Tensor, labels: torch.Tensor, stats):
         patch_mean=stats.mean,
         patch_std=stats.std,
     )
-    return recovered, reference_patches, loss, len(names)
+    batch_top1_acc = float((logits.argmax(dim=-1) == labels.to(device=logits.device)).float().mean().item())
+    return recovered, reference_patches, loss, batch_top1_acc, len(names)
 
 
 def _emit_summary(args, fields: dict):
@@ -286,6 +300,7 @@ def _emit_summary(args, fields: dict):
         ("attack", "peftleak_image_repro"),
         ("attack_variant", args.mode),
         ("dataset", args.dataset),
+        ("device", fields.get("device")),
         ("data_source", fields.get("data_source")),
         ("public_stats_source", fields.get("public_stats_source")),
         ("model_path", args.model_path),
@@ -303,7 +318,9 @@ def _emit_summary(args, fields: dict):
         ("mse", fields.get("mse")),
         ("psnr", fields.get("psnr")),
         ("patch_recovery_count", fields.get("patch_recovery_count")),
+        ("patch_recovery_rate", fields.get("patch_recovery_rate")),
         ("patch_count", fields.get("patch_count")),
+        ("batch_top1_acc", fields.get("batch_top1_acc")),
         ("public_patch_count", fields.get("public_patch_count")),
         ("runtime", fields.get("runtime")),
     ]
@@ -321,12 +338,15 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     apply_lrb_preset(args)
+    device = _resolve_runtime_device(args.device)
+    args.device = str(device)
     start = time.time()
     if args.defense == "dager":
         _emit_summary(
             args,
             {
                 "result_status": "unsupported",
+                "device": args.device,
                 "runtime": str(datetime.timedelta(seconds=time.time() - start)).split(".")[0],
                 "error_type": "unsupported_defense",
                 "error_message": "DAGER defense is DAGER-specific and is excluded from PEFTLeak image matrices.",
@@ -338,16 +358,20 @@ def main(argv=None):
 
     try:
         images, labels, data_source = _load_images(args, public=False)
+        images = images.to(device=device, dtype=torch.float32)
+        labels = labels.to(device=device, dtype=torch.long)
         if args.public_stats_path:
             public_data_source = "file"
             stats, stats_source = _public_stats(args, None)
         else:
             public_images, _public_labels, public_data_source = _load_images(args, public=True)
+            public_images = public_images.to(device=device, dtype=images.dtype)
             stats, stats_source = _public_stats(args, public_images)
+        stats = move_patch_statistics(stats, device=device, dtype=images.dtype)
         if args.mode == "synthetic_ratio":
-            recovered, reference_patches, vit_loss, grad_count = _run_synthetic_ratio(args, images)
+            recovered, reference_patches, vit_loss, batch_top1_acc, grad_count = _run_synthetic_ratio(args, images)
         else:
-            recovered, reference_patches, vit_loss, grad_count = _run_vit_adapter(args, images, labels, stats)
+            recovered, reference_patches, vit_loss, batch_top1_acc, grad_count = _run_vit_adapter(args, images, labels, stats)
         grid_shape = (images.shape[2] // args.patch_size, images.shape[3] // args.patch_size)
         assembled_clustered, _assignments = cluster_and_reassemble(
             recovered,
@@ -365,19 +389,23 @@ def main(argv=None):
         mse, psnr = mse_psnr(assembled_clustered, folded_reference)
         patch_mse = (recovered - reference_patches).float().pow(2).mean(dim=-1)
         recovered_count = int((patch_mse < args.patch_recovery_mse_threshold).sum().item())
+        patch_count = int(reference_patches.numel() // reference_patches.shape[-1])
         _emit_summary(
             args,
             {
+                "device": args.device,
                 "mse": mse,
                 "psnr": psnr,
                 "patch_recovery_count": recovered_count,
-                "patch_count": int(reference_patches.numel() // reference_patches.shape[-1]),
+                "patch_recovery_rate": recovered_count / max(1, patch_count),
+                "patch_count": patch_count,
                 "runtime": str(datetime.timedelta(seconds=time.time() - start)).split(".")[0],
                 "public_patch_count": stats.num_patches,
                 "public_stats_source": stats_source if args.public_stats_path else f"{stats_source}:{public_data_source}",
                 "data_source": data_source,
                 "effective_batch_size": int(images.shape[0]),
                 "vit_adapter_loss": vit_loss,
+                "batch_top1_acc": batch_top1_acc,
                 "adapter_gradient_count": grad_count,
             },
         )
@@ -387,6 +415,7 @@ def main(argv=None):
             args,
             {
                 "result_status": "failed",
+                "device": args.device,
                 "runtime": str(datetime.timedelta(seconds=time.time() - start)).split(".")[0],
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
