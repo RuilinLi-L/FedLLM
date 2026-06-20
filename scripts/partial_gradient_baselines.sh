@@ -363,6 +363,7 @@ batch_size=${BATCH}
 train_method=${TRAIN_METHOD}
 peft_method=${PEFT_METHOD:-n/a}
 peft_eval_scope=${PEFT_EVAL_SCOPE}
+adapter_reduction_factor=$(attack_extra_value --adapter_reduction_factor || printf 'n/a')
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -410,6 +411,7 @@ batch_size=${BATCH}
 train_method=${TRAIN_METHOD}
 peft_method=${PEFT_METHOD:-n/a}
 peft_eval_scope=${PEFT_EVAL_SCOPE}
+adapter_reduction_factor=$(attack_extra_value --adapter_reduction_factor || printf 'n/a')
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -451,6 +453,7 @@ batch_size=${BATCH}
 train_method=${TRAIN_METHOD}
 peft_method=${PEFT_METHOD:-n/a}
 peft_eval_scope=${PEFT_EVAL_SCOPE}
+adapter_reduction_factor=$(attack_extra_value --adapter_reduction_factor || printf 'n/a')
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -516,19 +519,15 @@ esac
 
 if [ -n "$PEFT_METHOD" ]; then
   case "$PEFT_METHOD" in
-    lora|ia3)
+    lora|ia3|adapter)
       PEFT_EVAL_SCOPE="dager_eval"
       ;;
     prefix)
       echo "[partial-gradient] --peft_method prefix is training-only in v1 and excluded from DAGER/partial-gradient eval matrices." >&2
       exit 2
       ;;
-    adapter)
-      echo "[partial-gradient] --peft_method adapter is v2 planned and not part of v1 PEFT DAGER/partial eval." >&2
-      exit 2
-      ;;
     *)
-      echo "[partial-gradient] --peft_method must be lora or ia3 for DAGER PEFT eval." >&2
+      echo "[partial-gradient] --peft_method must be lora, ia3, or adapter for DAGER PEFT eval." >&2
       exit 2
       ;;
   esac

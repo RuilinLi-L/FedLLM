@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -14,15 +15,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import args_factory
 import train
+import utils.peft_utils as peft_utils_module
 from train import prepare_training_defense
 from utils.models import select_lora_gradient_indices, select_peft_gradient_indices
 from utils.peft_utils import (
     apply_peft_config_to_args,
+    apply_peft_adapter,
     apply_lora_config_to_args,
     PEFT_EVAL_SCOPE_DAGER,
     PEFT_EVAL_SCOPE_NA,
     PEFT_EVAL_SCOPE_TRAINING_ONLY,
-    PEFT_EVAL_SCOPE_V2_PLANNED,
     peft_eval_scope,
     peft_eval_scope_message,
     parse_lora_target_modules,
@@ -31,6 +33,7 @@ from utils.peft_utils import (
     lora_target_modules,
     resolve_peft_config,
     resolve_lora_checkpoint_path,
+    save_peft_checkpoint,
     validate_peft_eval_args,
     validate_lora_eval_args,
 )
@@ -54,13 +57,17 @@ def _temp_adapter_dir() -> str:
 
 def _temp_peft_adapter_dir(peft_type: str, model_path: str = "gpt2", num_virtual_tokens: int = 20) -> str:
     path = Path(tempfile.mkdtemp())
-    config = {"peft_type": peft_type, "task_type": "SEQ_CLS", "base_model_name_or_path": model_path}
+    config = {"task_type": "SEQ_CLS", "base_model_name_or_path": model_path}
+    if peft_type != "ADAPTER":
+        config["peft_type"] = peft_type
     if peft_type == "LORA":
         config.update({"r": 16, "target_modules": ["query", "value"] if model_path == "bert-base-uncased" else ["c_attn"]})
     elif peft_type == "IA3":
         config.update({"target_modules": ["query", "value", "intermediate.dense"], "feedforward_modules": ["intermediate.dense"]})
     elif peft_type == "PREFIX_TUNING":
         config.update({"num_virtual_tokens": num_virtual_tokens})
+    elif peft_type == "ADAPTER":
+        config.update({"architecture": "double_seq_bn", "reduction_factor": 16})
     (path / "adapter_config.json").write_text(json.dumps(config), encoding="utf-8")
     torch.save({"dummy": torch.tensor([1.0])}, path / "adapter_model.bin")
     return str(path)
@@ -421,17 +428,145 @@ def test_ia3_and_prefix_adapter_metadata_normalize():
             directory.rmdir()
 
 
-def test_unsupported_adapter_method_is_v2_error():
+def test_adapter_method_resolves_default_reduction_factor():
+    resolved = resolve_peft_config(
+        model_path="bert-base-uncased",
+        peft_method="adapter",
+        task="seq_class",
+    )
+    assert_true(resolved.peft_method == "adapter", "Houlsby-style adapter should resolve as a supported PEFT method")
+    assert_true(resolved.adapter_reduction_factor == 16, "adapter should default to reduction factor 16")
+
+
+def test_adapter_metadata_normalizes_from_adapterhub_architecture():
+    adapter_dir = Path(_temp_peft_adapter_dir("ADAPTER", model_path="bert-base-uncased"))
     try:
-        resolve_peft_config(
+        args = SimpleNamespace(
+            train_method="peft",
+            peft_method=None,
+            model_path="bert-base-uncased",
+            finetuned_path=str(adapter_dir),
+            lora_r=None,
+            defense="lrb",
+            task="seq_class",
+            lora_target_modules=None,
+            peft_num_virtual_tokens=None,
+            adapter_reduction_factor=None,
+        )
+        apply_peft_config_to_args(args, require_checkpoint=True)
+        assert_true(args.peft_method == "adapter", "AdapterHub architecture should normalize to peft_method=adapter")
+        assert_true(args.peft_type == "ADAPTER", "adapter peft_type should be recorded as ADAPTER")
+        assert_true(args.adapter_reduction_factor == 16, "adapter reduction factor should be read from metadata")
+        assert_true(args.peft_adapter_architecture == "double_seq_bn", "adapter architecture should be retained")
+    finally:
+        for child in adapter_dir.iterdir():
+            child.unlink()
+        adapter_dir.rmdir()
+
+
+def test_adapter_backend_smoke_save_and_reload_with_fake_backend():
+    class FakeDoubleSeqBnConfig:
+        def __init__(self, reduction_factor):
+            self.reduction_factor = reduction_factor
+
+    class FakeBackend:
+        DoubleSeqBnConfig = FakeDoubleSeqBnConfig
+
+        @staticmethod
+        def init(model):
+            model.adapter_events = []
+
+            def add_adapter(name, config):
+                model.adapter_events.append(("add", name, config.reduction_factor))
+                model.adapter_down = torch.nn.Linear(2, 1, bias=False)
+
+            def train_adapter(name):
+                model.adapter_events.append(("train", name))
+                for param in model.parameters():
+                    param.requires_grad = False
+                for param in model.adapter_down.parameters():
+                    param.requires_grad = True
+
+            def save_adapter(path, name):
+                model.adapter_events.append(("save", name))
+                out = Path(path)
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "adapter_config.json").write_text(
+                    json.dumps({"architecture": "double_seq_bn", "reduction_factor": 16}),
+                    encoding="utf-8",
+                )
+                torch.save(model.adapter_down.state_dict(), out / "adapter_model.bin")
+
+            def load_adapter(path, load_as=None, set_active=False):
+                name = load_as or "loaded_adapter"
+                model.adapter_events.append(("load", name, bool(set_active)))
+                model.adapter_down = torch.nn.Linear(2, 1, bias=False)
+                state = torch.load(Path(path) / "adapter_model.bin", map_location="cpu")
+                model.adapter_down.load_state_dict(state)
+                return name
+
+            def set_active_adapters(name):
+                model.adapter_events.append(("active", name))
+
+            model.add_adapter = add_adapter
+            model.train_adapter = train_adapter
+            model.save_adapter = save_adapter
+            model.load_adapter = load_adapter
+            model.set_active_adapters = set_active_adapters
+
+    class FakeModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_name_or_path="bert-base-uncased")
+            self.backbone = torch.nn.Linear(2, 2)
+            self.classifier = torch.nn.Linear(2, 2)
+
+        def forward(self, x):
+            hidden = self.backbone(x)
+            if hasattr(self, "adapter_down"):
+                hidden = hidden + self.adapter_down(hidden).repeat(1, 2)
+            return self.classifier(hidden)
+
+    class FakeTokenizer:
+        def save_pretrained(self, path):
+            Path(path).mkdir(parents=True, exist_ok=True)
+            (Path(path) / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+    old_backend = peft_utils_module.adapterlib
+    peft_utils_module.adapterlib = FakeBackend
+    save_dir = Path(tempfile.mkdtemp()) / "adapter"
+    try:
+        model = apply_peft_adapter(
+            FakeModel(),
             model_path="bert-base-uncased",
             peft_method="adapter",
             task="seq_class",
+            adapter_reduction_factor=16,
         )
-    except NotImplementedError as exc:
-        assert_true("planned for v2" in str(exc), "adapter error should point to v2 plan")
-    else:
-        raise AssertionError("Houlsby-style adapter should not be enabled in v1")
+        output = model(torch.ones(1, 2))
+        assert_true(tuple(output.shape) == (1, 2), "fake adapter model should run a forward pass")
+        assert_true(any(event[0] == "add" for event in model.adapter_events), "adapter should be added")
+        assert_true(any(event[0] == "train" for event in model.adapter_events), "adapter should be marked trainable")
+        assert_true(model.classifier.weight.requires_grad, "seq-class classifier head should stay trainable")
+
+        saved = save_peft_checkpoint(model, FakeTokenizer(), save_dir)
+        assert_true(Path(saved["adapter_path"]).is_dir(), "adapter save should create a directory")
+        assert_true((Path(saved["adapter_path"]) / "fedllm_peft_metadata.json").is_file(), "adapter metadata should be saved")
+
+        reloaded = apply_peft_adapter(
+            FakeModel(),
+            model_path="bert-base-uncased",
+            peft_method="adapter",
+            checkpoint_path=saved["adapter_path"],
+            task="seq_class",
+        )
+        reloaded(torch.ones(1, 2))
+        assert_true(any(event[0] == "load" for event in reloaded.adapter_events), "adapter should reload from directory")
+        assert_true(reloaded.classifier.weight.requires_grad, "reloaded classifier head should stay trainable")
+    finally:
+        peft_utils_module.adapterlib = old_backend
+        if save_dir.parent.exists():
+            shutil.rmtree(save_dir.parent)
 
 
 def test_prefix_eval_is_rejected_for_dager_span():
@@ -500,29 +635,31 @@ def test_prefix_virtual_token_override_rejects_adapter_mismatch():
         prefix_dir.rmdir()
 
 
-def test_adapter_is_not_exposed_as_cli_choice():
-    for parser_factory in (args_factory.get_args, train.build_parser):
-        try:
-            if parser_factory is args_factory.get_args:
-                parser_factory([
-                    "--dataset", "sst2",
-                    "--task", "seq_class",
-                    "--split", "val",
-                    "--n_inputs", "1",
-                    "--l1_filter", "all",
-                    "--l2_filter", "non-overlap",
-                    "--train_method", "peft",
-                    "--peft_method", "adapter",
-                    "--finetuned_path", "dummy",
-                ])
-            else:
-                parser_factory().parse_args([
-                    "--train_method", "peft",
-                    "--peft_method", "adapter",
-                ])
-        except SystemExit:
-            continue
-        raise AssertionError("adapter should not be accepted as a PEFT CLI choice in v1")
+def test_adapter_is_exposed_as_cli_choice():
+    adapter_dir = Path(_temp_peft_adapter_dir("ADAPTER", model_path="bert-base-uncased"))
+    try:
+        parsed = args_factory.get_args([
+            "--dataset", "sst2",
+            "--task", "seq_class",
+            "--split", "val",
+            "--n_inputs", "1",
+            "--l1_filter", "all",
+            "--l2_filter", "non-overlap",
+            "--train_method", "peft",
+            "--peft_method", "adapter",
+            "--finetuned_path", str(adapter_dir),
+        ])
+        assert_true(parsed.peft_method == "adapter", "attack CLI should accept adapter")
+    finally:
+        for child in adapter_dir.iterdir():
+            child.unlink()
+        adapter_dir.rmdir()
+
+    parsed = train.build_parser().parse_args([
+        "--train_method", "peft",
+        "--peft_method", "adapter",
+    ])
+    assert_true(parsed.peft_method == "adapter", "train CLI should accept adapter")
 
 
 def test_peft_eval_scope_helper_classifies_v1_policy():
@@ -534,29 +671,25 @@ def test_peft_eval_scope_helper_classifies_v1_policy():
         "Prefix should be training-only in v1",
     )
     assert_true(
-        peft_eval_scope("adapter") == PEFT_EVAL_SCOPE_V2_PLANNED,
-        "Houlsby-style adapter should remain v2 planned",
+        peft_eval_scope("adapter") == PEFT_EVAL_SCOPE_DAGER,
+        "Houlsby-style adapter should be in PEFT DAGER eval scope",
     )
     assert_true(
         "training-only" in peft_eval_scope_message("prefix"),
         "Prefix scope message should be explicit",
     )
     assert_true(
-        "v2 planned" in peft_eval_scope_message("adapter"),
+        "supports this method" in peft_eval_scope_message("adapter"),
         "Adapter scope message should be explicit",
     )
 
 
-def test_v1_privacy_matrix_is_lora_ia3_only():
+def test_privacy_matrix_includes_adapter():
     in_scope = [method for method in ("lora", "ia3", "prefix", "adapter") if peft_eval_scope(method) == PEFT_EVAL_SCOPE_DAGER]
-    assert_true(in_scope == ["lora", "ia3"], f"v1 PEFT privacy matrix should include only LoRA/IA3: {in_scope}")
+    assert_true(in_scope == ["lora", "ia3", "adapter"], f"PEFT privacy matrix should include LoRA/IA3/adapter: {in_scope}")
     assert_true(
         peft_eval_scope("prefix") == PEFT_EVAL_SCOPE_TRAINING_ONLY,
         "Prefix should remain training/smoke only",
-    )
-    assert_true(
-        peft_eval_scope("adapter") == PEFT_EVAL_SCOPE_V2_PLANNED,
-        "Houlsby adapter should remain v2 planned",
     )
 
 
@@ -595,6 +728,19 @@ def test_peft_gradient_inventory_deduplicates_transformer_layers():
         f"LoRA inventory should select one preferred tensor per transformer layer: {lora_selected}",
     )
 
+    adapter_names = [
+        "bert.encoder.layer.0.output.adapters.default.adapter_up.weight",
+        "bert.encoder.layer.0.output.adapters.default.adapter_down.0.weight",
+        "bert.encoder.layer.1.output.adapters.default.adapter_down.0.weight",
+        "bert.encoder.layer.1.output.adapters.default.adapter_up.weight",
+        "classifier.modules_to_save.default.weight",
+    ]
+    adapter_selected = select_peft_gradient_indices(adapter_names, peft_method="adapter")
+    assert_true(
+        adapter_selected == [(1, adapter_names[1]), (2, adapter_names[2])],
+        f"Adapter inventory should prefer one down-projection tensor per layer: {adapter_selected}",
+    )
+
 
 def test_lora_training_allows_post_gradient_lrb():
     class DummyConfig:
@@ -607,7 +753,7 @@ def test_lora_training_allows_post_gradient_lrb():
 
 
 def test_lora_ia3_training_allow_direct_and_dager_defenses():
-    for peft_method in ("lora", "ia3"):
+    for peft_method in ("lora", "ia3", "adapter"):
         for defense in ("dpsgd", "soteria", "mixup", "dager"):
             args = SimpleNamespace(train_method="peft", peft_method=peft_method, defense=defense)
             wrapper = prepare_training_defense(model=object(), args=args, trainable_params=[])
@@ -649,13 +795,15 @@ def main():
         test_validate_lora_eval_args_rejects_unsupported_model_family,
         test_bert_lora_eval_args_are_supported,
         test_ia3_and_prefix_adapter_metadata_normalize,
-        test_unsupported_adapter_method_is_v2_error,
+        test_adapter_method_resolves_default_reduction_factor,
+        test_adapter_metadata_normalizes_from_adapterhub_architecture,
+        test_adapter_backend_smoke_save_and_reload_with_fake_backend,
         test_prefix_eval_is_rejected_for_dager_span,
         test_prefix_virtual_token_override_validates_positive,
         test_prefix_virtual_token_override_rejects_adapter_mismatch,
-        test_adapter_is_not_exposed_as_cli_choice,
+        test_adapter_is_exposed_as_cli_choice,
         test_peft_eval_scope_helper_classifies_v1_policy,
-        test_v1_privacy_matrix_is_lora_ia3_only,
+        test_privacy_matrix_includes_adapter,
         test_peft_gradient_inventory_deduplicates_transformer_layers,
         test_lora_training_allows_post_gradient_lrb,
         test_lora_ia3_training_allow_direct_and_dager_defenses,

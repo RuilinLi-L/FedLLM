@@ -37,7 +37,7 @@ SUPPORTED_PEFTLEAK_TEXT_DEFENSES = {
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="FedLLM PEFT text attack for LoRA/IA3 gradients")
+    parser = argparse.ArgumentParser(description="FedLLM PEFT text attack for LoRA/IA3/adapter gradients")
     parser.add_argument("--dataset", choices=["cola", "sst2", "rte", "rotten_tomatoes", "stanfordnlp/imdb", "glnmario/ECHR"], required=True)
     parser.add_argument("--task", choices=["seq_class"], default="seq_class")
     parser.add_argument("--split", choices=["val", "test"], required=True)
@@ -63,8 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--loss", type=str, default="ce", choices=["ce", "mse"])
 
     parser.add_argument("--train_method", type=str, default="peft", choices=["peft", "lora"])
-    parser.add_argument("--peft_method", type=str, default="lora", choices=["lora", "ia3", "prefix"])
+    parser.add_argument("--peft_method", type=str, default="lora", choices=["lora", "ia3", "prefix", "adapter"])
     parser.add_argument("--peft_num_virtual_tokens", type=int, default=None)
+    parser.add_argument(
+        "--adapter_reduction_factor",
+        type=int,
+        default=None,
+        help="Adapter bottleneck reduction factor. Defaults to checkpoint metadata, or 16 for new adapters.",
+    )
     parser.add_argument("--lora_r", type=int, default=None)
     parser.add_argument("--lora_target_modules", type=str, default=None)
 
@@ -205,6 +211,7 @@ def _emit_result_summary(args, tracker):
         ("peft_target_modules", getattr(args, "peft_target_modules", None)),
         ("peft_feedforward_modules", getattr(args, "peft_feedforward_modules", None)),
         ("peft_num_virtual_tokens", getattr(args, "peft_num_virtual_tokens", None)),
+        ("adapter_reduction_factor", getattr(args, "adapter_reduction_factor", None)),
         ("peft_checkpoint_type", getattr(args, "peft_checkpoint_type", None)),
         ("peft_adapter_r", getattr(args, "peft_adapter_r", None)),
         ("peft_adapter_target_modules", getattr(args, "peft_adapter_target_modules", None)),
@@ -212,6 +219,9 @@ def _emit_result_summary(args, tracker):
         ("peft_adapter_task_type", getattr(args, "peft_adapter_task_type", None)),
         ("peft_adapter_base_model", getattr(args, "peft_adapter_base_model", None)),
         ("peft_adapter_peft_type", getattr(args, "peft_adapter_peft_type", None)),
+        ("peft_adapter_reduction_factor", getattr(args, "peft_adapter_reduction_factor", None)),
+        ("peft_adapter_architecture", getattr(args, "peft_adapter_architecture", None)),
+        ("peft_adapter_name", getattr(args, "peft_adapter_name", None)),
         ("lora_r", getattr(args, "lora_r", None)),
         ("lora_target_modules", getattr(args, "lora_target_modules", None)),
         ("defense", args.defense),
@@ -256,8 +266,8 @@ def _validate_args(args):
 
     normalize_peft_args(args)
     args.train_method = "peft"
-    if args.peft_method not in {"lora", "ia3"}:
-        raise NotImplementedError("FedLLM PEFT text v1 supports --peft_method lora|ia3 only; prefix/adapter are out of scope.")
+    if args.peft_method not in {"lora", "ia3", "adapter"}:
+        raise NotImplementedError("FedLLM PEFT text supports --peft_method lora|ia3|adapter; prefix is training-only.")
     if args.defense == "dager":
         return args
     if args.defense not in SUPPORTED_PEFTLEAK_TEXT_DEFENSES:
@@ -268,7 +278,6 @@ def _validate_args(args):
     validate_rep_bottleneck_args(args)
     apply_peft_config_to_args(args, require_checkpoint=True)
     apply_lrb_preset(args)
-    args.peft_eval_scope = "n/a"
     return args
 
 
@@ -301,7 +310,7 @@ def reconstruct(args, sample, model_wrapper):
         args.peft_method,
     )
     if not indices:
-        raise ValueError("No visible LoRA/IA3 adapter gradients after defense; cannot run FedLLM PEFT text attack.")
+        raise ValueError("No visible LoRA/IA3/adapter gradients after defense; cannot run FedLLM PEFT text attack.")
 
     attention_mask = orig_batch.get("attention_mask")
     reference_mask = None if attention_mask is None else attention_mask.detach().cpu().tolist()

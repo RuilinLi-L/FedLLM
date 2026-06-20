@@ -6,6 +6,7 @@ dager_dp/
 models/
 log/runs/
 output/
+outputs/
 tmp/
 out.csv
 out.md

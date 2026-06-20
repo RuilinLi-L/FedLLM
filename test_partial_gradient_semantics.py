@@ -149,12 +149,13 @@ def test_lora_only_filter_includes_peft_adapter_families():
     names = [
         "base_model.model.bert.encoder.layer.0.attention.self.query.ia3_l.default",
         "prompt_encoder.default.embedding.weight",
+        "base_model.model.bert.encoder.layer.0.output.adapters.default.adapter_down.0.weight",
         "base_model.model.classifier.modules_to_save.default.weight",
         "base_model.model.bert.encoder.layer.0.attention.self.query.weight",
     ]
     filtered = apply_partial_gradient_filter(_grads(len(names)), _args(param_filter="lora_only"), names)
     kept = [idx for idx, grad in enumerate(filtered) if grad is not None]
-    assert_true(kept == [0, 1], f"lora_only should now include IA3/Prefix adapter tensors: {kept}")
+    assert_true(kept == [0, 1, 2], f"lora_only should now include IA3/Prefix/adapter tensors: {kept}")
 
 
 def test_first2_qkv_is_and_filter():
@@ -304,8 +305,8 @@ def test_nonprefix_support_rejects_llama_and_single_layer():
     )
 
 
-def test_peft_adapter_only_variant_is_for_lora_and_ia3_v1():
-    for peft_method in ("lora", "ia3"):
+def test_peft_adapter_only_variant_is_for_supported_peft_methods():
+    for peft_method in ("lora", "ia3", "adapter"):
         args = _args(param_filter="lora_only")
         args.train_method = "peft"
         args.peft_method = peft_method
@@ -347,7 +348,7 @@ def main():
         test_middle_layer_subset_is_supported_for_gpt2_nonprefix,
         test_nonprefix_support_is_gpt2_full_only,
         test_nonprefix_support_rejects_llama_and_single_layer,
-        test_peft_adapter_only_variant_is_for_lora_and_ia3_v1,
+        test_peft_adapter_only_variant_is_for_supported_peft_methods,
         test_nonprefix_attack_helpers_read_cap_and_layers,
     ]
     for test in tests:

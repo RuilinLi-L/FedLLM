@@ -22,6 +22,7 @@ if [ "$#" -lt 4 ]; then
 [dager]   ./scripts/train_peft.sh sst2 2 bert-base-uncased lora --lora_r 16 --num_epochs 1
 [dager]   ./scripts/train_peft.sh sst2 2 bert-base-uncased ia3 --num_epochs 1
 [dager]   ./scripts/train_peft.sh sst2 2 bert-base-uncased prefix --peft_num_virtual_tokens 20 --num_epochs 1
+[dager]   ./scripts/train_peft.sh sst2 2 bert-base-uncased adapter --adapter_reduction_factor 16 --num_epochs 1
 EOF
   exit 2
 fi
@@ -52,14 +53,10 @@ if has_extra_flag "--num_epoch"; then
 fi
 
 case "$PEFT_METHOD" in
-  lora|ia3|prefix)
-    ;;
-  adapter)
-    echo "[dager] --peft_method adapter is v2 planned and not part of v1 PEFT DAGER/partial eval." >&2
-    exit 2
+  lora|ia3|prefix|adapter)
     ;;
   *)
-    echo "[dager] PEFT_METHOD must be lora, ia3, or prefix." >&2
+    echo "[dager] PEFT_METHOD must be lora, ia3, prefix, or adapter." >&2
     exit 2
     ;;
 esac

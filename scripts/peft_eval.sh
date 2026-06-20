@@ -16,7 +16,7 @@ dager_auto_log_enable "peft_eval" "$@"
 if [ "$#" -lt 4 ]; then
   cat >&2 <<EOF
 [dager] Usage:
-[dager]   ./scripts/peft_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --peft_method lora|ia3 --finetuned_path PATH [extra attack args...]
+[dager]   ./scripts/peft_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --peft_method lora|ia3|adapter --finetuned_path PATH [extra attack args...]
 EOF
   exit 2
 fi
@@ -72,18 +72,14 @@ else
 fi
 
 case "$PEFT_METHOD" in
-  lora|ia3)
+  lora|ia3|adapter)
     ;;
   prefix)
     echo "[dager] --peft_method prefix is training-only in v1 and excluded from DAGER/partial-gradient eval matrices." >&2
     exit 2
     ;;
-  adapter)
-    echo "[dager] --peft_method adapter is v2 planned and not part of v1 PEFT DAGER/partial eval." >&2
-    exit 2
-    ;;
   *)
-    echo "[dager] --peft_method must be lora or ia3 for DAGER PEFT eval." >&2
+    echo "[dager] --peft_method must be lora, ia3, or adapter for DAGER PEFT eval." >&2
     exit 2
     ;;
 esac

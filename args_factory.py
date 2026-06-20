@@ -76,7 +76,7 @@ def get_args(argv=None):
         type=str,
         default='all',
         choices=['all', 'qkv_only', 'lora_only'],
-        help='Gradient exposure by parameter/module family.',
+        help='Gradient exposure by parameter/module family; lora_only means PEFT adapter parameters.',
     )
     parser.add_argument(
         '--partial_nonprefix_candidate_cap',
@@ -336,8 +336,14 @@ def get_args(argv=None):
     
     # PEFT / LoRA
     parser.add_argument('--train_method', type=str, default='full', choices=['full', 'lora', 'peft'])
-    parser.add_argument('--peft_method', type=str, default=None, choices=['lora', 'ia3', 'prefix'])
+    parser.add_argument('--peft_method', type=str, default=None, choices=['lora', 'ia3', 'prefix', 'adapter'])
     parser.add_argument('--peft_num_virtual_tokens', type=int, default=None)
+    parser.add_argument(
+        '--adapter_reduction_factor',
+        type=int,
+        default=None,
+        help='Adapter bottleneck reduction factor. Defaults to checkpoint metadata, or 16 for new adapters.',
+    )
     parser.add_argument('--lora_r', type=int, default=None)
     parser.add_argument(
         '--lora_target_modules',

@@ -21,10 +21,23 @@ def _is_adapter_name(name: str, peft_method: str) -> bool:
     lower = name.lower()
     if "modules_to_save" in lower:
         return False
+    peft_method = str(peft_method or "lora").strip().lower().replace("-", "_")
     if peft_method == "lora":
         return "lora_" in lower
     if peft_method == "ia3":
         return "ia3" in lower
+    if peft_method in {"adapter", "double_seq_bn", "seq_bn", "par_bn", "par_seq_bn", "houlsby", "pfeiffer"}:
+        return any(
+            part in lower
+            for part in (
+                "adapter_down",
+                "adapter_up",
+                ".adapters.",
+                ".adapter.",
+                "down_proj",
+                "up_proj",
+            )
+        )
     raise ValueError(f"Unsupported PEFT method for adapter filtering: {peft_method!r}")
 
 

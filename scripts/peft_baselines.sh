@@ -322,6 +322,7 @@ peft_type=n/a
 peft_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
 peft_feedforward_modules=n/a
 peft_num_virtual_tokens=$(attack_extra_value --peft_num_virtual_tokens || printf 'n/a')
+adapter_reduction_factor=$(attack_extra_value --adapter_reduction_factor || printf 'n/a')
 peft_checkpoint_type=n/a
 peft_adapter_r=n/a
 peft_adapter_target_modules=n/a
@@ -329,6 +330,9 @@ peft_adapter_feedforward_modules=n/a
 peft_adapter_task_type=n/a
 peft_adapter_base_model=n/a
 peft_adapter_peft_type=n/a
+peft_adapter_reduction_factor=n/a
+peft_adapter_architecture=n/a
+peft_adapter_name=n/a
 lora_r=$(attack_extra_value --lora_r || printf 'n/a')
 lora_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
 lora_checkpoint_type=n/a
@@ -384,6 +388,7 @@ peft_type=n/a
 peft_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
 peft_feedforward_modules=n/a
 peft_num_virtual_tokens=$(attack_extra_value --peft_num_virtual_tokens || printf 'n/a')
+adapter_reduction_factor=$(attack_extra_value --adapter_reduction_factor || printf 'n/a')
 peft_checkpoint_type=n/a
 peft_adapter_r=n/a
 peft_adapter_target_modules=n/a
@@ -391,6 +396,9 @@ peft_adapter_feedforward_modules=n/a
 peft_adapter_task_type=n/a
 peft_adapter_base_model=n/a
 peft_adapter_peft_type=n/a
+peft_adapter_reduction_factor=n/a
+peft_adapter_architecture=n/a
+peft_adapter_name=n/a
 lora_r=$(attack_extra_value --lora_r || printf 'n/a')
 lora_target_modules=$(attack_extra_value --lora_target_modules || printf 'n/a')
 lora_checkpoint_type=n/a
@@ -445,19 +453,15 @@ write_variant_summary_file() {
 parse_script_args
 
 case "$PEFT_METHOD" in
-  lora|ia3)
+  lora|ia3|adapter)
     PEFT_EVAL_SCOPE="dager_eval"
     ;;
   prefix)
     echo "[dager] --peft_method prefix is training-only in v1 and excluded from DAGER/partial-gradient eval matrices." >&2
     exit 2
     ;;
-  adapter)
-    echo "[dager] --peft_method adapter is v2 planned and not part of v1 PEFT DAGER/partial eval." >&2
-    exit 2
-    ;;
   *)
-    echo "[dager] --peft_method must be lora or ia3 for DAGER PEFT eval." >&2
+    echo "[dager] --peft_method must be lora, ia3, or adapter for DAGER PEFT eval." >&2
     exit 2
     ;;
 esac

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run one non-DAGER FedLLM PEFT text optimization attack.
 # Usage:
-#   ./scripts/peftleak_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --peft_method lora|ia3 --finetuned_path PATH [extra args...]
+#   ./scripts/peftleak_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --peft_method lora|ia3|adapter --finetuned_path PATH [extra args...]
 
 set -euo pipefail
 
@@ -12,7 +12,7 @@ cd "$DAGER_ROOT" || exit 1
 if [ "$#" -lt 4 ]; then
   cat >&2 <<EOF
 [peftleak] Usage:
-[peftleak]   ./scripts/peftleak_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --peft_method lora|ia3 --finetuned_path PATH [extra args...]
+[peftleak]   ./scripts/peftleak_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --peft_method lora|ia3|adapter --finetuned_path PATH [extra args...]
 EOF
   exit 2
 fi
@@ -57,4 +57,3 @@ python attack_peftleak.py \
   --cache_dir ./models_cache \
   --train_method peft \
   "${EXTRA[@]}"
-

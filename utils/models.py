@@ -24,7 +24,7 @@ from utils.partial_gradient import (
     supports_nonprefix_dager,
     update_dager_candidate_summary,
 )
-from utils.peft_utils import apply_peft_adapter, peft_active
+from utils.peft_utils import apply_peft_adapter, normalize_peft_method_name, peft_active
 from utils.representation_bottleneck import apply_representation_bottleneck, rep_bottleneck_active
 from constants import config
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
@@ -104,7 +104,7 @@ def select_lora_gradient_indices(parameter_names, target_modules=None, preferred
 
 
 def select_peft_gradient_indices(parameter_names, peft_method='lora', target_modules=None, preferred_modules=None):
-    method = (peft_method or 'lora').lower()
+    method = normalize_peft_method_name(peft_method) or 'lora'
     if method == 'lora':
         return select_lora_gradient_indices(parameter_names, target_modules, preferred_modules)
 
@@ -121,7 +121,37 @@ def select_peft_gradient_indices(parameter_names, peft_method='lora', target_mod
         if str(part).strip()
     ]
 
-    def is_adapter_name(name, *, preferred_only=False):
+    def is_adapter_down_name(name):
+        lower = name.lower()
+        return any(
+            part in lower
+            for part in (
+                'adapter_down',
+                'down_proj',
+                '.down.',
+                'down.weight',
+                'bottleneck',
+                'down_linear',
+            )
+        )
+
+    def is_adapterhub_name(name):
+        lower = name.lower()
+        if 'modules_to_save' in lower:
+            return False
+        return any(
+            part in lower
+            for part in (
+                'adapter_down',
+                'adapter_up',
+                '.adapters.',
+                '.adapter.',
+                'down_proj',
+                'up_proj',
+            )
+        )
+
+    def is_adapter_name(name, *, preferred_only=False, down_only=False):
         lower = name.lower()
         if 'modules_to_save' in lower:
             return False
@@ -129,17 +159,33 @@ def select_peft_gradient_indices(parameter_names, peft_method='lora', target_mod
             return False
         if method == 'prefix' and not any(part in lower for part in ('prefix', 'prompt_encoder')):
             return False
+        if method == 'adapter':
+            if not is_adapterhub_name(name):
+                return False
+            if down_only and not is_adapter_down_name(name):
+                return False
+        if method not in {'ia3', 'prefix', 'adapter'}:
+            return False
         if target_parts and not any(part in lower for part in target_parts):
             return False
         if preferred_only and preferred_parts and not any(part in lower for part in preferred_parts):
             return False
         return True
 
-    for preferred_only in (True, False):
+    passes = (
+        (True, True),
+        (False, True),
+        (True, False),
+        (False, False),
+    ) if method == 'adapter' else (
+        (True, False),
+        (False, False),
+    )
+    for preferred_only, down_only in passes:
         selected = [
             (idx, name)
             for idx, name in enumerate(parameter_names)
-            if is_adapter_name(name, preferred_only=preferred_only)
+            if is_adapter_name(name, preferred_only=preferred_only, down_only=down_only)
         ]
         if selected:
             return _dedupe_peft_indices_by_layer(selected)
@@ -240,6 +286,7 @@ class ModelWrapper():
                     task=args.task,
                     target_modules=getattr(args, 'lora_target_modules', None),
                     peft_num_virtual_tokens=getattr(args, 'peft_num_virtual_tokens', None),
+                    adapter_reduction_factor=getattr(args, 'adapter_reduction_factor', None),
                 )
                 self.full_model = self.model
                 self.base_model = self._unwrap_model_for_attack(self.model)
@@ -262,6 +309,7 @@ class ModelWrapper():
                     task=args.task,
                     target_modules=getattr(args, 'lora_target_modules', None),
                     peft_num_virtual_tokens=getattr(args, 'peft_num_virtual_tokens', None),
+                    adapter_reduction_factor=getattr(args, 'adapter_reduction_factor', None),
                 )
                 self.full_model = self.model
                 self.base_model = self._unwrap_model_for_attack(self.model)
@@ -303,6 +351,7 @@ class ModelWrapper():
                     task=args.task,
                     target_modules=getattr(args, 'lora_target_modules', None),
                     peft_num_virtual_tokens=getattr(args, 'peft_num_virtual_tokens', None),
+                    adapter_reduction_factor=getattr(args, 'adapter_reduction_factor', None),
                 )
                 self.full_model = self.model
                 self.base_model = self._unwrap_model_for_attack(self.model)
@@ -324,6 +373,7 @@ class ModelWrapper():
                         task=args.task,
                         target_modules=getattr(args, 'lora_target_modules', None),
                         peft_num_virtual_tokens=getattr(args, 'peft_num_virtual_tokens', None),
+                        adapter_reduction_factor=getattr(args, 'adapter_reduction_factor', None),
                     )
                     self.model = self.full_model
                     self.base_model = self._unwrap_model_for_attack(self.model)
@@ -333,9 +383,10 @@ class ModelWrapper():
                     self.base_model = self.model
                     self.layer_ids = list(range(1,281,9))
 
-            self.emb_size = self.base_model.config.hidden_size
-            self.embeddings_weight_nopos = self.base_model.model.embed_tokens.weight.unsqueeze(0)
-            add_partial_forward_llama(self.base_model.model)
+            llama_backbone = self._llama_backbone()
+            self.emb_size = llama_backbone.config.hidden_size
+            self.embeddings_weight_nopos = llama_backbone.embed_tokens.weight.unsqueeze(0)
+            add_partial_forward_llama(llama_backbone)
 
         self.trainable_parameters = lambda: (param for param in self.model.parameters() if param.requires_grad)
         self.trainable_parameter_names = self._trainable_parameter_names
@@ -349,9 +400,14 @@ class ModelWrapper():
     def _unwrap_model_for_attack(self, model):
         if hasattr(model, 'base_model') and hasattr(model.base_model, 'model'):
             return model.base_model.model
-        if hasattr(model, 'model') and not hasattr(model, 'transformer'):
-            return model.model
         return model
+
+    def _llama_backbone(self):
+        if hasattr(self.base_model, 'model') and hasattr(self.base_model.model, 'embed_tokens'):
+            return self.base_model.model
+        if hasattr(self.base_model, 'embed_tokens') and hasattr(self.base_model, 'layers'):
+            return self.base_model
+        raise AttributeError('Could not resolve Llama backbone from wrapped model.')
 
     def _trainable_parameter_names(self):
         return [name for name, param in self.model.named_parameters() if param.requires_grad]
@@ -800,10 +856,11 @@ class ModelWrapper():
         if self.args.precision == '8bit':
             return
         if self.args.model_path in ['meta-llama/Llama-2-7b-hf', 'meta-llama/Llama-2-70b-hf', 'meta-llama/Meta-Llama-3-8B', 'meta-llama/Meta-Llama-3.1-8B', 'meta-llama/Meta-Llama-3-70B'] and device!='cpu':
-            self.base_model.model.embed_tokens.to(device)
-            self.base_model.model.rotary_emb.to(device)
+            llama_backbone = self._llama_backbone()
+            llama_backbone.embed_tokens.to(device)
+            llama_backbone.rotary_emb.to(device)
             for i in range(self.args.n_layers):
-                self.base_model.model.layers[i].to(device)
+                llama_backbone.layers[i].to(device)
         else:
             self.model.to(device)
 

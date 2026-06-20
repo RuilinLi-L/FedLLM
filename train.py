@@ -105,6 +105,7 @@ def init_result_tracker(args) -> dict:
         "train_method": args.train_method,
         "peft_method": getattr(args, "peft_method", None),
         "peft_type": getattr(args, "peft_type", None),
+        "adapter_reduction_factor": getattr(args, "adapter_reduction_factor", None),
         "lora_r": getattr(args, "lora_r", None),
         "lora_target_modules": getattr(args, "lora_target_modules", None),
         "num_epochs": args.num_epochs,
@@ -139,6 +140,7 @@ def emit_train_result_summary(args, tracker: dict) -> None:
         ("peft_target_modules", getattr(args, "peft_target_modules", None)),
         ("peft_feedforward_modules", getattr(args, "peft_feedforward_modules", None)),
         ("peft_num_virtual_tokens", getattr(args, "peft_num_virtual_tokens", None)),
+        ("adapter_reduction_factor", getattr(args, "adapter_reduction_factor", None)),
         ("peft_checkpoint_type", getattr(args, "peft_checkpoint_type", None)),
         ("peft_adapter_r", getattr(args, "peft_adapter_r", None)),
         ("peft_adapter_target_modules", getattr(args, "peft_adapter_target_modules", None)),
@@ -146,6 +148,9 @@ def emit_train_result_summary(args, tracker: dict) -> None:
         ("peft_adapter_task_type", getattr(args, "peft_adapter_task_type", None)),
         ("peft_adapter_base_model", getattr(args, "peft_adapter_base_model", None)),
         ("peft_adapter_peft_type", getattr(args, "peft_adapter_peft_type", None)),
+        ("peft_adapter_reduction_factor", getattr(args, "peft_adapter_reduction_factor", None)),
+        ("peft_adapter_architecture", getattr(args, "peft_adapter_architecture", None)),
+        ("peft_adapter_name", getattr(args, "peft_adapter_name", None)),
         ("lora_r", tracker.get("lora_r")),
         ("lora_target_modules", tracker.get("lora_target_modules")),
         ("lora_checkpoint_type", getattr(args, "lora_checkpoint_type", None)),
@@ -254,8 +259,14 @@ def build_parser():
         help="Optional tokenizer source when model_path points to a checkpoint directory without tokenizer files.",
     )
     parser.add_argument("--train_method", type=str, default="full", choices=["full", "lora", "peft"])
-    parser.add_argument("--peft_method", type=str, default=None, choices=["lora", "ia3", "prefix"])
+    parser.add_argument("--peft_method", type=str, default=None, choices=["lora", "ia3", "prefix", "adapter"])
     parser.add_argument("--peft_num_virtual_tokens", type=int, default=None)
+    parser.add_argument(
+        "--adapter_reduction_factor",
+        type=int,
+        default=None,
+        help="Adapter bottleneck reduction factor. Defaults to checkpoint metadata, or 16 for new adapters.",
+    )
     parser.add_argument("--lora_r", type=int, default=None)
     parser.add_argument(
         "--lora_target_modules",

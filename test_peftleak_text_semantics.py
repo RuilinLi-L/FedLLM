@@ -85,20 +85,24 @@ def _target_grads(wrapper, batch, labels):
 
 
 def test_peft_gradient_inventory_selects_lora_ia3_and_excludes_saved_heads():
-    grads = (torch.ones(2, 2), torch.ones(2), torch.ones(2, 2), None)
+    grads = (torch.ones(2, 2), torch.ones(2), torch.ones(2, 2), None, torch.ones(2, 4))
     names = [
         "base_model.model.layer.0.lora_A.default.weight",
         "base_model.model.score.modules_to_save.default.weight",
         "base_model.model.layer.0.ia3_l.default",
         "base_model.model.layer.1.lora_A.default.weight",
+        "base_model.model.bert.encoder.layer.0.output.adapters.default.adapter_down.0.weight",
     ]
     lora_idx, lora_names = select_peft_gradient_tensors(grads, names, "lora")
     ia3_idx, ia3_names = select_peft_gradient_tensors(grads, names, "ia3")
+    adapter_idx, adapter_names = select_peft_gradient_tensors(grads, names, "adapter")
 
     assert_true(lora_idx == [0], f"LoRA selector should keep only adapter tensors with gradients: {lora_idx}")
     assert_true("modules_to_save" not in ";".join(lora_names), "selector should exclude modules_to_save")
     assert_true(ia3_idx == [2], f"IA3 selector should keep IA3 tensors: {ia3_idx}")
     assert_true("ia3" in ia3_names[0].lower(), "IA3 selector should preserve IA3 name")
+    assert_true(adapter_idx == [4], f"Adapter selector should keep AdapterHub bottleneck tensors: {adapter_idx}")
+    assert_true("adapter_down" in adapter_names[0].lower(), "Adapter selector should preserve adapter down-projection name")
 
 
 def test_nearest_token_decoding_returns_valid_ids_and_ignores_pad():
@@ -191,24 +195,20 @@ def test_attack_entrypoint_policy_rejects_prefix_and_keeps_dager_unsupported():
     try:
         _validate_args(prefix_args)
     except NotImplementedError as exc:
-        assert_true("lora|ia3" in str(exc), "prefix rejection should mention supported FedLLM PEFT text methods")
+        assert_true("lora|ia3|adapter" in str(exc), "prefix rejection should mention supported FedLLM PEFT text methods")
     else:
         raise AssertionError("prefix FedLLM PEFT text eval should be rejected")
 
-    try:
-        parser.parse_args(
-            [
-                "--dataset", "sst2",
-                "--split", "val",
-                "--n_inputs", "1",
-                "--finetuned_path", "dummy",
-                "--peft_method", "adapter",
-            ]
-        )
-    except SystemExit:
-        pass
-    else:
-        raise AssertionError("adapter should not be accepted as a PEFTLeak v1 CLI choice")
+    adapter_args = parser.parse_args(
+        [
+            "--dataset", "sst2",
+            "--split", "val",
+            "--n_inputs", "1",
+            "--finetuned_path", "dummy",
+            "--peft_method", "adapter",
+        ]
+    )
+    assert_true(adapter_args.peft_method == "adapter", "adapter should be accepted as a PEFTLeak CLI choice")
 
     dager_args = parser.parse_args(
         [

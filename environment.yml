@@ -213,6 +213,7 @@ dependencies:
 - pip:
   - absl-py==2.1.0
   - accelerate==0.34.2
+  - adapters==1.0.1
   - annotated-types==0.7.0
   - anyio==4.6.0
   - cloudpickle==3.0.0

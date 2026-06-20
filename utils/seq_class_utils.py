@@ -175,6 +175,7 @@ def load_seq_class_model_and_tokenizer(args):
             task=getattr(args, "task", "seq_class"),
             target_modules=getattr(args, "lora_target_modules", None),
             peft_num_virtual_tokens=getattr(args, "peft_num_virtual_tokens", None),
+            adapter_reduction_factor=getattr(args, "adapter_reduction_factor", None),
         )
 
     tokenizer.model_max_length = 512

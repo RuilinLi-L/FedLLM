@@ -255,6 +255,7 @@ def _meta_from_text(path: Path, text: str) -> dict[str, str]:
         meta["model_path_guess"] = flags.get("model_path", "")
         meta["train_method_guess"] = flags.get("train_method", "")
         meta["peft_method_guess"] = flags.get("peft_method", "")
+        meta["adapter_reduction_factor_guess"] = flags.get("adapter_reduction_factor", "")
         meta["lora_r_guess"] = flags.get("lora_r", "")
         meta["lora_target_modules_guess"] = flags.get("lora_target_modules", "")
         meta["defense_rep_bottleneck_guess"] = flags.get("defense_rep_bottleneck", "")
@@ -276,6 +277,7 @@ def _meta_from_text(path: Path, text: str) -> dict[str, str]:
                 "model_path_guess": "",
                 "train_method_guess": "",
                 "peft_method_guess": "",
+                "adapter_reduction_factor_guess": "",
                 "lora_r_guess": "",
                 "lora_target_modules_guess": "",
                 "defense_rep_bottleneck_guess": "",
@@ -353,6 +355,7 @@ def parse_train(text: str, meta: dict) -> list[dict]:
             "train_method",
             "peft_method",
             "peft_num_virtual_tokens",
+            "adapter_reduction_factor",
             "lora_r",
             "lora_target_modules",
             "defense",
@@ -463,6 +466,7 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "peft_target_modules",
         "peft_feedforward_modules",
         "peft_num_virtual_tokens",
+        "adapter_reduction_factor",
         "peft_checkpoint_type",
         "peft_adapter_r",
         "peft_adapter_target_modules",
@@ -470,6 +474,9 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "peft_adapter_task_type",
         "peft_adapter_base_model",
         "peft_adapter_peft_type",
+        "peft_adapter_reduction_factor",
+        "peft_adapter_architecture",
+        "peft_adapter_name",
         "lora_r",
         "lora_target_modules",
         "lora_checkpoint_type",
@@ -719,6 +726,12 @@ def _peft_method(row: dict, fallback_key: str | None = None) -> str:
         normalized = normalized.replace("pefttype.", "")
         aliases = {
             "prefix_tuning": "prefix",
+            "double_seq_bn": "adapter",
+            "seq_bn": "adapter",
+            "par_bn": "adapter",
+            "par_seq_bn": "adapter",
+            "houlsby": "adapter",
+            "pfeiffer": "adapter",
         }
         return aliases.get(normalized, normalized)
     train_method = _row_value(row, "train_method", "train_method_guess")
@@ -730,14 +743,18 @@ def _peft_eval_scope_for_method(method: str) -> str:
     normalized = normalized.replace("pefttype.", "")
     aliases = {
         "prefix_tuning": "prefix",
+        "double_seq_bn": "adapter",
+        "seq_bn": "adapter",
+        "par_bn": "adapter",
+        "par_seq_bn": "adapter",
+        "houlsby": "adapter",
+        "pfeiffer": "adapter",
     }
     normalized = aliases.get(normalized, normalized)
-    if normalized in {"lora", "ia3"}:
+    if normalized in {"lora", "ia3", "adapter"}:
         return "dager_eval"
     if normalized == "prefix":
         return "training_only"
-    if normalized == "adapter":
-        return "v2_planned"
     return "n/a" if not normalized else "unknown"
 
 
@@ -760,6 +777,20 @@ def _annotate_peft_eval_scope(row: dict) -> dict:
     if _is_missing_value(_row_value(row, "peft_eval_scope")):
         row["peft_eval_scope"] = _peft_eval_scope(row)
     return row
+
+
+def _adapter_reduction_factor(row: dict) -> str:
+    if _peft_method(row, "train_peft_method") != "adapter":
+        return "n/a"
+    for key, fallback in (
+        ("adapter_reduction_factor", "train_adapter_reduction_factor"),
+        ("peft_adapter_reduction_factor", "train_peft_adapter_reduction_factor"),
+        ("adapter_reduction_factor_guess", None),
+    ):
+        value = _row_value(row, key, fallback).strip()
+        if not _is_missing_value(value):
+            return value
+    return "16"
 
 
 def _rep_bottleneck_key(row: dict) -> tuple[str, str, str]:
@@ -796,7 +827,7 @@ def _normalized_lora_target_modules(
         train_method = _row_value(row, "train_method_guess", default="full")
     if train_method not in {"lora", "peft"}:
         return "n/a"
-    if _peft_method(row, "train_peft_method") == "prefix":
+    if _peft_method(row, "train_peft_method") in {"prefix", "adapter"}:
         return "n/a"
 
     value = _row_value(row, value_key, fallback_key).strip()
@@ -874,6 +905,7 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
             _peft_method(row, "train_peft_method"),
             row.get("lora_r", row.get("train_lora_r", "")),
             _normalized_lora_target_modules(row, fallback_key="train_lora_target_modules"),
+            _adapter_reduction_factor(row),
             *_rep_bottleneck_key(row),
             row.get("defense", row.get("train_defense", "none")),
             row.get("defense_param_name", ""),
@@ -890,6 +922,7 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
             peft_method,
             lora_r,
             lora_target_modules,
+            adapter_reduction_factor,
             rep_bottleneck_type,
             rep_keep_ratio,
             rep_dropout_p,
@@ -906,6 +939,7 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
             "peft_eval_scope": _peft_eval_scope(items[0]) if items else "n/a",
             "lora_r": lora_r,
             "lora_target_modules": lora_target_modules,
+            "adapter_reduction_factor": adapter_reduction_factor,
             "rep_bottleneck_type": rep_bottleneck_type,
             "rep_keep_ratio": rep_keep_ratio,
             "rep_dropout_p": rep_dropout_p,
@@ -960,6 +994,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             _peft_method(row),
             row.get("lora_r", row.get("lora_r_guess", "")),
             _normalized_lora_target_modules(row),
+            _adapter_reduction_factor(row),
             *_rep_bottleneck_key(row),
             _attack_surface(row),
             _gradient_layer_subset(row),
@@ -982,6 +1017,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             peft_method,
             lora_r,
             lora_target_modules,
+            adapter_reduction_factor,
             rep_bottleneck_type,
             rep_keep_ratio,
             rep_dropout_p,
@@ -1005,6 +1041,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             "peft_eval_scope": _peft_eval_scope(items[0]) if items else "n/a",
             "lora_r": lora_r,
             "lora_target_modules": lora_target_modules,
+            "adapter_reduction_factor": adapter_reduction_factor,
             "rep_bottleneck_type": rep_bottleneck_type,
             "rep_keep_ratio": rep_keep_ratio,
             "rep_dropout_p": rep_dropout_p,
@@ -1076,6 +1113,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("peft_method", ""),
             row.get("lora_r", ""),
             _normalized_lora_target_modules(row),
+            _adapter_reduction_factor(row),
             row.get("rep_bottleneck_type", "none"),
             row.get("rep_keep_ratio", "n/a"),
             row.get("rep_dropout_p", "n/a"),
@@ -1098,6 +1136,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("peft_method", ""),
             row.get("lora_r", ""),
             _normalized_lora_target_modules(row),
+            _adapter_reduction_factor(row),
             row.get("rep_bottleneck_type", "none"),
             row.get("rep_keep_ratio", "n/a"),
             row.get("rep_dropout_p", "n/a"),
@@ -1113,6 +1152,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         peft_method = utility.get("peft_method", "")
         lora_r = utility.get("lora_r", "")
         lora_target_modules = _normalized_lora_target_modules(utility)
+        adapter_reduction_factor = _adapter_reduction_factor(utility)
         rep_bottleneck_type, rep_keep_ratio, rep_dropout_p = _rep_bottleneck_key(utility)
 
         row = dict(utility)
@@ -1158,6 +1198,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
                     peft_method,
                     lora_r,
                     lora_target_modules,
+                    adapter_reduction_factor,
                     rep_bottleneck_type,
                     rep_keep_ratio,
                     rep_dropout_p,
@@ -1179,6 +1220,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         peft_method = utility.get("peft_method", "")
         lora_r = utility.get("lora_r", "")
         lora_target_modules = _normalized_lora_target_modules(utility)
+        adapter_reduction_factor = _adapter_reduction_factor(utility)
         rep_bottleneck_type, rep_keep_ratio, rep_dropout_p = _rep_bottleneck_key(utility)
         defense = utility.get("defense", "")
         param_value = utility.get("defense_param_value", "")
@@ -1189,6 +1231,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             peft_method,
             lora_r,
             lora_target_modules,
+            adapter_reduction_factor,
             rep_bottleneck_type,
             rep_keep_ratio,
             rep_dropout_p,
@@ -1196,7 +1239,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
         matching_attacks = [
             (key, attack)
             for key, attack in attack_index.items()
-            if key[:9] == base_key and key[15] == defense and key[16] == param_value
+            if key[:10] == base_key and key[16] == defense and key[17] == param_value
         ]
         if matching_attacks:
             for key, attack in sorted(matching_attacks):
@@ -1251,6 +1294,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("peft_method", ""),
             row.get("lora_r", ""),
             _normalized_lora_target_modules(row),
+            _adapter_reduction_factor(row),
             row.get("rep_bottleneck_type", "none"),
             row.get("rep_keep_ratio", "n/a"),
             row.get("rep_dropout_p", "n/a"),
@@ -1262,7 +1306,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
     for key, attack in sorted(attack_index.items()):
         if key in used_attack_keys:
             continue
-        utility = utility_index.get((*key[:9], key[15], key[16]))
+        utility = utility_index.get((*key[:10], key[16], key[17]))
         if utility is not None:
             out.append(make_tradeoff_row(utility, attack))
 

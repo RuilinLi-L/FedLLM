@@ -140,7 +140,7 @@ def test_prefix_scope_ignores_na_placeholders_when_metadata_is_available():
     assert_true(tradeoff[0]["peft_eval_scope"] == "training_only", "n/a scope placeholder should not hide prefix metadata")
 
 
-def test_adapter_scope_is_v2_planned_not_failed_privacy():
+def test_adapter_scope_is_supported_and_keeps_reduction_factor():
     rows = [
         {
             "log_kind": "train",
@@ -148,7 +148,8 @@ def test_adapter_scope_is_v2_planned_not_failed_privacy():
             "batch_size": "2",
             "train_method": "peft",
             "peft_method": "adapter",
-            "peft_eval_scope": "v2_planned",
+            "peft_eval_scope": "dager_eval",
+            "adapter_reduction_factor": "16",
             "lora_r": "n/a",
             "lora_target_modules": "n/a",
             "rep_bottleneck_type": "none",
@@ -162,13 +163,13 @@ def test_adapter_scope_is_v2_planned_not_failed_privacy():
         }
     ]
 
+    utility = build_utility_results(rows)
+    assert_true(utility[0]["peft_eval_scope"] == "dager_eval", "adapter utility should be in DAGER eval scope")
+    assert_true(utility[0]["adapter_reduction_factor"] == "16", "adapter reduction factor should be retained")
+
     tradeoff = build_privacy_utility_tradeoff(rows)
-    assert_true(tradeoff[0]["peft_eval_scope"] == "v2_planned", "adapter should keep v2 planned scope")
-    assert_true(tradeoff[0]["privacy_eval_status"] == "v2_planned", "adapter should not be a failed privacy run")
-    assert_true(
-        tradeoff[0]["privacy_eval_note"] == "not_in_v1_dager_partial_eval_scope",
-        "adapter should explain that it is outside the v1 eval matrix",
-    )
+    assert_true(tradeoff[0]["peft_eval_scope"] == "dager_eval", "adapter should keep DAGER eval scope")
+    assert_true(tradeoff[0].get("privacy_eval_status", "") == "", "missing adapter privacy row should remain empty, not v2 planned")
 
 
 def test_partial_attack_surfaces_do_not_mix_in_privacy_aggregation():
@@ -276,7 +277,7 @@ def main():
         test_prefix_scope_is_inferred_without_explicit_scope_field,
         test_prefix_scope_is_inferred_from_adapter_metadata,
         test_prefix_scope_ignores_na_placeholders_when_metadata_is_available,
-        test_adapter_scope_is_v2_planned_not_failed_privacy,
+        test_adapter_scope_is_supported_and_keeps_reduction_factor,
         test_partial_attack_surfaces_do_not_mix_in_privacy_aggregation,
         test_unsupported_partial_attack_status_is_preserved,
         test_adaptive_fallback_summary_stays_in_adaptive_group,

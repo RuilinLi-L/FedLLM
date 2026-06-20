@@ -173,6 +173,22 @@ def test_peft_gradient_slicing_uses_transformer_layer_ids():
     assert torch.allclose(sliced[0], torch.zeros_like(ia3_grads[0])), "IA3 layer 0 should be zeroed"
     assert torch.allclose(sliced[1], ia3_grads[1]), "IA3 layer 1 should remain"
 
+    adapter_names = [
+        "base_model.model.bert.encoder.layer.0.output.adapters.default.adapter_down.0.weight",
+        "base_model.model.bert.encoder.layer.1.output.adapters.default.adapter_up.weight",
+    ]
+    adapter_grads = (torch.randn(2, 3), torch.randn(3, 2))
+    sliced = DAGERDefense.gradient_slicing(
+        adapter_grads,
+        adapter_names,
+        model=None,
+        send_last_n_layers=1,
+        seed=42,
+        peft_layer_aware=True,
+    )
+    assert torch.allclose(sliced[0], torch.zeros_like(adapter_grads[0])), "Adapter layer 0 should be zeroed"
+    assert torch.allclose(sliced[1], adapter_grads[1]), "Adapter layer 1 should remain"
+
     print("[PASS] PEFT layer-aware gradient slicing test passed")
     return True
 

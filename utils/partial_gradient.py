@@ -324,6 +324,12 @@ def _param_filter_matches(name: str, param_filter: str) -> bool:
             or "ia3" in lower
             or "prompt_encoder" in lower
             or "prefix" in lower
+            or "adapter_down" in lower
+            or "adapter_up" in lower
+            or ".adapters." in lower
+            or ".adapter." in lower
+            or "down_proj" in lower
+            or "up_proj" in lower
         )
     if param_filter == "qkv_only":
         qkv_parts = (

@@ -33,7 +33,7 @@ def _peft_method(args) -> str:
 
 
 def _peft_dager_slicing_active(args) -> bool:
-    return _peft_active(args) and _peft_method(args) in {"lora", "ia3"}
+    return _peft_active(args) and _peft_method(args) in {"lora", "ia3", "adapter"}
 
 
 def _extract_transformer_layer_id(name: str) -> int | None:
@@ -54,7 +54,20 @@ def _is_peft_adapter_parameter(name: str) -> bool:
     lower = name.lower()
     if "modules_to_save" in lower:
         return False
-    return any(part in lower for part in ("lora_", "ia3", "ia3_l"))
+    return any(
+        part in lower
+        for part in (
+            "lora_",
+            "ia3",
+            "ia3_l",
+            "adapter_down",
+            "adapter_up",
+            ".adapters.",
+            ".adapter.",
+            "down_proj",
+            "up_proj",
+        )
+    )
 
 
 def _unwrap_model_for_embedding_lookup(model_wrapper):
