@@ -135,22 +135,22 @@ dager_set_param_values() {
       param_vals=( "" )
       ;;
     noise|dpsgd)
-      param_vals=( 1e-6 1e-5 1e-4 5e-4 1e-3 )
+      param_vals=( 1e-6 3e-6 1e-5 3e-5 1e-4 2e-4 3e-4 5e-4 7e-4 1e-3 2e-3 3e-3 5e-3 1e-2 )
       ;;
     topk)
-      param_vals=( 0.01 0.05 0.1 0.3 0.5 0.7 0.9 )
+      param_vals=( 0.01 0.05 0.10 0.20 0.30 0.40 0.50 0.60 0.70 0.80 0.90 0.95 0.97 0.98 0.99 )
       ;;
     compression)
-      param_vals=( 2 4 8 16 32 )
+      param_vals=( 2 4 8 12 16 17 18 19 20 21 22 23 24 25 26 27 28 30 32 36 40 44 48 56 64 )
       ;;
     soteria)
-      param_vals=( 10 30 50 70 90 )
+      param_vals=( 5 10 20 30 40 50 60 70 80 90 95 )
       ;;
     mixup)
-      param_vals=( 0.1 0.3 0.5 1.0 2.0 )
+      param_vals=( 0.05 0.10 0.20 0.30 0.50 0.70 1.0 1.5 2.0 3.0 5.0 )
       ;;
     lrb|lrbprojonly)
-      param_vals=( 0.05 0.1 0.2 0.35 0.5 )
+      param_vals=( 0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 0.95 0.96 0.97 0.98 0.99 )
       ;;
     signed_bottleneck)
       param_vals=( 0.9 0.95 0.99 )
