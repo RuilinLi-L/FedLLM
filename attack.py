@@ -745,7 +745,7 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
     if len(prediction) > len(reference):
         prediction = prediction[:len(reference)]
 
-    if model_wrapper.is_decoder() and peft_active(args) and len(prediction) == 0:
+    if len(prediction) == 0:
         return ['' for _ in reference], reference
 
     if model_wrapper.is_decoder():
