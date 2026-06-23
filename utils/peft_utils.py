@@ -534,16 +534,40 @@ def _require_adapter_backend():
     return adapterlib
 
 
+def _adapterhub_active(model) -> bool:
+    """Detect AdapterHub support, not the unrelated Transformers PEFT mixin."""
+
+    return all(hasattr(model, attr) for attr in ("add_adapter", "train_adapter", "save_adapter"))
+
+
 def _init_adapter_backend(model):
     backend = _require_adapter_backend()
-    if not hasattr(model, "add_adapter"):
+    if not _adapterhub_active(model):
         init_fn = getattr(backend, "init", None)
         if not callable(init_fn):
             raise ImportError("The installed `adapters` package does not expose adapters.init(model).")
-        init_fn(model)
-    if not hasattr(model, "add_adapter"):
-        raise ImportError("AdapterHub did not attach add_adapter() to this model instance.")
+        initialized = init_fn(model)
+        if initialized is not None:
+            model = initialized
+    if not _adapterhub_active(model):
+        raise ImportError(
+            "AdapterHub did not attach add_adapter/train_adapter/save_adapter to this model instance. "
+            "If Transformers exposes PeftAdapterMixin.add_adapter, adapters.init(model) is still required."
+        )
     return model
+
+
+def _add_adapter_compat(model, adapter_name: str, config) -> None:
+    add_adapter = getattr(model, "add_adapter", None)
+    if not callable(add_adapter):
+        raise ImportError("AdapterHub did not expose add_adapter() on this model instance.")
+    try:
+        add_adapter(adapter_name, config=config)
+    except TypeError as exc:
+        try:
+            add_adapter(adapter_name, config)
+        except TypeError:
+            raise exc
 
 
 def _build_houlsby_adapter_config(reduction_factor: int):
@@ -1107,7 +1131,7 @@ def apply_peft_adapter(
                 peft_num_virtual_tokens=None,
                 adapter_reduction_factor=resolved.adapter_reduction_factor,
             )
-            adapter_model.add_adapter(adapter_name, config=cfg)
+            _add_adapter_compat(adapter_model, adapter_name, cfg)
         _activate_adapter_for_training(adapter_model, adapter_name, task)
         setattr(adapter_model, "_fedllm_adapter_reduction_factor", resolved.adapter_reduction_factor)
         setattr(adapter_model, "_fedllm_adapter_architecture", ADAPTER_DEFAULT_ARCHITECTURE)
