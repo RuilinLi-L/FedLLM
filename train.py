@@ -8,9 +8,10 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
+from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import AdamW, get_scheduler
+from transformers import get_scheduler
 
 from utils.defense_common import (
     add_shared_defense_args,
