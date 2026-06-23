@@ -16,6 +16,15 @@ from attacks.peftleak_text import (
     select_peft_gradient_tensors,
     token_recovery_ratio,
 )
+from attacks.peftleak_text_ratio import (
+    MaliciousTextTokenAdapter,
+    TextRatioGradientResult,
+    TextRatioRoutingInfo,
+    TextTokenStatistics,
+    decode_ratio_recovery,
+    recover_hidden_slots_from_ratio_grads,
+    route_text_tokens,
+)
 
 
 def assert_true(condition, message):
@@ -145,6 +154,7 @@ def test_gradient_matching_loss_decreases_on_tiny_peft_model():
         peft_method="lora",
         steps=25,
         lr=0.15,
+        match_loss="mse",
     )
 
     history = result["loss_history"]
@@ -169,6 +179,8 @@ def test_gradient_matching_label_search_reports_search_mode():
         peft_method="lora",
         steps=6,
         lr=0.1,
+        restarts=2,
+        match_loss="normalized_mse",
         label_known=False,
         label_candidates=[0, 1],
     )
@@ -177,10 +189,94 @@ def test_gradient_matching_label_search_reports_search_mode():
     assert_true(result["best_label"] is not None, "label search should record the best candidate labels")
     assert_true(result["selected_gradient_count"] == 1, "adapter gradient count should be reported")
     assert_true(result["sequence_length"] == 3, "sequence length should be reported")
+    assert_true(result["restarts"] == 2, "gradient matching should report restart count")
+    assert_true(result["match_loss"] == "normalized_mse", "gradient matching should report match loss")
+
+
+def test_ratio_adapter_gradient_differences_recover_hidden_vector():
+    hidden = torch.tensor([[[0.25, -0.5, 1.25, 0.75]]], dtype=torch.float32)
+    adapter = MaliciousTextTokenAdapter(hidden_dim=4, slots=["s0_p0"], rows_per_slot=4, seed=11)
+    logits = adapter(hidden, [["s0_p0"]], num_labels=2)
+    loss = F.cross_entropy(logits, torch.tensor([1], dtype=torch.long))
+    grads = torch.autograd.grad(loss, adapter.parameters_for_grad(), allow_unused=True)
+    recovered = recover_hidden_slots_from_ratio_grads(grads, adapter.parameter_names())
+
+    assert_true("s0_p0" in recovered, "ratio recovery should produce the routed slot")
+    assert_true(
+        torch.allclose(recovered["s0_p0"], hidden[0, 0], atol=1e-5, rtol=1e-5),
+        f"ratio recovery should recover hidden vector, got {recovered['s0_p0']}",
+    )
+
+
+def test_ratio_decode_recovers_nearest_token_after_subtracting_position():
+    table = torch.tensor(
+        [
+            [0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    non_token = torch.tensor([[[0.2, -0.1, 0.3, 0.0]]], dtype=torch.float32)
+    hidden = table[1].view(1, 1, -1) + non_token
+    adapter = MaliciousTextTokenAdapter(hidden_dim=4, slots=["s0_p0"], rows_per_slot=4, seed=12)
+    logits = adapter(hidden, [["s0_p0"]], num_labels=2)
+    loss = F.cross_entropy(logits, torch.tensor([1], dtype=torch.long))
+    grads = torch.autograd.grad(loss, adapter.parameters_for_grad(), allow_unused=True)
+    routing = TextRatioRoutingInfo(
+        route="oracle",
+        slot_keys=[["s0_p0"]],
+        slot_counts={"s0_p0": 1},
+        routed_token_count=1,
+        colliding_token_count=0,
+        collision_rate=0.0,
+        reportable=False,
+    )
+    ratio_result = TextRatioGradientResult(
+        grads=tuple(None if grad is None else grad.detach() for grad in grads),
+        names=adapter.parameter_names(),
+        input_vectors=hidden.detach(),
+        non_token_vectors=non_token,
+        routing=routing,
+        logits=logits.detach(),
+        loss=float(loss.detach().item()),
+    )
+    decoded = decode_ratio_recovery(
+        ratio_result=ratio_result,
+        defended_grads=ratio_result.grads,
+        token_embedding_matrix=table,
+        batch={"input_ids": torch.tensor([[1]]), "attention_mask": torch.tensor([[1]])},
+        ignored_token_ids={0},
+        reference_mask=[[1]],
+    )
+
+    assert_true(decoded["predicted_ids"] == [[1]], f"decoded token should match reference: {decoded['predicted_ids']}")
+    assert_true(abs(decoded["rec_token_mean"] - 1.0) < 1e-8, "ratio decode should recover the token")
+    assert_true(decoded["reportable"] is False, "oracle ratio routing should be marked non-reportable")
+
+
+def test_public_bin_routing_reports_collisions_without_oracle():
+    vectors = torch.zeros(2, 2, 4)
+    batch = {"input_ids": torch.tensor([[1, 2], [3, 4]]), "attention_mask": torch.ones(2, 2, dtype=torch.long)}
+    stats = TextTokenStatistics(
+        mean=torch.zeros(4),
+        std=torch.ones(4),
+        bin_edges=torch.zeros(2, 1),
+        global_bin_edges=torch.zeros(1),
+        num_sequences=4,
+        num_tokens=8,
+        num_bins=2,
+        max_seq_len=2,
+    )
+    routing = route_text_tokens(vectors, batch, stats=stats, route="public_bins")
+
+    assert_true(routing.reportable, "public_bins routing should be reportable")
+    assert_true(routing.collision_rate > 0.0, "duplicate public bins should report collisions")
+    assert_true(all(not key.startswith("s0_") for key in routing.slot_counts), "public bins should not expose sample ids")
 
 
 def test_attack_entrypoint_policy_rejects_prefix_and_keeps_dager_unsupported():
-    from attack_peftleak import _validate_args, build_parser
+    from attack_peftleak import _init_tracker, _validate_args, build_parser
 
     parser = build_parser()
     prefix_args = parser.parse_args(
@@ -206,9 +302,31 @@ def test_attack_entrypoint_policy_rejects_prefix_and_keeps_dager_unsupported():
             "--n_inputs", "1",
             "--finetuned_path", "dummy",
             "--peft_method", "adapter",
+            "--peftleak_attack_mode", "both",
+            "--peftleak_restarts", "2",
+            "--peftleak_match_loss", "cosine",
         ]
     )
     assert_true(adapter_args.peft_method == "adapter", "adapter should be accepted as a PEFTLeak CLI choice")
+    assert_true(adapter_args.peftleak_attack_mode == "both", "attack mode should parse")
+    assert_true(adapter_args.peftleak_restarts == 2, "restart count should parse")
+    assert_true(adapter_args.peftleak_match_loss == "cosine", "match loss should parse")
+
+    lora_ratio_args = parser.parse_args(
+        [
+            "--dataset", "sst2",
+            "--split", "val",
+            "--n_inputs", "1",
+            "--finetuned_path", "dummy",
+            "--peft_method", "lora",
+            "--peftleak_attack_mode", "both",
+        ]
+    )
+    lora_ratio_tracker = _init_tracker(lora_ratio_args)
+    assert_true(
+        lora_ratio_tracker["attack_variant"] == "text_opt_ratio_unsupported_fallback",
+        "LoRA/IA3 ratio requests should be clearly marked as optimization fallback",
+    )
 
     dager_args = parser.parse_args(
         [
@@ -232,6 +350,9 @@ def main():
         test_token_recovery_ignores_padding_and_special_tokens,
         test_gradient_matching_loss_decreases_on_tiny_peft_model,
         test_gradient_matching_label_search_reports_search_mode,
+        test_ratio_adapter_gradient_differences_recover_hidden_vector,
+        test_ratio_decode_recovers_nearest_token_after_subtracting_position,
+        test_public_bin_routing_reports_collisions_without_oracle,
         test_attack_entrypoint_policy_rejects_prefix_and_keeps_dager_unsupported,
     ]
     for test in tests:

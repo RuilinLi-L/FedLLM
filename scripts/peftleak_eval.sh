@@ -1,7 +1,10 @@
 #!/bin/bash
-# Run one non-DAGER FedLLM PEFT text optimization attack.
+# Run one non-DAGER FedLLM PEFT text attack.
 # Usage:
 #   ./scripts/peftleak_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --peft_method lora|ia3|adapter --finetuned_path PATH [extra args...]
+# Examples:
+#   ./scripts/peftleak_eval.sh sst2 1 bert-base-uncased 2 --peft_method adapter --finetuned_path PATH --peftleak_attack_mode ratio
+#   ./scripts/peftleak_eval.sh sst2 1 gpt2 2 --peft_method adapter --finetuned_path PATH --peftleak_attack_mode both
 
 set -euo pipefail
 
@@ -13,6 +16,7 @@ if [ "$#" -lt 4 ]; then
   cat >&2 <<EOF
 [peftleak] Usage:
 [peftleak]   ./scripts/peftleak_eval.sh DATASET BATCH_SIZE MODEL_PATH N_INPUTS --peft_method lora|ia3|adapter --finetuned_path PATH [extra args...]
+[peftleak]   pass --peftleak_attack_mode opt|ratio|both to select optimization, structured ratio, or both.
 EOF
   exit 2
 fi

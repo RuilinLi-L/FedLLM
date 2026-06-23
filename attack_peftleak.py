@@ -9,13 +9,27 @@ import numpy as np
 import torch
 
 from attacks.peftleak_text import (
+    get_token_embedding_matrix,
     optimize_text_embeddings,
     select_peft_gradient_tensors,
     summarize_token_predictions,
 )
+from attacks.peftleak_text_ratio import (
+    build_text_ratio_gradients,
+    build_text_token_statistics,
+    decode_ratio_recovery,
+)
 from utils.defense_common import add_shared_defense_args, defense_param_spec, fmt_summary_value, safe_mean
-from utils.defenses import apply_defense, requires_gradient_generation_defense
+from utils.defenses import (
+    apply_defense,
+    dpsgd_defense,
+    gradient_compression,
+    noise_injection,
+    requires_gradient_generation_defense,
+    topk_sparsification,
+)
 from utils.gpu import resolve_cuda_device
+from utils.lrb_defense import apply_lrb_defense
 from utils.lrb_presets import apply_lrb_preset
 from utils.representation_bottleneck import rep_bottleneck_summary_fields, validate_rep_bottleneck_args
 
@@ -34,6 +48,7 @@ SUPPORTED_PEFTLEAK_TEXT_DEFENSES = {
     "lrbprojonly",
     "signed_bottleneck",
 }
+RATIO_DEFENSE_SEED_STRIDE = 1_000_003
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--peftleak_lr", type=float, default=0.1)
     parser.add_argument("--peftleak_tv_weight", type=float, default=0.0)
     parser.add_argument("--peftleak_entropy_weight", type=float, default=0.0)
+    parser.add_argument("--peftleak_restarts", type=int, default=1)
+    parser.add_argument("--peftleak_match_loss", type=str, default="normalized_mse", choices=["mse", "cosine", "normalized_mse"])
+    parser.add_argument("--peftleak_attack_mode", type=str, default="opt", choices=["opt", "ratio", "both"])
     parser.add_argument("--peftleak_label_search", action="store_true", default=False)
     parser.add_argument(
         "--peftleak_label_candidates",
@@ -85,16 +103,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional comma-separated classification labels for label search.",
     )
+    parser.add_argument("--peftleak_ratio_bins", type=int, default=8)
+    parser.add_argument("--peftleak_ratio_public_n_inputs", type=int, default=16)
+    parser.add_argument("--peftleak_ratio_route", type=str, default="public_bins", choices=["public_bins", "oracle"])
+    parser.add_argument("--peftleak_ratio_target", type=str, default="input_embedding", choices=["input_embedding"])
     add_shared_defense_args(parser, default_grad_mode="eval")
     return parser
 
 
 def _init_tracker(args):
     requested = max(0, min(args.n_inputs, args.end_input) - args.start_input)
+    attack_by_mode = {
+        "opt": ("fedllm_peft_text_opt", "text_opt"),
+        "ratio": ("fedllm_peft_text_ratio", "text_ratio"),
+        "both": ("fedllm_peft_text_both", "text_ratio_plus_opt"),
+    }
+    attack, variant = attack_by_mode.get(getattr(args, "peftleak_attack_mode", "opt"), attack_by_mode["opt"])
+    if getattr(args, "peftleak_attack_mode", "opt") in {"ratio", "both"} and getattr(args, "peft_method", None) != "adapter":
+        attack, variant = "fedllm_peft_text_opt", "text_opt_ratio_unsupported_fallback"
     return {
         "summary_emitted": False,
         "summary_version": 2,
         "result_status": "ok",
+        "attack": attack,
+        "attack_variant": variant,
         "n_inputs_requested": requested,
         "n_inputs_completed": 0,
         "last_input_idx": None,
@@ -102,8 +134,18 @@ def _init_tracker(args):
         "last_total_time": None,
         "last_rec_status": None,
         "rec_token_values": [],
+        "opt_rec_token_values": [],
+        "ratio_rec_token_values": [],
         "optimization_loss_values": [],
+        "ratio_loss_values": [],
         "aggregate_metrics": {},
+        "ratio_status": "n/a",
+        "ratio_collision_values": [],
+        "ratio_recovered_hidden_values": [],
+        "ratio_routed_token_values": [],
+        "ratio_slot_count_values": [],
+        "ratio_reportable": "n/a",
+        "ratio_non_reportable_reason": None,
         "error_type": None,
         "error_message": None,
     }
@@ -196,8 +238,8 @@ def _emit_result_summary(args, tracker):
     fields = [
         ("summary_version", tracker.get("summary_version", 2)),
         ("result_status", tracker.get("result_status", "ok")),
-        ("attack", "fedllm_peft_text_opt"),
-        ("attack_variant", "text_opt"),
+        ("attack", tracker.get("attack", "fedllm_peft_text_opt")),
+        ("attack_variant", tracker.get("attack_variant", "text_opt")),
         ("dataset", args.dataset),
         ("split", args.split),
         ("task", args.task),
@@ -230,8 +272,18 @@ def _emit_result_summary(args, tracker):
         *rep_bottleneck_summary_fields(args),
         ("peftleak_steps", args.peftleak_steps),
         ("peftleak_lr", args.peftleak_lr),
+        ("peftleak_restarts", args.peftleak_restarts),
+        ("peftleak_match_loss", args.peftleak_match_loss),
+        ("peftleak_attack_mode", args.peftleak_attack_mode),
         ("peftleak_label_search", args.peftleak_label_search),
         ("peftleak_label_mode", "search" if args.peftleak_label_search else "known"),
+        ("peftleak_ratio_bins", args.peftleak_ratio_bins),
+        ("peftleak_ratio_public_n_inputs", args.peftleak_ratio_public_n_inputs),
+        ("peftleak_ratio_route", args.peftleak_ratio_route),
+        ("peftleak_ratio_target", args.peftleak_ratio_target),
+        ("ratio_status", tracker.get("ratio_status")),
+        ("public_stats_source", tracker.get("public_stats_source")),
+        ("public_stats_n_inputs", tracker.get("public_stats_n_inputs")),
         ("n_inputs_requested", tracker.get("n_inputs_requested")),
         ("n_inputs_completed", tracker.get("n_inputs_completed")),
         ("last_input_idx", tracker.get("last_input_idx")),
@@ -239,7 +291,16 @@ def _emit_result_summary(args, tracker):
         ("last_total_time", tracker.get("last_total_time")),
         ("last_rec_status", tracker.get("last_rec_status")),
         ("rec_token_mean", safe_mean(tracker.get("rec_token_values", []))),
+        ("opt_rec_token_mean", safe_mean(tracker.get("opt_rec_token_values", []))),
+        ("ratio_rec_token_mean", safe_mean(tracker.get("ratio_rec_token_values", []))),
+        ("ratio_collision_rate", safe_mean(tracker.get("ratio_collision_values", []))),
+        ("ratio_recovered_hidden_count", safe_mean(tracker.get("ratio_recovered_hidden_values", []))),
+        ("ratio_routed_token_count", safe_mean(tracker.get("ratio_routed_token_values", []))),
+        ("ratio_slot_count", safe_mean(tracker.get("ratio_slot_count_values", []))),
+        ("ratio_reportable", tracker.get("ratio_reportable", "n/a")),
+        ("ratio_non_reportable_reason", tracker.get("ratio_non_reportable_reason")),
         ("optimization_loss_mean", safe_mean(tracker.get("optimization_loss_values", []))),
+        ("ratio_loss_mean", safe_mean(tracker.get("ratio_loss_values", []))),
         ("optimization_loss_first", tracker.get("optimization_loss_first")),
         ("optimization_loss_last", tracker.get("optimization_loss_last")),
         ("optimization_loss_reduction", tracker.get("optimization_loss_reduction")),
@@ -287,17 +348,80 @@ def _label_candidates(raw: str | None):
     return [int(part.strip()) for part in raw.split(",") if part.strip()]
 
 
-def reconstruct(args, sample, model_wrapper):
-    sequences, true_labels = sample
-    tokenizer = model_wrapper.tokenizer
-    orig_batch = tokenizer(
-        sequences,
-        padding=True,
-        truncation=True,
-        max_length=min(tokenizer.model_max_length, model_wrapper.emb_size - 20),
-        return_tensors="pt",
-    ).to(args.device)
+def _ignored_token_ids(tokenizer, model_wrapper) -> set[int | None]:
+    return {
+        getattr(model_wrapper, "pad_token", None),
+        getattr(tokenizer, "pad_token_id", None),
+        getattr(tokenizer, "eos_token_id", None),
+        getattr(tokenizer, "bos_token_id", None),
+        getattr(tokenizer, "cls_token_id", None),
+        getattr(tokenizer, "sep_token_id", None),
+    }
 
+
+def _ratio_defense_seed(args, *, stochastic: bool) -> int:
+    base_seed = int(getattr(args, "rng_seed", 0))
+    if not stochastic:
+        return base_seed
+    step = getattr(args, "defense_rng_step", None)
+    if step is None:
+        return base_seed
+    return base_seed + RATIO_DEFENSE_SEED_STRIDE * int(step)
+
+
+def _apply_ratio_random_mask(grads, pct_mask: float, *, seed: int):
+    out = []
+    for idx, grad in enumerate(grads):
+        if grad is None:
+            out.append(None)
+            continue
+        gen = torch.Generator(device=grad.device)
+        gen.manual_seed(int(seed) + 104729 * (idx + 1))
+        mask = (torch.rand(grad.shape, device=grad.device, dtype=grad.dtype, generator=gen) > pct_mask).float()
+        out.append(grad * mask)
+    return tuple(out)
+
+
+def _defend_ratio_gradient_tuple(args, raw_grads, names):
+    stochastic_main = (
+        args.defense in {"noise", "dpsgd", "compression"}
+        or (args.defense == "none" and getattr(args, "defense_noise", None) is not None)
+    )
+    stochastic_mask = getattr(args, "defense_pct_mask", None) is not None
+    fresh_seed = _ratio_defense_seed(args, stochastic=stochastic_main or stochastic_mask)
+    main_seed = fresh_seed if stochastic_main else int(getattr(args, "rng_seed", 0))
+
+    if args.defense == "dpsgd":
+        defended = dpsgd_defense(
+            [tuple(raw_grads)],
+            float(args.defense_clip_norm),
+            float(args.defense_noise or 0.0),
+            seed=main_seed,
+        )
+    elif args.defense == "none":
+        if getattr(args, "defense_noise", None) is not None:
+            defended = noise_injection(raw_grads, float(args.defense_noise), seed=main_seed)
+        else:
+            defended = raw_grads
+    elif args.defense == "noise":
+        defended = noise_injection(raw_grads, float(args.defense_noise or 0.0), seed=main_seed)
+    elif args.defense == "topk":
+        defended = topk_sparsification(raw_grads, float(args.defense_topk_ratio))
+    elif args.defense == "compression":
+        defended = gradient_compression(raw_grads, int(args.defense_n_bits), seed=main_seed)
+    elif args.defense in {"lrb", "lrbprojonly", "signed_bottleneck"}:
+        defended = apply_lrb_defense(raw_grads, args, layer_names=names)
+    elif args.defense in {"soteria", "mixup"}:
+        defended = raw_grads
+    else:
+        raise ValueError(f"Unsupported FedLLM PEFT text ratio defense: {args.defense!r}")
+
+    if getattr(args, "defense_pct_mask", None) is not None:
+        defended = _apply_ratio_random_mask(defended, float(args.defense_pct_mask), seed=fresh_seed)
+    return defended, names
+
+
+def _run_opt_attack(args, orig_batch, true_labels, model_wrapper, ignored_token_ids, reference_mask):
     if requires_gradient_generation_defense(args.defense):
         true_grads = apply_defense(None, args, model_wrapper=model_wrapper, batch=orig_batch, labels=true_labels)
     else:
@@ -312,16 +436,6 @@ def reconstruct(args, sample, model_wrapper):
     if not indices:
         raise ValueError("No visible LoRA/IA3/adapter gradients after defense; cannot run FedLLM PEFT text attack.")
 
-    attention_mask = orig_batch.get("attention_mask")
-    reference_mask = None if attention_mask is None else attention_mask.detach().cpu().tolist()
-    ignored_token_ids = {
-        getattr(model_wrapper, "pad_token", None),
-        getattr(tokenizer, "pad_token_id", None),
-        getattr(tokenizer, "eos_token_id", None),
-        getattr(tokenizer, "bos_token_id", None),
-        getattr(tokenizer, "cls_token_id", None),
-        getattr(tokenizer, "sep_token_id", None),
-    }
     attack_result = optimize_text_embeddings(
         model_wrapper=model_wrapper,
         batch=orig_batch,
@@ -333,14 +447,163 @@ def reconstruct(args, sample, model_wrapper):
         lr=args.peftleak_lr,
         tv_weight=args.peftleak_tv_weight,
         entropy_weight=args.peftleak_entropy_weight,
+        restarts=args.peftleak_restarts,
+        match_loss=args.peftleak_match_loss,
         label_known=not args.peftleak_label_search,
         label_candidates=_label_candidates(args.peftleak_label_candidates),
         ignored_token_ids=ignored_token_ids,
         reference_mask=reference_mask,
     )
-    predictions = summarize_token_predictions(attack_result["predicted_ids"], tokenizer)
+    predictions = summarize_token_predictions(attack_result["predicted_ids"], model_wrapper.tokenizer)
+    return predictions, attack_result, names
+
+
+def _run_ratio_attack(args, orig_batch, true_labels, model_wrapper, ratio_stats, ignored_token_ids, reference_mask):
+    ratio_gradients = build_text_ratio_gradients(
+        model_wrapper,
+        orig_batch,
+        true_labels,
+        stats=ratio_stats,
+        route=args.peftleak_ratio_route,
+        target=args.peftleak_ratio_target,
+        seed=int(args.rng_seed),
+    )
+    defended_grads, defended_names = _defend_ratio_gradient_tuple(args, ratio_gradients.grads, ratio_gradients.names)
+    attack_result = decode_ratio_recovery(
+        ratio_result=ratio_gradients,
+        defended_grads=defended_grads,
+        token_embedding_matrix=get_token_embedding_matrix(model_wrapper),
+        batch=orig_batch,
+        ignored_token_ids=ignored_token_ids,
+        reference_mask=reference_mask,
+    )
+    if attack_result.get("gradient_names") is None:
+        attack_result["gradient_names"] = defended_names
+    predictions = summarize_token_predictions(attack_result["predicted_ids"], model_wrapper.tokenizer)
+    return predictions, attack_result, defended_names
+
+
+def reconstruct(args, sample, model_wrapper, ratio_stats=None):
+    sequences, true_labels = sample
+    tokenizer = model_wrapper.tokenizer
+    orig_batch = tokenizer(
+        sequences,
+        padding=True,
+        truncation=True,
+        max_length=min(tokenizer.model_max_length, model_wrapper.emb_size - 20),
+        return_tensors="pt",
+    ).to(args.device)
+
+    attention_mask = orig_batch.get("attention_mask")
+    reference_mask = None if attention_mask is None else attention_mask.detach().cpu().tolist()
+    ignored_token_ids = _ignored_token_ids(tokenizer, model_wrapper)
     references = tokenizer.batch_decode(orig_batch["input_ids"].detach().cpu().tolist(), skip_special_tokens=True)
-    return predictions, references, attack_result, names
+
+    mode = args.peftleak_attack_mode
+    opt_result = None
+    opt_predictions = None
+    opt_names: list[str] = []
+    ratio_result = None
+    ratio_predictions = None
+    ratio_names: list[str] = []
+    ratio_status = "not_requested"
+
+    opt_requested = mode in {"opt", "both"} or (mode == "ratio" and args.peft_method != "adapter")
+    ratio_requested = mode in {"ratio", "both"}
+
+    if opt_requested:
+        opt_predictions, opt_result, opt_names = _run_opt_attack(
+            args,
+            orig_batch,
+            true_labels,
+            model_wrapper,
+            ignored_token_ids,
+            reference_mask,
+        )
+
+    if ratio_requested:
+        if args.peft_method != "adapter":
+            ratio_status = f"unsupported_for_{args.peft_method}_fallback_opt"
+        else:
+            ratio_predictions, ratio_result, ratio_names = _run_ratio_attack(
+                args,
+                orig_batch,
+                true_labels,
+                model_wrapper,
+                ratio_stats,
+                ignored_token_ids,
+                reference_mask,
+            )
+            ratio_status = "ok"
+
+    primary = "ratio" if ratio_result is not None and mode in {"ratio", "both"} else "opt"
+    if primary == "ratio":
+        predictions = ratio_predictions or []
+        selected_names = ratio_names
+        rec_token_mean = ratio_result["rec_token_mean"]
+    else:
+        predictions = opt_predictions or []
+        selected_names = opt_names
+        rec_token_mean = 0.0 if opt_result is None else opt_result["rec_token_mean"]
+
+    return {
+        "predictions": predictions,
+        "references": references,
+        "selected_names": selected_names,
+        "primary": primary,
+        "rec_token_mean": rec_token_mean,
+        "opt": opt_result,
+        "ratio": ratio_result,
+        "ratio_status": ratio_status,
+    }
+
+
+def _build_ratio_public_stats(args, model_wrapper, dataset_cls):
+    if args.peftleak_attack_mode not in {"ratio", "both"}:
+        return None, "not_requested", 0
+    if args.peft_method != "adapter":
+        return None, f"unsupported_for_{args.peft_method}", 0
+    if args.peftleak_ratio_route == "oracle":
+        return None, "oracle_debug_no_public_stats", 0
+
+    public_n = int(args.peftleak_ratio_public_n_inputs)
+    if public_n <= 0:
+        raise ValueError("--peftleak_ratio_public_n_inputs must be positive for public_bins routing.")
+
+    public_split = "test" if args.split != "test" else "val"
+    np_state = np.random.get_state()
+    try:
+        public_dataset = dataset_cls(
+            args.device,
+            args.dataset,
+            public_split,
+            public_n,
+            1,
+            args.cache_dir,
+        )
+    finally:
+        np.random.set_state(np_state)
+
+    public_batches = []
+    tokenizer = model_wrapper.tokenizer
+    for idx in range(public_n):
+        sequences, _labels = public_dataset[idx]
+        batch = tokenizer(
+            sequences,
+            padding=True,
+            truncation=True,
+            max_length=min(tokenizer.model_max_length, model_wrapper.emb_size - 20),
+            return_tensors="pt",
+        ).to(args.device)
+        public_batches.append(batch)
+
+    stats = build_text_token_statistics(
+        model_wrapper,
+        public_batches,
+        num_bins=args.peftleak_ratio_bins,
+        target=args.peftleak_ratio_target,
+    )
+    return stats, f"{public_split}_public_split", public_n
 
 
 def main(argv=None):
@@ -370,6 +633,9 @@ def main(argv=None):
     try:
         dataset = TextDataset(args.device, args.dataset, args.split, args.n_inputs, args.batch_size, args.cache_dir)
         model_wrapper = ModelWrapper(args)
+        ratio_stats, public_stats_source, public_stats_n_inputs = _build_ratio_public_stats(args, model_wrapper, TextDataset)
+        tracker["public_stats_source"] = public_stats_source
+        tracker["public_stats_n_inputs"] = public_stats_n_inputs
         predictions = []
         references = []
         for input_idx in range(args.start_input, min(args.n_inputs, args.end_input)):
@@ -377,30 +643,57 @@ def main(argv=None):
             args.defense_rng_step = tracker["n_inputs_completed"]
             sample = dataset[input_idx]
             print(f"[peftleak] Running input #{input_idx} of {args.n_inputs}.", flush=True)
-            pred, ref, attack_result, selected_names = reconstruct(args, sample, model_wrapper)
+            attack_result = reconstruct(args, sample, model_wrapper, ratio_stats=ratio_stats)
+            pred = attack_result["predictions"]
+            ref = attack_result["references"]
+            selected_names = attack_result["selected_names"]
             predictions.extend(pred)
             references.extend(ref)
             tracker["rec_token_values"].append(float(attack_result["rec_token_mean"]))
-            tracker["optimization_loss_values"].append(float(attack_result["loss"]))
-            tracker["optimization_loss_first"] = attack_result.get("initial_loss")
-            tracker["optimization_loss_last"] = attack_result.get("loss")
-            tracker["optimization_loss_reduction"] = attack_result.get("loss_reduction")
-            tracker["selected_adapter_gradient_count"] = attack_result.get("selected_gradient_count", len(selected_names))
+            tracker["ratio_status"] = attack_result.get("ratio_status", tracker.get("ratio_status"))
+            opt_result = attack_result.get("opt")
+            ratio_result = attack_result.get("ratio")
+            if opt_result is not None:
+                tracker["opt_rec_token_values"].append(float(opt_result["rec_token_mean"]))
+                tracker["optimization_loss_values"].append(float(opt_result["loss"]))
+                tracker["optimization_loss_first"] = opt_result.get("initial_loss")
+                tracker["optimization_loss_last"] = opt_result.get("loss")
+                tracker["optimization_loss_reduction"] = opt_result.get("loss_reduction")
+                tracker["sequence_length"] = opt_result.get("sequence_length")
+            if ratio_result is not None:
+                tracker["ratio_rec_token_values"].append(float(ratio_result["rec_token_mean"]))
+                tracker["ratio_loss_values"].append(float(ratio_result["loss"]))
+                tracker["ratio_collision_values"].append(float(ratio_result.get("collision_rate", 0.0)))
+                tracker["ratio_recovered_hidden_values"].append(float(ratio_result.get("recovered_hidden_count", 0)))
+                tracker["ratio_routed_token_values"].append(float(ratio_result.get("routed_token_count", 0)))
+                tracker["ratio_slot_count_values"].append(float(ratio_result.get("slot_count", 0)))
+                tracker["ratio_reportable"] = bool(ratio_result.get("reportable", False))
+                if not tracker["ratio_reportable"]:
+                    tracker["ratio_non_reportable_reason"] = f"{args.peftleak_ratio_route}_routing_debug_only"
+                tracker["sequence_length"] = len(ratio_result["predicted_ids"][0]) if ratio_result.get("predicted_ids") else None
+            if opt_result is not None:
+                selected_count = opt_result.get("selected_gradient_count", len(selected_names))
+            elif ratio_result is not None:
+                selected_count = ratio_result.get("gradient_count", len(selected_names))
+            else:
+                selected_count = len(selected_names)
+            tracker["selected_adapter_gradient_count"] = selected_count
             tracker["selected_adapter_gradient_names"] = ";".join(selected_names)
-            tracker["sequence_length"] = attack_result.get("sequence_length")
             tracker["last_rec_status"] = "ok"
             tracker["n_inputs_completed"] += 1
             tracker["last_input_idx"] = input_idx
             tracker["last_input_time"] = str(datetime.timedelta(seconds=time.time() - input_start)).split(".")[0]
             tracker["last_total_time"] = str(datetime.timedelta(seconds=time.time() - start_time)).split(".")[0]
             print(f"[peftleak] selected adapter gradients ({len(selected_names)}): {', '.join(selected_names[:6])}", flush=True)
-            initial_loss = attack_result.get("initial_loss")
-            loss_reduction = attack_result.get("loss_reduction")
+            primary = attack_result.get("primary")
+            initial_loss = None if opt_result is None else opt_result.get("initial_loss")
+            loss_reduction = None if opt_result is None else opt_result.get("loss_reduction")
             print(
-                f"[peftleak] loss={attack_result['loss']:.6f} "
+                f"[peftleak] primary={primary} "
                 f"initial_loss={initial_loss if initial_loss is not None else 'n/a'} "
                 f"loss_reduction={loss_reduction if loss_reduction is not None else 'n/a'} "
-                f"rec_token={attack_result['rec_token_mean']:.6f}",
+                f"rec_token={attack_result['rec_token_mean']:.6f} "
+                f"ratio_status={tracker['ratio_status']}",
                 flush=True,
             )
 

@@ -260,6 +260,8 @@ def optimize_text_embeddings(
     lr: float = 0.1,
     tv_weight: float = 0.0,
     entropy_weight: float = 0.0,
+    restarts: int = 1,
+    match_loss: str = "normalized_mse",
     label_known: bool = True,
     label_candidates: Sequence[int] | None = None,
     ignored_token_ids: Iterable[int] | None = None,
@@ -271,13 +273,6 @@ def optimize_text_embeddings(
     """
 
     device = batch["input_ids"].device
-    inputs_embeds = build_dummy_embedding_prior(
-        model_wrapper,
-        batch,
-        seed=int(getattr(model_wrapper.args, "rng_seed", 0)),
-    ).to(device=device)
-    dummy = torch.nn.Parameter(inputs_embeds.clone())
-
     target_vec, selected_indices, selected_names = build_target_gradient_vector(
         target_grads,
         parameter_names,
@@ -292,7 +287,33 @@ def optimize_text_embeddings(
     best_label = None
     loss_history: list[float] = []
 
-    def _loss_for_labels(candidate_labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _gradient_match_loss(grad: Sequence[torch.Tensor | None]) -> torch.Tensor:
+        if match_loss == "mse":
+            grad_vec, _, _ = build_target_gradient_vector(grad, parameter_names, peft_method, detach=False)
+            return F.mse_loss(grad_vec, target_vec)
+
+        losses: list[torch.Tensor] = []
+        for idx in selected_indices:
+            if idx >= len(grad) or idx >= len(target_grads):
+                continue
+            grad_tensor = grad[idx]
+            target_tensor = target_grads[idx]
+            if grad_tensor is None or target_tensor is None:
+                continue
+            candidate = _reduce_target_like(grad_tensor, detach=False).reshape(-1)
+            target = _reduce_target_like(target_tensor, detach=True).reshape(-1).to(device=device)
+            if match_loss == "normalized_mse":
+                denom = target.detach().float().pow(2).mean().clamp_min(1e-12)
+                losses.append(F.mse_loss(candidate, target) / denom.to(device=candidate.device, dtype=candidate.dtype))
+            elif match_loss == "cosine":
+                losses.append(1.0 - F.cosine_similarity(candidate.float(), target.float(), dim=0))
+            else:
+                raise ValueError("match_loss must be one of: mse, normalized_mse, cosine.")
+        if not losses:
+            raise ValueError("No PEFT adapter gradients were selected for matching.")
+        return torch.stack([loss.reshape(()) for loss in losses]).mean()
+
+    def _loss_for_labels(dummy: torch.nn.Parameter, candidate_labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         logits, representation = _sequence_logits_from_embeddings(model_wrapper, batch, dummy)
         loss = F.cross_entropy(logits, candidate_labels.view(-1).long())
         grad = torch.autograd.grad(
@@ -301,14 +322,13 @@ def optimize_text_embeddings(
             create_graph=True,
             allow_unused=True,
         )
-        grad_vec, _, _ = build_target_gradient_vector(grad, parameter_names, peft_method, detach=False)
-        match_loss = F.mse_loss(grad_vec, target_vec)
+        grad_loss = _gradient_match_loss(grad)
         tv_loss = dummy[:, 1:, :].sub(dummy[:, :-1, :]).abs().mean() if dummy.shape[1] > 1 else dummy.new_tensor(0.0)
         entropy = torch.tensor(0.0, device=device)
         if entropy_weight > 0:
             probs = logits.softmax(dim=-1)
             entropy = -(probs * probs.clamp_min(1e-12).log()).sum(dim=-1).mean()
-        total = match_loss + tv_weight * tv_loss - entropy_weight * entropy
+        total = grad_loss + tv_weight * tv_loss - entropy_weight * entropy
         return total, logits, representation
 
     candidate_label_values: list[int]
@@ -325,36 +345,43 @@ def optimize_text_embeddings(
     else:
         candidate_assignments = [assignment.to(device) for assignment in _iter_label_assignments(batch["input_ids"].shape[0], candidate_label_values)]
 
-    for candidate_labels in candidate_assignments:
-        dummy.data.copy_(inputs_embeds)
-        optimizer = torch.optim.Adam([dummy], lr=lr)
-        for _ in range(max(1, int(steps))):
-            optimizer.zero_grad(set_to_none=True)
-            total, logits, _ = _loss_for_labels(candidate_labels)
-            total.backward()
-            optimizer.step()
-            current_loss = float(total.detach().item())
-            loss_history.append(current_loss)
-            if current_loss < best_loss:
-                best_loss = current_loss
-                logits_shape = logits.shape
-                best_label = candidate_labels.detach().cpu().tolist()
-                best_logits = logits.detach()
-                best_representation = _sequence_logits_from_embeddings(model_wrapper, batch, dummy)[1].detach()
-                token_matrix = get_token_embedding_matrix(model_wrapper)
-                sample_ids = []
-                sample_scores = []
-                for sample_idx in range(dummy.shape[0]):
-                    token_ids, token_scores = nearest_token_ids(
-                        dummy.detach()[sample_idx],
-                        token_matrix,
-                        unused_token_ids=ignored_token_ids,
-                        metric="cos",
-                    )
-                    sample_ids.append(token_ids.tolist())
-                    sample_scores.append(token_scores.tolist())
-                best_ids = sample_ids
-                best_scores = sample_scores
+    base_seed = int(getattr(model_wrapper.args, "rng_seed", 0))
+    for assignment_idx, candidate_labels in enumerate(candidate_assignments):
+        for restart_idx in range(max(1, int(restarts))):
+            inputs_embeds = build_dummy_embedding_prior(
+                model_wrapper,
+                batch,
+                seed=base_seed + assignment_idx * 9176 + restart_idx * 1009,
+            ).to(device=device)
+            dummy = torch.nn.Parameter(inputs_embeds.clone())
+            optimizer = torch.optim.Adam([dummy], lr=lr)
+            for _ in range(max(1, int(steps))):
+                optimizer.zero_grad(set_to_none=True)
+                total, logits, _ = _loss_for_labels(dummy, candidate_labels)
+                total.backward()
+                optimizer.step()
+                current_loss = float(total.detach().item())
+                loss_history.append(current_loss)
+                if current_loss < best_loss:
+                    best_loss = current_loss
+                    logits_shape = logits.shape
+                    best_label = candidate_labels.detach().cpu().tolist()
+                    best_logits = logits.detach()
+                    best_representation = _sequence_logits_from_embeddings(model_wrapper, batch, dummy)[1].detach()
+                    token_matrix = get_token_embedding_matrix(model_wrapper)
+                    sample_ids = []
+                    sample_scores = []
+                    for sample_idx in range(dummy.shape[0]):
+                        token_ids, token_scores = nearest_token_ids(
+                            dummy.detach()[sample_idx],
+                            token_matrix,
+                            unused_token_ids=ignored_token_ids,
+                            metric="cos",
+                        )
+                        sample_ids.append(token_ids.tolist())
+                        sample_scores.append(token_scores.tolist())
+                    best_ids = sample_ids
+                    best_scores = sample_scores
 
     if best_ids is None or best_scores is None:
         raise RuntimeError("Gradient matching failed to produce candidate tokens.")
@@ -382,6 +409,8 @@ def optimize_text_embeddings(
         "selected_gradient_count": len(selected_names),
         "sequence_length": int(batch["input_ids"].shape[1]),
         "label_mode": "known" if label_known else "search",
+        "restarts": int(max(1, int(restarts))),
+        "match_loss": match_loss,
         "rec_token_mean": rec_token_mean,
         "best_logits": best_logits.detach().cpu() if 'best_logits' in locals() else None,
         "best_representation": best_representation.detach().cpu() if 'best_representation' in locals() else None,

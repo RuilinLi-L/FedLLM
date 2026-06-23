@@ -1,5 +1,9 @@
 #!/bin/bash
 # Sweep FedLLM PEFT text defenses. DAGER is intentionally unsupported in the main matrix.
+# Default remains the optimization attack. For Adapter PEFTLeak-style text ratio smoke, append:
+#   --peft_method adapter --finetuned_path PATH --peftleak_attack_mode ratio
+# or compare both attacks with:
+#   --peft_method adapter --finetuned_path PATH --peftleak_attack_mode both
 
 set -euo pipefail
 
