@@ -23,7 +23,9 @@ def add_partial_forward_gpt2(model:GPT2Model) -> None:
         layer_indices: Optional[List[int]] = None,
     ) -> List[torch.FloatTensor]:
         output_attentions = self.config.output_attentions
-        use_cache = self.config.use_cache
+        # This helper returns only hidden states. Cache tensors are not used, and
+        # some attention implementations omit them even when config.use_cache is true.
+        use_cache = False
         requested_layers = None
         max_requested_layer = n_layers
         if layer_indices is not None:
