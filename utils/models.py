@@ -1,6 +1,8 @@
+import json
 import os
 import re
 from contextlib import contextmanager
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -24,11 +26,40 @@ from utils.partial_gradient import (
     supports_nonprefix_dager,
     update_dager_candidate_summary,
 )
-from utils.peft_utils import apply_peft_adapter, normalize_peft_method_name, peft_active
+from utils.peft_utils import PEFT_METADATA_FILE, apply_peft_adapter, normalize_peft_method_name, peft_active
 from utils.representation_bottleneck import apply_representation_bottleneck, rep_bottleneck_active
 from constants import config
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
 from utils.functional import get_layer_decomp
+
+def _append_unique(items, value):
+    if value is None:
+        return
+    value = str(value)
+    if value and value not in items:
+        items.append(value)
+
+
+def _peft_tokenizer_sources(args):
+    sources = []
+    explicit_tokenizer = getattr(args, "tokenizer_path", None)
+    _append_unique(sources, explicit_tokenizer)
+
+    finetuned_path = getattr(args, "finetuned_path", None)
+    if finetuned_path is not None:
+        adapter_dir = Path(finetuned_path).expanduser()
+        metadata_path = adapter_dir / PEFT_METADATA_FILE
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
+        _append_unique(sources, metadata.get("tokenizer_path"))
+        _append_unique(sources, adapter_dir.parent / f"{adapter_dir.name}_tokenizer")
+        _append_unique(sources, finetuned_path)
+
+    _append_unique(sources, getattr(args, "model_path", None))
+    return sources
+
 
 def _peft_transformer_layer_id(name):
     lower = name.lower()
@@ -240,18 +271,14 @@ class ModelWrapper():
         tokenizer_kwargs = {"use_fast": True, "cache_dir": args.cache_dir}
         if access_token:
             tokenizer_kwargs["token"] = access_token
-        tokenizer_sources = []
-        if args.finetuned_path is not None:
-            tokenizer_sources.append(args.finetuned_path)
-        if args.model_path not in tokenizer_sources:
-            tokenizer_sources.append(args.model_path)
+        tokenizer_sources = _peft_tokenizer_sources(args)
 
         last_tokenizer_error = None
         for tokenizer_source in tokenizer_sources:
             try:
                 self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, **tokenizer_kwargs)
                 break
-            except OSError as exc:
+            except (OSError, ValueError, TypeError) as exc:
                 last_tokenizer_error = exc
         else:
             attempted = ", ".join(repr(source) for source in tokenizer_sources)
