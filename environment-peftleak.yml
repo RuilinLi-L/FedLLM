@@ -1,4 +1,4 @@
-name: fedllm-dager
+name: fedllm-peftleak
 channels:
   - pytorch
   - nvidia
@@ -19,14 +19,15 @@ dependencies:
   - pyyaml=6.0
   - requests=2.31
   - pip:
-      # DAGER depends on GPT-2 internals; keep Transformers pinned well
-      # below 4.57, whose GPT-2 block output shape breaks old partial
-      # forward assumptions.
+      # Keep the PEFT/AdapterHub stack pinned so installing adapters does
+      # not silently upgrade Transformers into the DAGER-incompatible 4.57+
+      # line.
       - transformers==4.45.1
       - tokenizers==0.20.0
       - datasets==2.19.0
       - accelerate==0.34.2
       - peft==0.13.0
+      - adapters==1.0.1
       - huggingface-hub==0.25.1
       - safetensors==0.4.5
       - rouge-score==0.1.2
