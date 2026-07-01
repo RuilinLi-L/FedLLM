@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache_dir", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--device_grad", type=str, default="cpu")
-    parser.add_argument("--attn_implementation", type=str, default="sdpa", choices=["sdpa", "eager"])
+    parser.add_argument("--attn_implementation", type=str, default="eager", choices=["sdpa", "eager"])
     parser.add_argument("--precision", type=str, default="full", choices=["8bit", "half", "full", "double"])
     parser.add_argument("--pad", choices=["right", "left"], default="right")
     parser.add_argument("--grad_b", type=int, default=None)
@@ -323,12 +323,25 @@ def _emit_result_summary(args, tracker):
 
 
 def _validate_args(args):
-    from utils.peft_utils import apply_peft_config_to_args, normalize_peft_args
+    if getattr(args, "train_method", "peft") == "lora":
+        args.train_method = "peft"
+        args.peft_method = "lora"
+    else:
+        args.train_method = "peft"
+        args.peft_method = str(getattr(args, "peft_method", "lora") or "lora").strip().lower().replace("-", "_")
 
-    normalize_peft_args(args)
-    args.train_method = "peft"
     if args.peft_method not in {"lora", "ia3", "adapter"}:
         raise NotImplementedError("FedLLM PEFT text supports --peft_method lora|ia3|adapter; prefix is training-only.")
+    if (
+        getattr(args, "peftleak_attack_mode", "opt") in {"opt", "both"}
+        and getattr(args, "attn_implementation", None) == "sdpa"
+    ):
+        print(
+            "[peftleak] Switching --attn_implementation sdpa -> eager for opt/both: "
+            "the optimization attack needs second-order gradients, which PyTorch SDPA efficient attention does not support.",
+            flush=True,
+        )
+        args.attn_implementation = "eager"
     if args.defense == "dager":
         return args
     if args.defense not in SUPPORTED_PEFTLEAK_TEXT_DEFENSES:
@@ -337,6 +350,15 @@ def _validate_args(args):
         )
     apply_lrb_preset(args)
     validate_rep_bottleneck_args(args)
+    try:
+        from utils.peft_utils import apply_peft_config_to_args
+    except ModuleNotFoundError as exc:
+        if exc.name == "peft":
+            raise ModuleNotFoundError(
+                "FedLLM PEFT text attacks require the PEFT runtime. "
+                "Create/activate the environment from environment-peftleak.yml before running reportable attacks."
+            ) from exc
+        raise
     apply_peft_config_to_args(args, require_checkpoint=True)
     apply_lrb_preset(args)
     return args

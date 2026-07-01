@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -279,6 +279,19 @@ def test_attack_entrypoint_policy_rejects_prefix_and_keeps_dager_unsupported():
     from attack_peftleak import _init_tracker, _validate_args, build_parser
 
     parser = build_parser()
+    default_args = parser.parse_args(
+        [
+            "--dataset", "sst2",
+            "--split", "val",
+            "--n_inputs", "1",
+            "--finetuned_path", "dummy",
+        ]
+    )
+    assert_true(
+        default_args.attn_implementation == "eager",
+        "PEFTLeak opt default should use eager attention for second-order gradient compatibility",
+    )
+
     prefix_args = parser.parse_args(
         [
             "--dataset", "sst2",
@@ -311,6 +324,67 @@ def test_attack_entrypoint_policy_rejects_prefix_and_keeps_dager_unsupported():
     assert_true(adapter_args.peftleak_attack_mode == "both", "attack mode should parse")
     assert_true(adapter_args.peftleak_restarts == 2, "restart count should parse")
     assert_true(adapter_args.peftleak_match_loss == "cosine", "match loss should parse")
+
+    previous_peft_utils = sys.modules.get("utils.peft_utils")
+    fake_peft_utils = ModuleType("utils.peft_utils")
+    fake_peft_utils.apply_peft_config_to_args = lambda args, require_checkpoint=True: args
+    sys.modules["utils.peft_utils"] = fake_peft_utils
+    try:
+        opt_sdpa_args = parser.parse_args(
+            [
+                "--dataset", "sst2",
+                "--split", "val",
+                "--n_inputs", "1",
+                "--finetuned_path", "dummy",
+                "--peft_method", "lora",
+                "--peftleak_attack_mode", "opt",
+                "--attn_implementation", "sdpa",
+            ]
+        )
+        _validate_args(opt_sdpa_args)
+        assert_true(
+            opt_sdpa_args.attn_implementation == "eager",
+            "opt attack should force eager attention when sdpa is requested",
+        )
+
+        both_sdpa_args = parser.parse_args(
+            [
+                "--dataset", "sst2",
+                "--split", "val",
+                "--n_inputs", "1",
+                "--finetuned_path", "dummy",
+                "--peft_method", "adapter",
+                "--peftleak_attack_mode", "both",
+                "--attn_implementation", "sdpa",
+            ]
+        )
+        _validate_args(both_sdpa_args)
+        assert_true(
+            both_sdpa_args.attn_implementation == "eager",
+            "both attack should force eager attention because it includes optimization matching",
+        )
+
+        ratio_sdpa_args = parser.parse_args(
+            [
+                "--dataset", "sst2",
+                "--split", "val",
+                "--n_inputs", "1",
+                "--finetuned_path", "dummy",
+                "--peft_method", "adapter",
+                "--peftleak_attack_mode", "ratio",
+                "--attn_implementation", "sdpa",
+            ]
+        )
+        _validate_args(ratio_sdpa_args)
+        assert_true(
+            ratio_sdpa_args.attn_implementation == "sdpa",
+            "ratio-only attack should preserve explicitly requested sdpa attention",
+        )
+    finally:
+        if previous_peft_utils is None:
+            sys.modules.pop("utils.peft_utils", None)
+        else:
+            sys.modules["utils.peft_utils"] = previous_peft_utils
 
     lora_ratio_args = parser.parse_args(
         [
