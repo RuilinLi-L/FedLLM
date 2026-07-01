@@ -46,6 +46,10 @@ class TextRatioGradientResult:
     loss: float
 
 
+class RatioRecoveryDegenerateError(ValueError):
+    """Raised when a ratio slot has no usable bias-gradient denominator."""
+
+
 _SLOT_RE = re.compile(r"text_ratio_adapter\.slot_(.+)\.(weight|bias)$")
 
 
@@ -348,7 +352,9 @@ def recover_hidden_from_ratio_pair(
         if bool(denom.detach().abs() > eps):
             candidates.append((weight_grad[row] - weight_grad[row + 1]).float() / denom.float())
     if not candidates:
-        raise ValueError("No nonzero adjacent bias-gradient differences were available for ratio recovery.")
+        raise RatioRecoveryDegenerateError(
+            "No nonzero adjacent bias-gradient differences were available for ratio recovery."
+        )
     stacked = torch.stack(candidates, dim=0)
     if aggregation == "median":
         return stacked.median(dim=0).values
@@ -377,12 +383,15 @@ def recover_hidden_slots_from_ratio_grads(
     for slot, pair in pairs.items():
         if "weight" not in pair or "bias" not in pair:
             continue
-        recovered[slot] = recover_hidden_from_ratio_pair(
-            pair["weight"],
-            pair["bias"],
-            eps=eps,
-            aggregation=aggregation,
-        )
+        try:
+            recovered[slot] = recover_hidden_from_ratio_pair(
+                pair["weight"],
+                pair["bias"],
+                eps=eps,
+                aggregation=aggregation,
+            )
+        except RatioRecoveryDegenerateError:
+            continue
     return recovered
 
 

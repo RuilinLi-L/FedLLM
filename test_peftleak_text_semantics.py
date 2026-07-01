@@ -255,6 +255,58 @@ def test_ratio_decode_recovers_nearest_token_after_subtracting_position():
     assert_true(decoded["reportable"] is False, "oracle ratio routing should be marked non-reportable")
 
 
+def test_ratio_decode_skips_degenerate_gradient_slots_without_aborting():
+    table = torch.tensor(
+        [
+            [0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    grads = (
+        torch.zeros(4, 4),
+        torch.ones(4),
+    )
+    names = [
+        "text_ratio_adapter.slot_p0_b0.weight",
+        "text_ratio_adapter.slot_p0_b0.bias",
+    ]
+    recovered = recover_hidden_slots_from_ratio_grads(grads, names)
+    assert_true(recovered == {}, "degenerate ratio slots should be skipped instead of aborting recovery")
+
+    routing = TextRatioRoutingInfo(
+        route="public_bins",
+        slot_keys=[["p0_b0"]],
+        slot_counts={"p0_b0": 1},
+        routed_token_count=1,
+        colliding_token_count=0,
+        collision_rate=0.0,
+        reportable=True,
+    )
+    ratio_result = TextRatioGradientResult(
+        grads=grads,
+        names=names,
+        input_vectors=table[1].view(1, 1, -1),
+        non_token_vectors=torch.zeros(1, 1, 4),
+        routing=routing,
+        logits=torch.zeros(1, 2),
+        loss=0.0,
+    )
+    decoded = decode_ratio_recovery(
+        ratio_result=ratio_result,
+        defended_grads=ratio_result.grads,
+        token_embedding_matrix=table,
+        batch={"input_ids": torch.tensor([[1]]), "attention_mask": torch.tensor([[1]])},
+        ignored_token_ids={0},
+        reference_mask=[[1]],
+    )
+
+    assert_true(decoded["predicted_ids"] == [[0]], "unrecovered slots should use the pad fallback token")
+    assert_true(decoded["rec_token_mean"] == 0.0, "unrecovered routed tokens should count as failed recovery")
+    assert_true(decoded["recovered_hidden_count"] == 0, "degenerate slots should not count as recovered hidden states")
+    assert_true(decoded["recovered_slot_count"] == 0, "degenerate slots should not count as recovered slots")
+
+
 def test_public_bin_routing_reports_collisions_without_oracle():
     vectors = torch.zeros(2, 2, 4)
     batch = {"input_ids": torch.tensor([[1, 2], [3, 4]]), "attention_mask": torch.ones(2, 2, dtype=torch.long)}
@@ -426,6 +478,7 @@ def main():
         test_gradient_matching_label_search_reports_search_mode,
         test_ratio_adapter_gradient_differences_recover_hidden_vector,
         test_ratio_decode_recovers_nearest_token_after_subtracting_position,
+        test_ratio_decode_skips_degenerate_gradient_slots_without_aborting,
         test_public_bin_routing_reports_collisions_without_oracle,
         test_attack_entrypoint_policy_rejects_prefix_and_keeps_dager_unsupported,
     ]
