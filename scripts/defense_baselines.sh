@@ -387,12 +387,13 @@ run_variant() {
     def_file="${run_dir}/${log_base}.txt"
     {
       echo "===== VARIANT START defense=${defense} param=${param:-n/a} dataset=${DATASET} batch=${BATCH} model=$(basename "$MODEL") start=${t_start} ====="
-      printf '%s\n' "$summary_block"
-      echo "===== VARIANT END end=${t_end} exit_code=${rc} ====="
-      if [ "$rc" -ne 0 ]; then
-        echo "--- last 25 lines from run output ---"
-        tail -n 25 "$tmpfile"
+      if ! dager_has_result_summary "$tmpfile"; then
+        printf '%s\n' "$summary_block"
       fi
+      echo "===== RAW ATTACK OUTPUT START ====="
+      cat "$tmpfile"
+      echo "===== RAW ATTACK OUTPUT END ====="
+      echo "===== VARIANT END end=${t_end} exit_code=${rc} ====="
     } >"$def_file"
 
     {
@@ -402,7 +403,7 @@ run_variant() {
     } >>"${summary_path}"
 
     variant_files+=( "$def_file" )
-    echo "[dager] Wrote variant summary: ${def_file}" >&2
+    echo "[dager] Wrote variant log: ${def_file}" >&2
     rm -f "$tmpfile"
   else
     "${BASE[@]}" --defense "$defense" "${def_extra[@]}" "${EXTRA[@]}"

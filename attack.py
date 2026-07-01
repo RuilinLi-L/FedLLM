@@ -55,6 +55,41 @@ def _safe_mean(values):
     return float(np.mean(values))
 
 
+def _safe_stat_values(values):
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    return arr
+
+
+def _sequence_stats(values):
+    arr = _safe_stat_values(values)
+    if arr is None:
+        return {
+            'count': 0,
+            'mean': None,
+            'std': None,
+            'var': None,
+            'min': None,
+            'p25': None,
+            'median': None,
+            'p75': None,
+            'max': None,
+        }
+    return {
+        'count': int(arr.size),
+        'mean': float(np.mean(arr)),
+        'std': float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0,
+        'var': float(np.var(arr, ddof=1)) if arr.size > 1 else 0.0,
+        'min': float(np.min(arr)),
+        'p25': float(np.percentile(arr, 25)),
+        'median': float(np.percentile(arr, 50)),
+        'p75': float(np.percentile(arr, 75)),
+        'max': float(np.max(arr)),
+    }
+
+
 def _fmt_summary_value(value):
     if value is None:
         return 'n/a'
@@ -69,7 +104,7 @@ def _init_result_tracker(args):
     requested = max(0, min(args.n_inputs, args.end_input) - args.start_input)
     return {
         'summary_emitted': False,
-        'summary_version': 2,
+        'summary_version': 3,
         'result_status': 'ok',
         'n_inputs_requested': requested,
         'n_inputs_completed': 0,
@@ -82,6 +117,7 @@ def _init_result_tracker(args):
         'rec_l2_mean_values': [],
         'rec_token_values': [],
         'rec_maxb_token_values': [],
+        'input_metric_values': {},
         'aggregate_metrics': {},
         'error_type': None,
         'error_message': None,
@@ -98,6 +134,21 @@ def _record_rec_metrics(args, rec_status, rec_l1, rec_l1_maxB, rec_l2, rec_maxb_
     tracker['rec_l2_mean_values'].append(float(np.mean(np.asarray(rec_l2, dtype=float))))
     tracker['rec_token_values'].append(float(rec_token))
     tracker['rec_maxb_token_values'].append(float(rec_maxb_token))
+
+
+def _record_input_metric_summary(args, summary):
+    tracker = getattr(args, 'result_tracker', None)
+    if tracker is None:
+        return
+    values = tracker.setdefault('input_metric_values', {})
+    for metric in SUMMARY_METRICS:
+        for stat in ('fm', 'p', 'r'):
+            source_key = f'agg_{metric}_{stat}'
+            target_key = f'input_{metric}_{stat}'
+            if source_key in summary:
+                values.setdefault(target_key, []).append(float(summary[source_key]))
+    if 'agg_r1fm_r2fm' in summary:
+        values.setdefault('input_r1fm_r2fm', []).append(float(summary['agg_r1fm_r2fm']))
 
 
 def _defense_param_spec(args):
@@ -140,6 +191,61 @@ def _metric_summary(res):
         summary[f'agg_{metric}_r'] = curr.recall * 100
     summary['agg_r1fm_r2fm'] = (res['rouge1'].mid.fmeasure + res['rouge2'].mid.fmeasure) * 100
     return summary
+
+
+def _all_sequence_stat_fields(args):
+    tracker = getattr(args, 'result_tracker', None)
+    if tracker is None:
+        return []
+    sequences = {
+        'rec_l1': tracker.get('rec_l1_mean_values', []),
+        'rec_l1_maxb': tracker.get('rec_l1_maxb_mean_values', []),
+        'rec_l2': tracker.get('rec_l2_mean_values', []),
+        'rec_token': tracker.get('rec_token_values', []),
+        'rec_maxb_token': tracker.get('rec_maxb_token_values', []),
+    }
+    sequences.update(tracker.get('input_metric_values', {}))
+    fields = []
+    for name in sorted(sequences):
+        stats = _sequence_stats(sequences[name])
+        for stat_name in ('count', 'mean', 'std', 'var', 'min', 'p25', 'median', 'p75', 'max'):
+            if name in ('rec_l1', 'rec_l1_maxb', 'rec_l2', 'rec_token', 'rec_maxb_token') and stat_name == 'mean':
+                continue
+            fields.append((f'{name}_{stat_name}', stats[stat_name]))
+    return fields
+
+
+def _print_sequence_stats_table(args):
+    tracker = getattr(args, 'result_tracker', None)
+    if tracker is None:
+        return
+    sequences = {
+        'rec_l1': tracker.get('rec_l1_mean_values', []),
+        'rec_l1_maxb': tracker.get('rec_l1_maxb_mean_values', []),
+        'rec_l2': tracker.get('rec_l2_mean_values', []),
+        'rec_token': tracker.get('rec_token_values', []),
+        'rec_maxb_token': tracker.get('rec_maxb_token_values', []),
+    }
+    sequences.update(tracker.get('input_metric_values', {}))
+    print('[Per-input metric statistics]:', flush=True)
+    print(
+        f'{"metric":24} | {"count":>5} | {"mean":>10} | {"std":>10} | {"var":>10} | '
+        f'{"min":>10} | {"p25":>10} | {"median":>10} | {"p75":>10} | {"max":>10}',
+        flush=True,
+    )
+    for name in sorted(sequences):
+        stats = _sequence_stats(sequences[name])
+        if stats['count'] == 0:
+            print(f'{name:24} | {0:5d} | n/a', flush=True)
+            continue
+        print(
+            f'{name:24} | {stats["count"]:5d} | '
+            f'{stats["mean"]:10.6f} | {stats["std"]:10.6f} | {stats["var"]:10.6f} | '
+            f'{stats["min"]:10.6f} | {stats["p25"]:10.6f} | {stats["median"]:10.6f} | '
+            f'{stats["p75"]:10.6f} | {stats["max"]:10.6f}',
+            flush=True,
+        )
+    print('', flush=True)
 
 
 def _emit_result_summary(args):
@@ -201,6 +307,7 @@ def _emit_result_summary(args):
         ('rec_l2_mean', _safe_mean(tracker.get('rec_l2_mean_values', []))),
         ('rec_token_mean', _safe_mean(tracker.get('rec_token_values', []))),
         ('rec_maxb_token_mean', _safe_mean(tracker.get('rec_maxb_token_values', []))),
+        *_all_sequence_stat_fields(args),
     ]
 
     if tracker.get('error_type'):
@@ -841,7 +948,8 @@ def main():
 
             print('[Curr input metrics]:', flush=True)
             res = metric.compute(predictions=prediction, references=reference)
-            print_metrics(args, res, suffix='curr')
+            curr_metric_summary = print_metrics(args, res, suffix='curr')
+            _record_input_metric_summary(args, curr_metric_summary)
 
             print('[Aggregate metrics]:', flush=True)
             res = metric.compute(predictions=predictions, references=references)
@@ -861,6 +969,7 @@ def main():
             args.result_tracker['last_total_time'] = str(datetime.timedelta(seconds=time.time() - t_start)).split(".")[0]
 
         print('Done with all.', flush=True)
+        _print_sequence_stats_table(args)
         if args.neptune:
             args.neptune['logs/curr_input'].log(args.n_inputs)
         _emit_result_summary(args)
