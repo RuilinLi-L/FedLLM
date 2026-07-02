@@ -20,6 +20,40 @@ class PatchStatistics:
 
 
 @dataclass(frozen=True)
+class PeftLeakProbeStatistics:
+    patch_stats: PatchStatistics
+    position_embeddings: torch.Tensor
+    projection_vectors: torch.Tensor
+    bin_edges: torch.Tensor
+    bin_counts: torch.Tensor
+    num_bins: int
+    embed_scale: float
+    gap: int
+    seed: int
+
+
+@dataclass(frozen=True)
+class PeftLeakRecoveryResult:
+    recovered_patches: torch.Tensor
+    recovery_mask: torch.Tensor
+    candidate_patch_count: int
+    recovered_patch_count: int
+    collision_patch_count: int | None
+    unresolved_patch_count: int
+    candidate_patches: torch.Tensor
+    candidate_slots: torch.Tensor
+    candidate_position_indices: torch.Tensor
+    slot_indices: torch.Tensor | None
+    slot_counts: torch.Tensor | None
+    oracle_recovered_patches: torch.Tensor | None
+    oracle_recovery_mask: torch.Tensor | None
+    oracle_recovered_patch_count: int | None
+    oracle_collision_patch_count: int | None
+    oracle_unresolved_patch_count: int | None
+    raw_candidate_metadata: dict[str, int]
+
+
+@dataclass(frozen=True)
 class VitAdapterGradientResult:
     grads: tuple[torch.Tensor | None, ...]
     names: list[str]
@@ -27,6 +61,8 @@ class VitAdapterGradientResult:
     raw_patches: torch.Tensor
     logits: torch.Tensor
     loss: float
+    exposed_patches: torch.Tensor | None = None
+    slot_indices: torch.Tensor | None = None
 
 
 def extract_image_patches(images: torch.Tensor, patch_size: int) -> torch.Tensor:
@@ -150,6 +186,198 @@ def denormalize_patches_with_public_stats(patches: torch.Tensor, stats: PatchSta
     return patches * std.view(1, 1, -1) + mean.view(1, 1, -1)
 
 
+def _make_generator(seed: int, device: torch.device | str) -> torch.Generator:
+    gen = torch.Generator(device=torch.device(device))
+    gen.manual_seed(int(seed))
+    return gen
+
+
+def _normalize_projection_vectors(vectors: torch.Tensor) -> torch.Tensor:
+    return vectors / vectors.float().norm(dim=-1, keepdim=True).clamp_min(1e-12).to(dtype=vectors.dtype)
+
+
+def _bin_edges_from_scores(scores: torch.Tensor, num_bins: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if scores.ndim != 2:
+        raise ValueError("scores must have shape [num_items, n_patches].")
+    if num_bins <= 0:
+        raise ValueError("num_bins must be positive.")
+
+    sorted_scores = scores.detach().float().sort(dim=0).values
+    n_items, n_patches = sorted_scores.shape
+    device = scores.device
+    edges = torch.empty(n_patches, int(num_bins) + 1, device=device, dtype=torch.float32)
+    edges[:, 0] = float("-inf")
+    edges[:, -1] = float("inf")
+    for edge_idx in range(1, int(num_bins)):
+        source_idx = min(n_items - 1, max(0, int(round(edge_idx * (n_items - 1) / int(num_bins)))))
+        edges[:, edge_idx] = sorted_scores[source_idx]
+
+    thresholds = edges[:, 1:-1]
+    counts = torch.zeros(n_patches, int(num_bins), device=device, dtype=torch.long)
+    for patch_idx in range(n_patches):
+        bins = torch.bucketize(scores[:, patch_idx].detach().float(), thresholds[patch_idx], right=False)
+        counts[patch_idx].scatter_add_(0, bins, torch.ones_like(bins, dtype=torch.long))
+    return edges, counts
+
+
+def build_peftleak_probe_statistics(
+    public_images: torch.Tensor,
+    patch_size: int,
+    num_bins: int = 32,
+    position_sigma: float = 1.0,
+    embed_scale: float = 0.5,
+    gap: int = 0,
+    seed: int = 0,
+) -> PeftLeakProbeStatistics:
+    if public_images.ndim != 4:
+        raise ValueError("public_images must have shape [batch, channels, height, width].")
+    if num_bins <= 0:
+        raise ValueError("num_bins must be positive.")
+    if embed_scale == 0:
+        raise ValueError("embed_scale must be nonzero.")
+    if gap < 0:
+        raise ValueError("gap must be non-negative.")
+
+    patch_stats = build_public_patch_statistics(public_images, patch_size)
+    patches = extract_image_patches(public_images.detach().float(), patch_size)
+    normalized = normalize_patches_with_public_stats(patches, patch_stats)
+    n_patches = normalized.shape[1]
+    patch_dim = normalized.shape[2]
+    gen = _make_generator(seed, public_images.device)
+    position_embeddings = torch.randn(
+        n_patches,
+        patch_dim,
+        generator=gen,
+        device=public_images.device,
+        dtype=torch.float32,
+    ) * float(position_sigma)
+    projection_vectors = _normalize_projection_vectors(
+        torch.randn(
+            n_patches,
+            patch_dim,
+            generator=gen,
+            device=public_images.device,
+            dtype=torch.float32,
+        )
+    )
+    exposed = normalized.float() * float(embed_scale) + position_embeddings.view(1, n_patches, patch_dim)
+    scores = (exposed * projection_vectors.view(1, n_patches, patch_dim)).sum(dim=-1)
+    bin_edges, bin_counts = _bin_edges_from_scores(scores, int(num_bins))
+    return PeftLeakProbeStatistics(
+        patch_stats=patch_stats,
+        position_embeddings=position_embeddings,
+        projection_vectors=projection_vectors,
+        bin_edges=bin_edges,
+        bin_counts=bin_counts,
+        num_bins=int(num_bins),
+        embed_scale=float(embed_scale),
+        gap=int(gap),
+        seed=int(seed),
+    )
+
+
+def build_peftleak_probe_statistics_from_patch_stats(
+    patch_stats: PatchStatistics,
+    *,
+    n_patches: int,
+    num_bins: int = 32,
+    position_sigma: float = 1.0,
+    embed_scale: float = 0.5,
+    gap: int = 0,
+    seed: int = 0,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype | None = None,
+) -> PeftLeakProbeStatistics:
+    if n_patches <= 0:
+        raise ValueError("n_patches must be positive.")
+    if num_bins <= 0:
+        raise ValueError("num_bins must be positive.")
+    if embed_scale == 0:
+        raise ValueError("embed_scale must be nonzero.")
+    if gap < 0:
+        raise ValueError("gap must be non-negative.")
+
+    target_device = torch.device(device or patch_stats.mean.device)
+    target_dtype = dtype or patch_stats.mean.dtype
+    moved_stats = move_patch_statistics(patch_stats, device=target_device, dtype=target_dtype)
+    patch_dim = int(moved_stats.mean.numel())
+    gen = _make_generator(seed, target_device)
+    position_embeddings = torch.randn(
+        int(n_patches),
+        patch_dim,
+        generator=gen,
+        device=target_device,
+        dtype=torch.float32,
+    ) * float(position_sigma)
+    projection_vectors = _normalize_projection_vectors(
+        torch.randn(
+            int(n_patches),
+            patch_dim,
+            generator=gen,
+            device=target_device,
+            dtype=torch.float32,
+        )
+    )
+    edges_1d = torch.linspace(-4.0, 4.0, steps=int(num_bins) + 1, device=target_device, dtype=torch.float32)
+    edges_1d[0] = float("-inf")
+    edges_1d[-1] = float("inf")
+    bin_edges = edges_1d.view(1, -1).repeat(int(n_patches), 1)
+    bin_counts = torch.zeros(int(n_patches), int(num_bins), device=target_device, dtype=torch.long)
+    return PeftLeakProbeStatistics(
+        patch_stats=moved_stats,
+        position_embeddings=position_embeddings,
+        projection_vectors=projection_vectors,
+        bin_edges=bin_edges,
+        bin_counts=bin_counts,
+        num_bins=int(num_bins),
+        embed_scale=float(embed_scale),
+        gap=int(gap),
+        seed=int(seed),
+    )
+
+
+def move_peftleak_probe_statistics(
+    stats: PeftLeakProbeStatistics,
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype | None = None,
+) -> PeftLeakProbeStatistics:
+    target_dtype = dtype or stats.patch_stats.mean.dtype
+    return PeftLeakProbeStatistics(
+        patch_stats=move_patch_statistics(stats.patch_stats, device=device, dtype=target_dtype),
+        position_embeddings=stats.position_embeddings.to(device=device, dtype=target_dtype),
+        projection_vectors=_normalize_projection_vectors(stats.projection_vectors.to(device=device, dtype=target_dtype)),
+        bin_edges=stats.bin_edges.to(device=device, dtype=torch.float32),
+        bin_counts=stats.bin_counts.to(device=device),
+        num_bins=int(stats.num_bins),
+        embed_scale=float(stats.embed_scale),
+        gap=int(stats.gap),
+        seed=int(stats.seed),
+    )
+
+
+def peftleak_expose_patches(patches: torch.Tensor, stats: PeftLeakProbeStatistics) -> torch.Tensor:
+    normalized = normalize_patches_with_public_stats(patches, stats.patch_stats)
+    pos = stats.position_embeddings.to(device=patches.device, dtype=patches.dtype)
+    return normalized * float(stats.embed_scale) + pos.view(1, pos.shape[0], pos.shape[1])
+
+
+def assign_peftleak_patch_slots(exposed_patches: torch.Tensor, stats: PeftLeakProbeStatistics) -> torch.Tensor:
+    if exposed_patches.ndim != 3:
+        raise ValueError("exposed_patches must have shape [batch, n_patches, patch_dim].")
+    n_patches = exposed_patches.shape[1]
+    if n_patches != stats.position_embeddings.shape[0]:
+        raise ValueError(f"Expected {stats.position_embeddings.shape[0]} patches; got {n_patches}.")
+    projections = stats.projection_vectors.to(device=exposed_patches.device, dtype=exposed_patches.dtype)
+    scores = (exposed_patches * projections.view(1, n_patches, -1)).sum(dim=-1).detach().float()
+    edges = stats.bin_edges.to(device=exposed_patches.device, dtype=torch.float32)
+    slots = torch.empty(scores.shape, device=exposed_patches.device, dtype=torch.long)
+    for patch_idx in range(n_patches):
+        bins = torch.bucketize(scores[:, patch_idx], edges[patch_idx, 1:-1], right=False)
+        slots[:, patch_idx] = patch_idx * int(stats.num_bins) + bins
+    return slots
+
+
 def design_malicious_adapter_parameters(
     *,
     hidden_dim: int,
@@ -169,8 +397,8 @@ def design_malicious_adapter_parameters(
     return weight, bias
 
 
-class MaliciousPatchAdapter(nn.Module):
-    """One adapter per sample/patch, so autograd gradients identify each patch."""
+class DebugOraclePatchAdapter(nn.Module):
+    """Debug-only adapter with one parameter pair per sample/patch."""
 
     def __init__(self, batch_size: int, n_patches: int, patch_dim: int, hidden_dim: int, seed: int = 0):
         super().__init__()
@@ -233,8 +461,57 @@ class MaliciousPatchAdapter(nn.Module):
         return params
 
 
+class SharedBinPatchAdapter(nn.Module):
+    """Shared PEFTLeak-style adapter where patch/bin slots share parameters."""
+
+    def __init__(self, *, n_patches: int, patch_dim: int, num_bins: int, gap: int = 0):
+        super().__init__()
+        if n_patches <= 0 or patch_dim <= 0 or num_bins <= 0:
+            raise ValueError("n_patches, patch_dim, and num_bins must be positive.")
+        if gap < 0:
+            raise ValueError("gap must be non-negative.")
+        self.n_patches = int(n_patches)
+        self.patch_dim = int(patch_dim)
+        self.num_bins = int(num_bins)
+        self.gap = int(gap)
+        self.row_stride = int(gap) + 2
+        self.n_slots = self.n_patches * self.num_bins
+        self.weight = nn.Parameter(torch.zeros(self.n_slots * self.row_stride, self.patch_dim))
+        self.bias = nn.Parameter(torch.zeros(self.n_slots * self.row_stride))
+
+    def forward(self, exposed_patches: torch.Tensor, slot_indices: torch.Tensor) -> torch.Tensor:
+        if exposed_patches.ndim != 3:
+            raise ValueError("exposed_patches must have shape [batch, n_patches, patch_dim].")
+        if exposed_patches.shape[1:] != (self.n_patches, self.patch_dim):
+            raise ValueError(
+                "exposed_patches must have shape "
+                f"[batch, {self.n_patches}, {self.patch_dim}]; got {tuple(exposed_patches.shape)}."
+            )
+        if slot_indices.shape != exposed_patches.shape[:2]:
+            raise ValueError("slot_indices must have shape [batch, n_patches].")
+        if int(slot_indices.min().item()) < 0 or int(slot_indices.max().item()) >= self.n_slots:
+            raise ValueError("slot_indices contain an out-of-range PEFTLeak slot.")
+
+        flat_x = exposed_patches.reshape(-1, self.patch_dim)
+        flat_slots = slot_indices.reshape(-1).to(device=flat_x.device, dtype=torch.long)
+        row_a = flat_slots * self.row_stride
+        row_b = row_a + self.gap + 1
+        out_a = (flat_x * self.weight.index_select(0, row_a)).sum(dim=-1) + self.bias.index_select(0, row_a)
+        out_b = (flat_x * self.weight.index_select(0, row_b)).sum(dim=-1) + self.bias.index_select(0, row_b)
+        return (out_a - out_b).view(exposed_patches.shape[0], self.n_patches)
+
+    def parameter_names(self) -> list[str]:
+        return ["vit.adapter.shared.weight", "vit.adapter.shared.bias"]
+
+    def parameters_for_grad(self) -> list[nn.Parameter]:
+        return [self.weight, self.bias]
+
+
+MaliciousPatchAdapter = DebugOraclePatchAdapter
+
+
 class TorchvisionVitWithMaliciousAdapter(nn.Module):
-    """Torchvision ViT backbone with a malicious PEFT adapter branch."""
+    """Torchvision ViT backbone with a shared PEFTLeak-style adapter branch."""
 
     def __init__(
         self,
@@ -244,6 +521,7 @@ class TorchvisionVitWithMaliciousAdapter(nn.Module):
         image_size: int,
         patch_size: int,
         adapter_hidden_dim: int,
+        probe_stats: PeftLeakProbeStatistics,
         n_classes: int = 100,
         seed: int = 0,
         model_path: str = "torchvision_vit_small",
@@ -259,24 +537,31 @@ class TorchvisionVitWithMaliciousAdapter(nn.Module):
         self.patch_size = int(patch_size)
         self.patch_dim = int(patch_dim)
         self.n_patches = int(n_patches)
+        self.probe_stats = probe_stats
+        if probe_stats.position_embeddings.shape != (self.n_patches, self.patch_dim):
+            raise ValueError(
+                "probe_stats position shape does not match this image geometry: "
+                f"expected {(self.n_patches, self.patch_dim)}, got {tuple(probe_stats.position_embeddings.shape)}."
+            )
         self.model_path = str(model_path)
-        self.backbone = self._build_backbone(
-            image_size=image_size,
-            patch_size=patch_size,
-            adapter_hidden_dim=adapter_hidden_dim,
-            n_classes=n_classes,
-            model_path=self.model_path,
-        )
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(int(seed))
+            self.backbone = self._build_backbone(
+                image_size=image_size,
+                patch_size=patch_size,
+                adapter_hidden_dim=adapter_hidden_dim,
+                n_classes=n_classes,
+                model_path=self.model_path,
+            )
         if finetuned_path:
             self._load_backbone_checkpoint(finetuned_path)
         for param in self.backbone.parameters():
             param.requires_grad_(False)
-        self.adapter = MaliciousPatchAdapter(
-            batch_size=batch_size,
+        self.adapter = SharedBinPatchAdapter(
             n_patches=n_patches,
             patch_dim=patch_dim,
-            hidden_dim=adapter_hidden_dim,
-            seed=seed,
+            num_bins=probe_stats.num_bins,
+            gap=probe_stats.gap,
         )
 
     @staticmethod
@@ -359,15 +644,20 @@ class TorchvisionVitWithMaliciousAdapter(nn.Module):
             return images.repeat(1, 3, 1, 1)
         raise ValueError("Torchvision ViT backbone expects images with 1 or 3 channels.")
 
-    def forward(self, images: torch.Tensor, stats: PatchStatistics) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        images: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         patches = extract_image_patches(images, self.patch_size)
-        normalized = normalize_patches_with_public_stats(patches, stats)
+        normalized = normalize_patches_with_public_stats(patches, self.probe_stats.patch_stats)
+        exposed = peftleak_expose_patches(patches, self.probe_stats)
+        slot_indices = assign_peftleak_patch_slots(exposed, self.probe_stats)
         backbone_images = self._backbone_input_images(images)
         logits = self.backbone(backbone_images)
-        adapter_scores = self.adapter(normalized)
+        adapter_scores = self.adapter(exposed, slot_indices)
         logits = logits.clone()
         logits[:, 0] = logits[:, 0] + adapter_scores.sum(dim=1)
-        return logits, normalized, patches
+        return logits, normalized, patches, exposed, slot_indices
     def adapter_parameter_names(self) -> list[str]:
         return self.adapter.parameter_names()
 
@@ -378,44 +668,71 @@ class TorchvisionVitWithMaliciousAdapter(nn.Module):
 TinyVitWithMaliciousAdapter = TorchvisionVitWithMaliciousAdapter
 
 
-def build_vit_adapter_gradients(
-    images: torch.Tensor,
-    stats: PatchStatistics,
+def _labels_for_shared_adapter_batch(
+    labels: torch.Tensor | None,
     *,
-    labels: torch.Tensor | None = None,
+    batch_size: int,
+    device: torch.device,
+    n_classes: int,
+) -> torch.Tensor:
+    if labels is None:
+        return torch.arange(batch_size, device=device) % int(n_classes)
+    labels = labels.to(device=device, dtype=torch.long).view(-1)
+    if labels.numel() != batch_size:
+        raise ValueError(f"Expected {batch_size} labels, got {labels.numel()}.")
+    return labels
+
+
+def _build_shared_adapter_model(
+    images: torch.Tensor,
+    probe_stats: PeftLeakProbeStatistics,
+    *,
     patch_size: int,
     adapter_hidden_dim: int,
     n_classes: int = 100,
     seed: int = 0,
     model_path: str = "torchvision_vit_small",
     finetuned_path: str | Path | None = None,
-) -> VitAdapterGradientResult:
+) -> TorchvisionVitWithMaliciousAdapter:
     if images.ndim != 4:
         raise ValueError("images must have shape [batch, channels, height, width].")
-    if int(stats.patch_size) != int(patch_size):
-        raise ValueError(f"stats.patch_size={stats.patch_size} does not match patch_size={patch_size}.")
+    if int(probe_stats.patch_stats.patch_size) != int(patch_size):
+        raise ValueError(f"stats.patch_size={probe_stats.patch_stats.patch_size} does not match patch_size={patch_size}.")
     batch_size, channels, height, width = images.shape
     if height != width:
         raise ValueError("vit_adapter mode expects square images.")
+    probe_stats = move_peftleak_probe_statistics(probe_stats, device=images.device, dtype=images.dtype)
     model = TorchvisionVitWithMaliciousAdapter(
         batch_size=batch_size,
         channels=channels,
         image_size=height,
         patch_size=patch_size,
         adapter_hidden_dim=adapter_hidden_dim,
+        probe_stats=probe_stats,
         n_classes=n_classes,
         seed=seed,
         model_path=model_path,
         finetuned_path=finetuned_path,
     ).to(device=images.device, dtype=images.dtype)
     model.eval()
-    if labels is None:
-        labels = torch.arange(batch_size, device=images.device) % int(n_classes)
-    else:
-        labels = labels.to(device=images.device, dtype=torch.long).view(-1)
-    if labels.numel() != batch_size:
-        raise ValueError(f"Expected {batch_size} labels, got {labels.numel()}.")
-    logits, normalized, raw_patches = model(images, stats)
+    return model
+
+
+def _compute_shared_adapter_gradients(
+    model: TorchvisionVitWithMaliciousAdapter,
+    images: torch.Tensor,
+    *,
+    labels: torch.Tensor | None = None,
+    n_classes: int = 100,
+) -> VitAdapterGradientResult:
+    batch_size = int(images.shape[0])
+    labels = _labels_for_shared_adapter_batch(
+        labels,
+        batch_size=batch_size,
+        device=images.device,
+        n_classes=n_classes,
+    )
+    logits, normalized, raw_patches, exposed, slot_indices = model(images)
     loss = F.cross_entropy(logits, labels)
     grads = torch.autograd.grad(
         loss,
@@ -429,10 +746,305 @@ def build_vit_adapter_gradients(
         raw_patches=raw_patches.detach(),
         logits=logits.detach(),
         loss=float(loss.detach().item()),
+        exposed_patches=exposed.detach(),
+        slot_indices=slot_indices.detach(),
+    )
+
+
+def build_shared_adapter_gradients(
+    images: torch.Tensor,
+    probe_stats: PeftLeakProbeStatistics,
+    *,
+    labels: torch.Tensor | None = None,
+    patch_size: int,
+    adapter_hidden_dim: int,
+    n_classes: int = 100,
+    seed: int = 0,
+    model_path: str = "torchvision_vit_small",
+    finetuned_path: str | Path | None = None,
+) -> VitAdapterGradientResult:
+    model = _build_shared_adapter_model(
+        images,
+        probe_stats,
+        patch_size=patch_size,
+        adapter_hidden_dim=adapter_hidden_dim,
+        n_classes=n_classes,
+        seed=seed,
+        model_path=model_path,
+        finetuned_path=finetuned_path,
+    )
+    return _compute_shared_adapter_gradients(
+        model,
+        images,
+        labels=labels,
+        n_classes=n_classes,
+    )
+
+
+def build_shared_adapter_gradient_bundle(
+    images: torch.Tensor,
+    probe_stats: PeftLeakProbeStatistics,
+    *,
+    labels: torch.Tensor | None = None,
+    patch_size: int,
+    adapter_hidden_dim: int,
+    n_classes: int = 100,
+    seed: int = 0,
+    model_path: str = "torchvision_vit_small",
+    finetuned_path: str | Path | None = None,
+) -> tuple[VitAdapterGradientResult, list[VitAdapterGradientResult]]:
+    """Compute full-batch and per-example shared-adapter gradients on one model."""
+
+    model = _build_shared_adapter_model(
+        images,
+        probe_stats,
+        patch_size=patch_size,
+        adapter_hidden_dim=adapter_hidden_dim,
+        n_classes=n_classes,
+        seed=seed,
+        model_path=model_path,
+        finetuned_path=finetuned_path,
+    )
+    full_result = _compute_shared_adapter_gradients(
+        model,
+        images,
+        labels=labels,
+        n_classes=n_classes,
+    )
+    labels = _labels_for_shared_adapter_batch(
+        labels,
+        batch_size=int(images.shape[0]),
+        device=images.device,
+        n_classes=n_classes,
+    )
+    per_example: list[VitAdapterGradientResult] = []
+    for sample_idx in range(int(images.shape[0])):
+        sample_result = _compute_shared_adapter_gradients(
+            model,
+            images[sample_idx : sample_idx + 1],
+            labels=labels[sample_idx : sample_idx + 1],
+            n_classes=n_classes,
+        )
+        if sample_result.names != full_result.names:
+            raise ValueError("Per-example PEFTLeak adapter parameter names changed during DPSGD generation.")
+        if len(sample_result.grads) != len(full_result.grads):
+            raise ValueError("Per-example PEFTLeak gradient tuple length changed during DPSGD generation.")
+        for full_grad, sample_grad in zip(full_result.grads, sample_result.grads):
+            if full_grad is None or sample_grad is None:
+                if full_grad is not sample_grad:
+                    raise ValueError("Per-example PEFTLeak gradient optionality changed during DPSGD generation.")
+                continue
+            if full_grad.shape != sample_grad.shape:
+                raise ValueError("Per-example PEFTLeak gradient shape changed during DPSGD generation.")
+        per_example.append(sample_result)
+    return full_result, per_example
+
+
+def build_vit_adapter_gradients(
+    images: torch.Tensor,
+    stats: PeftLeakProbeStatistics,
+    *,
+    labels: torch.Tensor | None = None,
+    patch_size: int,
+    adapter_hidden_dim: int,
+    n_classes: int = 100,
+    seed: int = 0,
+    model_path: str = "torchvision_vit_small",
+    finetuned_path: str | Path | None = None,
+) -> VitAdapterGradientResult:
+    return build_shared_adapter_gradients(
+        images,
+        stats,
+        labels=labels,
+        patch_size=patch_size,
+        adapter_hidden_dim=adapter_hidden_dim,
+        n_classes=n_classes,
+        seed=seed,
+        model_path=model_path,
+        finetuned_path=finetuned_path,
     )
 
 
 _NAMED_ADAPTER_RE = re.compile(r"sample_(\d+)\.patch_(\d+)\.(weight|bias)$")
+
+
+def _shared_weight_bias_from_named_grads(
+    grads: Sequence[torch.Tensor | None],
+    names: Sequence[str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    weight = None
+    bias = None
+    for grad, name in zip(grads, names):
+        if grad is None:
+            continue
+        if str(name).endswith("shared.weight"):
+            weight = grad
+        elif str(name).endswith("shared.bias"):
+            bias = grad
+    if weight is None or bias is None:
+        raise ValueError("Shared PEFTLeak adapter weight/bias gradients are required for recovery.")
+    if weight.ndim != 2 or bias.ndim != 1:
+        raise ValueError("Shared adapter gradients must have shapes [rows, patch_dim] and [rows].")
+    if weight.shape[0] != bias.shape[0]:
+        raise ValueError("Shared adapter weight/bias row counts do not match.")
+    return weight, bias
+
+
+def recover_patches_from_shared_adapter_grads(
+    grads: Sequence[torch.Tensor | None],
+    names: Sequence[str],
+    probe_stats: PeftLeakProbeStatistics,
+    *,
+    batch_size: int | None = None,
+    n_patches: int | None = None,
+    slot_indices: torch.Tensor | None = None,
+    eps: float = 1e-12,
+) -> PeftLeakRecoveryResult:
+    weight_grad, bias_grad = _shared_weight_bias_from_named_grads(grads, names)
+    device = weight_grad.device
+    dtype = weight_grad.dtype
+    stats = move_peftleak_probe_statistics(probe_stats, device=device, dtype=dtype)
+    n_probe_patches = int(stats.position_embeddings.shape[0])
+    patch_dim = int(stats.position_embeddings.shape[1])
+    if n_patches is None:
+        n_patches = n_probe_patches
+    if int(n_patches) != n_probe_patches:
+        raise ValueError(f"Expected n_patches={n_probe_patches}; got {n_patches}.")
+    row_stride = int(stats.gap) + 2
+    n_slots = n_probe_patches * int(stats.num_bins)
+    expected_rows = n_slots * row_stride
+    if weight_grad.shape != (expected_rows, patch_dim) or bias_grad.shape[0] != expected_rows:
+        raise ValueError(
+            "Shared adapter gradient shape mismatch: "
+            f"expected weight={(expected_rows, patch_dim)}, bias={(expected_rows,)}, "
+            f"got weight={tuple(weight_grad.shape)}, bias={tuple(bias_grad.shape)}."
+        )
+
+    candidates: dict[int, torch.Tensor] = {}
+    candidate_slots_list: list[int] = []
+    candidate_position_list: list[int] = []
+    candidate_patch_list: list[torch.Tensor] = []
+    nonzero_slot_count = 0
+    for slot in range(n_slots):
+        row_a = slot * row_stride
+        row_b = row_a + int(stats.gap) + 1
+        denom = (bias_grad[row_a] - bias_grad[row_b]).float()
+        if float(denom.detach().abs().item()) <= eps:
+            continue
+        nonzero_slot_count += 1
+        exposed = (weight_grad[row_a].float() - weight_grad[row_b].float()) / denom
+        patch_idx = slot // int(stats.num_bins)
+        normalized = (exposed - stats.position_embeddings[patch_idx].float()) / float(stats.embed_scale)
+        raw_patch = denormalize_patches_with_public_stats(
+            normalized.view(1, 1, -1).to(device=device, dtype=dtype),
+            stats.patch_stats,
+        ).view(-1)
+        candidates[slot] = raw_patch
+        candidate_slots_list.append(int(slot))
+        candidate_position_list.append(int(patch_idx))
+        candidate_patch_list.append(raw_patch.to(device=device, dtype=dtype))
+
+    if candidate_patch_list:
+        candidate_patches = torch.stack(candidate_patch_list, dim=0)
+        candidate_slots = torch.tensor(candidate_slots_list, device=device, dtype=torch.long)
+        candidate_position_indices = torch.tensor(candidate_position_list, device=device, dtype=torch.long)
+    else:
+        candidate_patches = torch.empty(0, patch_dim, device=device, dtype=dtype)
+        candidate_slots = torch.empty(0, device=device, dtype=torch.long)
+        candidate_position_indices = torch.empty(0, device=device, dtype=torch.long)
+
+    if slot_indices is not None:
+        slot_indices = slot_indices.to(device=device, dtype=torch.long)
+        if slot_indices.ndim != 2:
+            raise ValueError("slot_indices must have shape [batch, n_patches].")
+        if batch_size is None:
+            batch_size = int(slot_indices.shape[0])
+        if slot_indices.shape != (int(batch_size), n_probe_patches):
+            raise ValueError(
+                f"slot_indices must have shape {(int(batch_size), n_probe_patches)}; "
+                f"got {tuple(slot_indices.shape)}."
+            )
+        if int(slot_indices.min().item()) < 0 or int(slot_indices.max().item()) >= n_slots:
+            raise ValueError("slot_indices contain an out-of-range PEFTLeak slot.")
+    elif batch_size is None:
+        batch_size = 1
+
+    recovered = torch.zeros(1, n_probe_patches, patch_dim, device=device, dtype=dtype)
+    mask = torch.zeros(1, n_probe_patches, device=device, dtype=torch.bool)
+    slot_counts = None
+    position_candidate_counts = torch.bincount(candidate_position_indices, minlength=n_probe_patches)
+    ambiguous_position_count = int((position_candidate_counts > 1).sum().item())
+    empty_position_count = int((position_candidate_counts == 0).sum().item())
+    recovered_patch_count = 0
+    if int(batch_size) == 1:
+        for patch_idx in range(n_probe_patches):
+            if int(position_candidate_counts[patch_idx].item()) != 1:
+                continue
+            candidate_offset = int((candidate_position_indices == patch_idx).nonzero(as_tuple=False)[0].item())
+            recovered[0, patch_idx] = candidate_patches[candidate_offset]
+            mask[0, patch_idx] = True
+            recovered_patch_count += 1
+    unresolved_patch_count = (
+        n_probe_patches - recovered_patch_count
+        if int(batch_size) == 1
+        else int(batch_size) * n_probe_patches
+    )
+
+    oracle_recovered = None
+    oracle_mask = None
+    oracle_recovered_patch_count = None
+    oracle_collision_patch_count = None
+    oracle_unresolved_patch_count = None
+    if slot_indices is not None:
+        flat_slots = slot_indices.reshape(-1)
+        slot_counts = torch.bincount(flat_slots, minlength=n_slots)
+        oracle_recovered = torch.zeros(int(batch_size), n_probe_patches, patch_dim, device=device, dtype=dtype)
+        oracle_mask = torch.zeros(int(batch_size), n_probe_patches, device=device, dtype=torch.bool)
+        oracle_recovered_patch_count = 0
+        oracle_collision_patch_count = 0
+        oracle_unresolved_patch_count = 0
+        for sample_idx in range(int(batch_size)):
+            for patch_idx in range(n_probe_patches):
+                slot = int(slot_indices[sample_idx, patch_idx].item())
+                count = int(slot_counts[slot].item())
+                if count > 1:
+                    oracle_collision_patch_count += 1
+                    continue
+                candidate = candidates.get(slot)
+                if candidate is None:
+                    oracle_unresolved_patch_count += 1
+                    continue
+                oracle_recovered[sample_idx, patch_idx] = candidate.to(device=device, dtype=dtype)
+                oracle_mask[sample_idx, patch_idx] = True
+                oracle_recovered_patch_count += 1
+
+    metadata = {
+        "n_slots": int(n_slots),
+        "row_stride": int(row_stride),
+        "nonzero_slot_count": int(nonzero_slot_count),
+        "candidate_slot_count": int(len(candidates)),
+        "ambiguous_position_count": int(ambiguous_position_count),
+        "empty_position_count": int(empty_position_count),
+    }
+    return PeftLeakRecoveryResult(
+        recovered_patches=recovered,
+        recovery_mask=mask,
+        candidate_patch_count=int(len(candidates)),
+        recovered_patch_count=int(recovered_patch_count),
+        collision_patch_count=None,
+        unresolved_patch_count=int(max(0, unresolved_patch_count)),
+        candidate_patches=candidate_patches,
+        candidate_slots=candidate_slots,
+        candidate_position_indices=candidate_position_indices,
+        slot_indices=slot_indices,
+        slot_counts=slot_counts,
+        oracle_recovered_patches=oracle_recovered,
+        oracle_recovery_mask=oracle_mask,
+        oracle_recovered_patch_count=oracle_recovered_patch_count,
+        oracle_collision_patch_count=oracle_collision_patch_count,
+        oracle_unresolved_patch_count=oracle_unresolved_patch_count,
+        raw_candidate_metadata=metadata,
+    )
 
 
 def recover_patches_from_named_adapter_grads(

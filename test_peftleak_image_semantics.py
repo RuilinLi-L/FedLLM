@@ -10,8 +10,12 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from attacks.peftleak_image.core import (
+    PatchStatistics,
+    PeftLeakProbeStatistics,
+    build_peftleak_probe_statistics,
     build_public_patch_statistics,
-    build_vit_adapter_gradients,
+    build_shared_adapter_gradient_bundle,
+    build_shared_adapter_gradients,
     cluster_and_reassemble,
     extract_image_patches,
     fold_image_patches,
@@ -20,7 +24,7 @@ from attacks.peftleak_image.core import (
     optimize_patch_baseline,
     recover_patch_from_adapter_grads,
     recover_patches_from_batch,
-    recover_patches_from_named_adapter_grads,
+    recover_patches_from_shared_adapter_grads,
     save_public_patch_statistics,
 )
 from attack_peftleak_image import (
@@ -40,6 +44,36 @@ def assert_true(condition, message):
 
 def runtime_device():
     return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+def manual_probe(mean, std, position, *, num_bins=1, embed_scale=0.5, gap=0, device=None):
+    device = device or position.device
+    position = position.to(device=device, dtype=torch.float32)
+    patch_dim = int(position.numel())
+    patch_stats = PatchStatistics(
+        mean=mean.to(device=device, dtype=torch.float32),
+        std=std.to(device=device, dtype=torch.float32),
+        num_images=1,
+        num_patches=1,
+        patch_size=1,
+    )
+    projection = torch.ones(1, patch_dim, device=device, dtype=torch.float32)
+    projection = projection / projection.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    edges = torch.full((1, int(num_bins) + 1), float("inf"), device=device, dtype=torch.float32)
+    edges[:, 0] = float("-inf")
+    if num_bins > 1:
+        edges[:, 1:-1] = torch.linspace(-1.0, 1.0, steps=int(num_bins) - 1, device=device)
+    return PeftLeakProbeStatistics(
+        patch_stats=patch_stats,
+        position_embeddings=position.view(1, patch_dim),
+        projection_vectors=projection,
+        bin_edges=edges,
+        bin_counts=torch.zeros(1, int(num_bins), device=device, dtype=torch.long),
+        num_bins=int(num_bins),
+        embed_scale=float(embed_scale),
+        gap=int(gap),
+        seed=0,
+    )
 
 
 def test_gradient_ratio_formula_recovers_known_patch():
@@ -70,6 +104,46 @@ def test_batch_recovery_applies_position_and_public_stats():
     )
 
     assert_true(torch.allclose(recovered[0], patch, atol=1e-6), "recovery should invert position and public normalization")
+
+
+def test_shared_adjacent_difference_recovery_inverts_probe_transform():
+    patch = torch.tensor([0.1, 0.3, -0.2], dtype=torch.float32)
+    pos = torch.tensor([0.5, -0.1, 0.2], dtype=torch.float32)
+    mean = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
+    std = torch.tensor([2.0, 3.0, 4.0], dtype=torch.float32)
+    scale = 0.25
+    exposed = ((patch - mean) / std) * scale + pos
+    weight_grad = torch.stack((3.0 * exposed, -3.0 * exposed), dim=0)
+    bias_grad = torch.tensor([3.0, -3.0], dtype=torch.float32)
+    probe = manual_probe(mean, std, pos, embed_scale=scale)
+
+    result = recover_patches_from_shared_adapter_grads(
+        (weight_grad, bias_grad),
+        ["vit.adapter.shared.weight", "vit.adapter.shared.bias"],
+        probe,
+        batch_size=1,
+        n_patches=1,
+    )
+
+    assert_true(result.recovered_patch_count == 1, "unique shared slot should recover one patch")
+    assert_true(torch.equal(result.recovery_mask, torch.ones(1, 1, dtype=torch.bool)), "unique slot should be marked recovered")
+    assert_true(torch.allclose(result.recovered_patches[0, 0], patch, atol=1e-6), "adjacent-difference recovery should invert probe transform")
+    assert_true(torch.equal(result.candidate_slots, torch.zeros(1, dtype=torch.long)), "observable candidate should record its shared slot")
+    assert_true(result.collision_patch_count is None, "observable shared gradients cannot infer private bin collisions")
+
+    oracle = recover_patches_from_shared_adapter_grads(
+        (weight_grad, bias_grad),
+        ["vit.adapter.shared.weight", "vit.adapter.shared.bias"],
+        probe,
+        batch_size=1,
+        n_patches=1,
+        slot_indices=torch.zeros(1, 1, dtype=torch.long),
+    )
+    assert_true(oracle.oracle_recovered_patch_count == 1, "oracle debug path should recover the known unique assignment")
+    assert_true(
+        torch.allclose(oracle.oracle_recovered_patches[0, 0], patch, atol=1e-6),
+        "oracle debug recovery should use slot_indices only in oracle fields",
+    )
 
 
 def test_patch_extract_fold_roundtrip_and_public_stats():
@@ -108,37 +182,48 @@ def test_public_stats_move_preserves_metadata_and_device():
     assert_true(moved.num_patches == stats.num_patches, "public stats patch count should be preserved")
 
 
-def test_vit_adapter_autograd_gradients_recover_patches():
+def test_shared_vit_adapter_autograd_gradients_recover_patches():
     device = runtime_device()
-    attack_images = torch.rand(2, 1, 4, 4, device=device)
-    public_images = torch.rand(3, 1, 4, 4, device=device)
-    stats = build_public_patch_statistics(public_images, patch_size=2)
-    result = build_vit_adapter_gradients(
+    attack_images = torch.rand(1, 1, 4, 4, device=device)
+    public_images = torch.rand(4, 1, 4, 4, device=device)
+    probe = build_peftleak_probe_statistics(
+        public_images,
+        patch_size=2,
+        num_bins=16,
+        position_sigma=0.5,
+        embed_scale=0.5,
+        seed=11,
+    )
+    result = build_shared_adapter_gradients(
         attack_images,
-        stats,
+        probe,
+        labels=torch.tensor([1], dtype=torch.long, device=device),
         patch_size=2,
         adapter_hidden_dim=3,
         n_classes=4,
         seed=11,
     )
-    recovered = recover_patches_from_named_adapter_grads(
+    recovery = recover_patches_from_shared_adapter_grads(
         result.grads,
         result.names,
-        batch_size=2,
+        probe,
+        batch_size=1,
         n_patches=4,
-        patch_mean=stats.mean,
-        patch_std=stats.std,
+        slot_indices=result.slot_indices,
     )
     reference = extract_image_patches(attack_images, patch_size=2)
-    assert_true(len(result.names) == 2 * 4 * 2, "ViT adapter path should expose weight/bias gradients per patch")
+    assert_true(len(result.names) == 2, "ViT adapter path should expose one shared weight and one shared bias gradient")
+    assert_true(not any("sample_" in name or "patch_" in name for name in result.names), "shared adapter names must not expose sample/patch oracle ids")
     assert_true(
         all(grad is None or grad.device == device for grad in result.grads),
         "ViT adapter gradients should stay on the runtime device",
     )
     assert_true(result.normalized_patches.device == device, "normalized patches should stay on the runtime device")
     assert_true(result.raw_patches.device == device, "raw patches should stay on the runtime device")
-    assert_true(recovered.device == device, "recovered patches should stay on the runtime device")
-    assert_true(torch.allclose(recovered, reference, atol=1e-5), "autograd adapter gradients should recover patches")
+    assert_true(recovery.recovered_patches.device == device, "recovered patches should stay on the runtime device")
+    assert_true(recovery.collision_patch_count is None, "observable shared gradients should not claim private collision counts")
+    assert_true(recovery.oracle_collision_patch_count == 0, "single-image oracle debug slots should avoid patch collisions")
+    assert_true(torch.allclose(recovery.recovered_patches, reference, atol=1e-5), "shared autograd adapter gradients should recover patches")
 
 
 def test_vit_adapter_run_reports_loss_acc_and_device_local_outputs():
@@ -168,15 +253,133 @@ def test_vit_adapter_run_reports_loss_acc_and_device_local_outputs():
     )
     images = torch.rand(2, 1, 4, 4, device=device)
     labels = torch.tensor([0, 1], dtype=torch.long, device=device)
-    stats = move_patch_statistics(build_public_patch_statistics(torch.rand(3, 1, 4, 4, device=device), 2), device=device)
+    probe = build_peftleak_probe_statistics(torch.rand(4, 1, 4, 4, device=device), 2, num_bins=16, seed=7)
 
-    recovered, reference, loss, top1, grad_count = _run_vit_adapter(args, images, labels, stats)
+    recovered, reference, loss, top1, grad_count, recovery = _run_vit_adapter(args, images, labels, probe)
 
     assert_true(recovered.device == device, "run_vit_adapter should return recovered patches on runtime device")
     assert_true(reference.device == device, "run_vit_adapter should return reference patches on runtime device")
     assert_true(loss is not None and loss >= 0.0, "run_vit_adapter should report a finite loss")
     assert_true(top1 is not None and 0.0 <= top1 <= 1.0, "run_vit_adapter should report batch top-1 accuracy")
-    assert_true(grad_count == 2 * 4 * 2, "run_vit_adapter should report weight/bias gradients per patch")
+    assert_true(grad_count == 2, "run_vit_adapter should report shared weight/bias gradients")
+    assert_true(recovery.recovered_patches.shape == recovered.shape, "run_vit_adapter should return structured recovery metadata")
+    assert_true(recovered.shape[0] == 1, "multi-sample vit_adapter should not fabricate per-sample direct recovery")
+    assert_true(recovery.oracle_recovered_patches.shape == reference.shape, "oracle debug recovery should stay separate from reportable output")
+
+
+def test_shared_adapter_gradient_shape_is_stable_across_batch_size():
+    device = runtime_device()
+    public_images = torch.rand(4, 1, 4, 4, device=device)
+    probe = build_peftleak_probe_statistics(public_images, 2, num_bins=8, seed=19)
+    one = build_shared_adapter_gradients(
+        torch.rand(1, 1, 4, 4, device=device),
+        probe,
+        labels=torch.tensor([1], dtype=torch.long, device=device),
+        patch_size=2,
+        adapter_hidden_dim=3,
+        n_classes=4,
+        seed=19,
+    )
+    two = build_shared_adapter_gradients(
+        torch.rand(2, 1, 4, 4, device=device),
+        probe,
+        labels=torch.tensor([1, 2], dtype=torch.long, device=device),
+        patch_size=2,
+        adapter_hidden_dim=3,
+        n_classes=4,
+        seed=19,
+    )
+
+    assert_true(one.names == two.names == ["vit.adapter.shared.weight", "vit.adapter.shared.bias"], "shared adapter names should be stable")
+    assert_true(len(one.grads) == len(two.grads) == 2, "shared adapter should expose two gradient tensors")
+    assert_true(one.grads[0].shape == two.grads[0].shape, "shared weight gradient shape should not scale with batch size")
+    assert_true(one.grads[1].shape == two.grads[1].shape, "shared bias gradient shape should not scale with batch size")
+
+
+def test_dpsgd_per_example_shared_gradient_shapes_match_full_batch():
+    device = runtime_device()
+    public_images = torch.rand(4, 1, 4, 4, device=device)
+    probe = build_peftleak_probe_statistics(public_images, 2, num_bins=8, seed=23)
+    images = torch.rand(2, 1, 4, 4, device=device)
+    labels = torch.tensor([1, 2], dtype=torch.long, device=device)
+    full, per_example = build_shared_adapter_gradient_bundle(
+        images,
+        probe,
+        labels=labels,
+        patch_size=2,
+        adapter_hidden_dim=3,
+        n_classes=4,
+        seed=23,
+    )
+
+    assert_true(len(per_example) == 2, "DPSGD helper should return one shared-gradient tuple per example")
+    for sample in per_example:
+        assert_true(sample.names == full.names, "full and per-example shared gradients should use the same model parameters")
+        assert_true(len(full.grads) == len(sample.grads) == 2, "full and per-example shared gradients should have the same tuple length")
+        assert_true(full.grads[0].shape == sample.grads[0].shape, "DPSGD per-example shared weight shape should match full-batch shape")
+        assert_true(full.grads[1].shape == sample.grads[1].shape, "DPSGD per-example shared bias shape should match full-batch shape")
+
+
+def test_shared_recovery_counts_collisions_as_unresolved():
+    patch_a = torch.tensor([0.1, 0.2], dtype=torch.float32)
+    patch_b = torch.tensor([0.3, 0.4], dtype=torch.float32)
+    mean = torch.zeros(2, dtype=torch.float32)
+    std = torch.ones(2, dtype=torch.float32)
+    pos = torch.zeros(2, dtype=torch.float32)
+    probe = manual_probe(mean, std, pos, num_bins=1, embed_scale=1.0)
+    exposed_mean = 0.5 * (patch_a + patch_b)
+    weight_grad = torch.stack((2.0 * exposed_mean, -2.0 * exposed_mean), dim=0)
+    bias_grad = torch.tensor([2.0, -2.0], dtype=torch.float32)
+
+    result = recover_patches_from_shared_adapter_grads(
+        (weight_grad, bias_grad),
+        ["vit.adapter.shared.weight", "vit.adapter.shared.bias"],
+        probe,
+        batch_size=2,
+        n_patches=1,
+        slot_indices=torch.zeros(2, 1, dtype=torch.long),
+    )
+
+    assert_true(result.candidate_patch_count == 1, "collision slot should still produce one gradient candidate")
+    assert_true(result.collision_patch_count is None, "observable shared gradients should not infer private collision counts")
+    assert_true(result.recovered_patch_count == 0, "multi-sample shared candidates should not be counted as direct recovered patches")
+    assert_true(not bool(result.recovery_mask.any()), "multi-sample reportable output should remain unresolved without oracle assignment")
+    assert_true(result.oracle_collision_patch_count == 2, "oracle debug fields should count both patch instances in a shared slot")
+    assert_true(result.oracle_recovered_patch_count == 0, "oracle collided patches should not be counted as exact recovered patches")
+    assert_true(not bool(result.oracle_recovery_mask.any()), "oracle collided patches should remain unresolved")
+
+
+def test_shared_recovery_without_oracle_keeps_batch_candidates_unordered():
+    patch_a = torch.tensor([0.1, 0.2], dtype=torch.float32)
+    patch_b = torch.tensor([0.8, 0.9], dtype=torch.float32)
+    mean = torch.zeros(2, dtype=torch.float32)
+    std = torch.ones(2, dtype=torch.float32)
+    pos = torch.zeros(2, dtype=torch.float32)
+    probe = manual_probe(mean, std, pos, num_bins=2, embed_scale=1.0)
+    weight_grad = torch.zeros(4, 2, dtype=torch.float32)
+    bias_grad = torch.zeros(4, dtype=torch.float32)
+    weight_grad[0] = 2.0 * patch_a
+    weight_grad[1] = -2.0 * patch_a
+    bias_grad[0] = 2.0
+    bias_grad[1] = -2.0
+    weight_grad[2] = 3.0 * patch_b
+    weight_grad[3] = -3.0 * patch_b
+    bias_grad[2] = 3.0
+    bias_grad[3] = -3.0
+
+    result = recover_patches_from_shared_adapter_grads(
+        (weight_grad, bias_grad),
+        ["vit.adapter.shared.weight", "vit.adapter.shared.bias"],
+        probe,
+        batch_size=2,
+        n_patches=1,
+    )
+
+    assert_true(result.candidate_patch_count == 2, "two observable slots should produce two unordered candidates")
+    assert_true(result.candidate_patches.shape == (2, 2), "observable candidates should be a flat candidate set")
+    assert_true(result.recovered_patches.shape == (1, 1, 2), "reportable direct output should not fabricate batch rows")
+    assert_true(result.recovered_patch_count == 0, "batch-level candidates should not be counted as direct recovered patches")
+    assert_true(result.oracle_recovered_patches is None, "oracle fields should remain absent without private slot_indices")
 
 
 def test_clustering_reassembly_is_deterministic_for_fixed_seed():
@@ -298,11 +501,16 @@ def main():
     tests = [
         test_gradient_ratio_formula_recovers_known_patch,
         test_batch_recovery_applies_position_and_public_stats,
+        test_shared_adjacent_difference_recovery_inverts_probe_transform,
         test_patch_extract_fold_roundtrip_and_public_stats,
         test_public_stats_file_roundtrip_uses_explicit_file,
         test_public_stats_move_preserves_metadata_and_device,
-        test_vit_adapter_autograd_gradients_recover_patches,
+        test_shared_vit_adapter_autograd_gradients_recover_patches,
         test_vit_adapter_run_reports_loss_acc_and_device_local_outputs,
+        test_shared_adapter_gradient_shape_is_stable_across_batch_size,
+        test_dpsgd_per_example_shared_gradient_shapes_match_full_batch,
+        test_shared_recovery_counts_collisions_as_unresolved,
+        test_shared_recovery_without_oracle_keeps_batch_candidates_unordered,
         test_clustering_reassembly_is_deterministic_for_fixed_seed,
         test_clustered_reassembly_changes_patch_order_for_unsorted_inputs,
         test_clustering_reassembly_preserves_device,

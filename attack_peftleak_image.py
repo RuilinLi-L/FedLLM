@@ -7,15 +7,18 @@ import torch
 
 from attacks.peftleak_image.core import (
     build_public_patch_statistics,
-    build_vit_adapter_gradients,
+    build_peftleak_probe_statistics,
+    build_peftleak_probe_statistics_from_patch_stats,
+    build_shared_adapter_gradient_bundle,
+    build_shared_adapter_gradients,
     cluster_and_reassemble,
     extract_image_patches,
     fold_image_patches,
     load_public_patch_statistics,
-    move_patch_statistics,
+    move_peftleak_probe_statistics,
     mse_psnr,
+    recover_patches_from_shared_adapter_grads,
     recover_patch_from_adapter_grads,
-    recover_patches_from_named_adapter_grads,
     save_public_patch_statistics,
 )
 from utils.defense_common import add_shared_defense_args, defense_param_spec, fmt_summary_value
@@ -60,6 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n_classes", type=int, default=100)
     parser.add_argument("--patch_size", type=int, default=4)
     parser.add_argument("--adapter_hidden_dim", type=int, default=8)
+    parser.add_argument("--peftleak_num_bins", type=int, default=32)
+    parser.add_argument("--peftleak_position_sigma", type=float, default=1.0)
+    parser.add_argument("--peftleak_embed_scale", type=float, default=0.5)
+    parser.add_argument("--peftleak_gap", type=int, default=0)
     parser.add_argument("--patch_recovery_mse_threshold", type=float, default=1e-6)
     add_shared_defense_args(parser, default_grad_mode="eval")
     return parser
@@ -212,6 +219,38 @@ def _public_stats(args, public_images: torch.Tensor | None):
     return stats, "public_split"
 
 
+def _probe_stats(args, images: torch.Tensor, public_images: torch.Tensor | None):
+    n_patches = extract_image_patches(images, args.patch_size).shape[1]
+    if args.public_stats_path:
+        patch_stats = load_public_patch_statistics(args.public_stats_path)
+        probe_stats = build_peftleak_probe_statistics_from_patch_stats(
+            patch_stats,
+            n_patches=n_patches,
+            num_bins=args.peftleak_num_bins,
+            position_sigma=args.peftleak_position_sigma,
+            embed_scale=args.peftleak_embed_scale,
+            gap=args.peftleak_gap,
+            seed=args.rng_seed,
+            device=images.device,
+            dtype=images.dtype,
+        )
+        return probe_stats, f"file:{args.public_stats_path}"
+    if public_images is None:
+        raise ValueError("public_images are required when --public_stats_path is not provided.")
+    probe_stats = build_peftleak_probe_statistics(
+        public_images,
+        args.patch_size,
+        num_bins=args.peftleak_num_bins,
+        position_sigma=args.peftleak_position_sigma,
+        embed_scale=args.peftleak_embed_scale,
+        gap=args.peftleak_gap,
+        seed=args.rng_seed,
+    )
+    if args.save_public_stats_path:
+        save_public_patch_statistics(probe_stats.patch_stats, args.save_public_stats_path)
+    return probe_stats, "public_split"
+
+
 def _run_synthetic_ratio(args, images: torch.Tensor):
     patches = extract_image_patches(images, args.patch_size)
     if args.defense == "soteria":
@@ -227,13 +266,14 @@ def _run_synthetic_ratio(args, images: torch.Tensor):
     return recovered_flat.view(patches.shape), patches, None, None, len(names)
 
 
-def _run_vit_adapter(args, images: torch.Tensor, labels: torch.Tensor, stats):
+def _run_vit_adapter(args, images: torch.Tensor, labels: torch.Tensor, probe_stats):
     reference_patches = extract_image_patches(images, args.patch_size)
     grad_images = _defended_images(args, images)
+    probe_stats = move_peftleak_probe_statistics(probe_stats, device=images.device, dtype=images.dtype)
     if args.defense == "dpsgd":
-        full_result = build_vit_adapter_gradients(
+        full_result, per_example_results = build_shared_adapter_gradient_bundle(
             grad_images,
-            stats,
+            probe_stats,
             labels=labels,
             patch_size=args.patch_size,
             adapter_hidden_dim=args.adapter_hidden_dim,
@@ -242,33 +282,16 @@ def _run_vit_adapter(args, images: torch.Tensor, labels: torch.Tensor, stats):
             model_path=args.model_path,
             finetuned_path=args.finetuned_path,
         )
-        n_grads = len(full_result.grads)
-        per_example = []
-        for sample_idx in range(grad_images.shape[0]):
-            sample_result = build_vit_adapter_gradients(
-                grad_images[sample_idx : sample_idx + 1],
-                stats,
-                labels=labels[sample_idx : sample_idx + 1],
-                patch_size=args.patch_size,
-                adapter_hidden_dim=args.adapter_hidden_dim,
-                n_classes=args.n_classes,
-                seed=args.rng_seed + sample_idx * reference_patches.shape[1],
-                model_path=args.model_path,
-                finetuned_path=args.finetuned_path,
-            )
-            sample_grads = [None] * n_grads
-            offset = sample_idx * reference_patches.shape[1] * 2
-            for local_idx, grad in enumerate(sample_result.grads):
-                sample_grads[offset + local_idx] = grad
-            per_example.append(tuple(sample_grads))
+        per_example = [tuple(sample_result.grads) for sample_result in per_example_results]
         defended_grads = dpsgd_defense(per_example, args.defense_clip_norm, args.defense_noise or 0.0, seed=args.rng_seed)
         names = full_result.names
         loss = full_result.loss
         logits = full_result.logits
+        oracle_slot_indices = full_result.slot_indices
     else:
-        result = build_vit_adapter_gradients(
+        result = build_shared_adapter_gradients(
             grad_images,
-            stats,
+            probe_stats,
             labels=labels,
             patch_size=args.patch_size,
             adapter_hidden_dim=args.adapter_hidden_dim,
@@ -280,16 +303,17 @@ def _run_vit_adapter(args, images: torch.Tensor, labels: torch.Tensor, stats):
         defended_grads, names = _defend_gradient_tuple(args, result.grads, result.names)
         loss = result.loss
         logits = result.logits
-    recovered = recover_patches_from_named_adapter_grads(
+        oracle_slot_indices = result.slot_indices
+    recovery = recover_patches_from_shared_adapter_grads(
         defended_grads,
         names,
+        probe_stats,
         batch_size=images.shape[0],
         n_patches=reference_patches.shape[1],
-        patch_mean=stats.mean,
-        patch_std=stats.std,
+        slot_indices=oracle_slot_indices,
     )
     batch_top1_acc = float((logits.argmax(dim=-1) == labels.to(device=logits.device)).float().mean().item())
-    return recovered, reference_patches, loss, batch_top1_acc, len(names)
+    return recovery.recovered_patches, reference_patches, loss, batch_top1_acc, len(names), recovery
 
 
 def _emit_summary(args, fields: dict):
@@ -298,7 +322,7 @@ def _emit_summary(args, fields: dict):
         ("summary_version", 2),
         ("result_status", fields.get("result_status", "ok")),
         ("attack", "peftleak_image_repro"),
-        ("attack_variant", args.mode),
+        ("attack_variant", fields.get("attack_variant", args.mode)),
         ("dataset", args.dataset),
         ("device", fields.get("device")),
         ("data_source", fields.get("data_source")),
@@ -310,6 +334,10 @@ def _emit_summary(args, fields: dict):
         ("n_images", args.n_images),
         ("patch_size", args.patch_size),
         ("adapter_hidden_dim", args.adapter_hidden_dim),
+        ("peftleak_num_bins", getattr(args, "peftleak_num_bins", None)),
+        ("peftleak_position_sigma", getattr(args, "peftleak_position_sigma", None)),
+        ("peftleak_embed_scale", getattr(args, "peftleak_embed_scale", None)),
+        ("peftleak_gap", getattr(args, "peftleak_gap", None)),
         ("adapter_gradient_count", fields.get("adapter_gradient_count")),
         ("vit_adapter_loss", fields.get("vit_adapter_loss")),
         ("defense", args.defense),
@@ -317,8 +345,23 @@ def _emit_summary(args, fields: dict):
         ("defense_param_value", defense_param_value),
         ("mse", fields.get("mse")),
         ("psnr", fields.get("psnr")),
+        ("direct_mse", fields.get("direct_mse")),
+        ("direct_psnr", fields.get("direct_psnr")),
+        ("clustered_mse", fields.get("clustered_mse")),
+        ("clustered_psnr", fields.get("clustered_psnr")),
+        ("oracle_direct_mse", fields.get("oracle_direct_mse")),
+        ("oracle_direct_psnr", fields.get("oracle_direct_psnr")),
+        ("candidate_patch_count", fields.get("candidate_patch_count")),
+        ("recovered_patch_count", fields.get("recovered_patch_count")),
+        ("collision_patch_count", fields.get("collision_patch_count")),
+        ("unresolved_patch_count", fields.get("unresolved_patch_count")),
         ("patch_recovery_count", fields.get("patch_recovery_count")),
         ("patch_recovery_rate", fields.get("patch_recovery_rate")),
+        ("oracle_patch_recovery_count", fields.get("oracle_patch_recovery_count")),
+        ("oracle_patch_recovery_rate", fields.get("oracle_patch_recovery_rate")),
+        ("oracle_recovered_patch_count", fields.get("oracle_recovered_patch_count")),
+        ("oracle_collision_patch_count", fields.get("oracle_collision_patch_count")),
+        ("oracle_unresolved_patch_count", fields.get("oracle_unresolved_patch_count")),
         ("patch_count", fields.get("patch_count")),
         ("batch_top1_acc", fields.get("batch_top1_acc")),
         ("public_patch_count", fields.get("public_patch_count")),
@@ -362,45 +405,141 @@ def main(argv=None):
         labels = labels.to(device=device, dtype=torch.long)
         if args.public_stats_path:
             public_data_source = "file"
-            stats, stats_source = _public_stats(args, None)
+            public_images = None
         else:
             public_images, _public_labels, public_data_source = _load_images(args, public=True)
             public_images = public_images.to(device=device, dtype=images.dtype)
-            stats, stats_source = _public_stats(args, public_images)
-        stats = move_patch_statistics(stats, device=device, dtype=images.dtype)
+        probe_stats, stats_source = _probe_stats(args, images, public_images)
+        probe_stats = move_peftleak_probe_statistics(probe_stats, device=device, dtype=images.dtype)
+        recovery = None
         if args.mode == "synthetic_ratio":
             recovered, reference_patches, vit_loss, batch_top1_acc, grad_count = _run_synthetic_ratio(args, images)
+            attack_variant = "synthetic_ratio"
         else:
-            recovered, reference_patches, vit_loss, batch_top1_acc, grad_count = _run_vit_adapter(args, images, labels, stats)
+            recovered, reference_patches, vit_loss, batch_top1_acc, grad_count, recovery = _run_vit_adapter(
+                args,
+                images,
+                labels,
+                probe_stats,
+            )
+            attack_variant = "vit_adapter_shared_bins"
         grid_shape = (images.shape[2] // args.patch_size, images.shape[3] // args.patch_size)
-        assembled_clustered, _assignments = cluster_and_reassemble(
-            recovered,
-            channels=images.shape[1],
-            grid_shape=grid_shape,
-            patch_size=args.patch_size,
-            seed=args.rng_seed,
-        )
         folded_reference = fold_image_patches(
             reference_patches,
             channels=images.shape[1],
             grid_shape=grid_shape,
             patch_size=args.patch_size,
         )
-        mse, psnr = mse_psnr(assembled_clustered, folded_reference)
-        patch_mse = (recovered - reference_patches).float().pow(2).mean(dim=-1)
-        recovered_count = int((patch_mse < args.patch_recovery_mse_threshold).sum().item())
         patch_count = int(reference_patches.numel() // reference_patches.shape[-1])
+        direct_mse = direct_psnr = None
+        clustered_mse = clustered_psnr = None
+        oracle_direct_mse = oracle_direct_psnr = None
+        exact_count = None
+        patch_recovery_rate = None
+        oracle_exact_count = None
+        oracle_patch_recovery_rate = None
+        oracle_recovered_patch_count = None
+        oracle_collision_patch_count = None
+        oracle_unresolved_patch_count = None
+        if recovery is not None:
+            candidate_patch_count = recovery.candidate_patch_count
+            recovered_patch_count = recovery.recovered_patch_count
+            collision_patch_count = recovery.collision_patch_count
+            unresolved_patch_count = recovery.unresolved_patch_count
+            if recovered.shape == reference_patches.shape:
+                assembled_direct = fold_image_patches(
+                    recovered,
+                    channels=images.shape[1],
+                    grid_shape=grid_shape,
+                    patch_size=args.patch_size,
+                )
+                direct_mse, direct_psnr = mse_psnr(assembled_direct, folded_reference)
+                patch_mse = (recovered - reference_patches).float().pow(2).mean(dim=-1)
+                exact_mask = recovery.recovery_mask & (patch_mse < args.patch_recovery_mse_threshold)
+                exact_count = int(exact_mask.sum().item())
+                patch_recovery_rate = exact_count / max(1, patch_count)
+            if recovery.candidate_patch_count == patch_count and patch_count > 0:
+                candidate_batches = recovery.candidate_patches.view(
+                    images.shape[0],
+                    reference_patches.shape[1],
+                    reference_patches.shape[2],
+                )
+                assembled_clustered, _assignments = cluster_and_reassemble(
+                    candidate_batches,
+                    channels=images.shape[1],
+                    grid_shape=grid_shape,
+                    patch_size=args.patch_size,
+                    seed=args.rng_seed,
+                )
+                clustered_mse, clustered_psnr = mse_psnr(assembled_clustered, folded_reference)
+            if recovery.oracle_recovered_patches is not None and recovery.oracle_recovery_mask is not None:
+                oracle_recovered_patch_count = recovery.oracle_recovered_patch_count
+                oracle_collision_patch_count = recovery.oracle_collision_patch_count
+                oracle_unresolved_patch_count = recovery.oracle_unresolved_patch_count
+                oracle_patch_mse = (recovery.oracle_recovered_patches - reference_patches).float().pow(2).mean(dim=-1)
+                oracle_exact_mask = recovery.oracle_recovery_mask & (oracle_patch_mse < args.patch_recovery_mse_threshold)
+                oracle_exact_count = int(oracle_exact_mask.sum().item())
+                oracle_patch_recovery_rate = oracle_exact_count / max(1, patch_count)
+                if bool(recovery.oracle_recovery_mask.all().item()):
+                    assembled_oracle = fold_image_patches(
+                        recovery.oracle_recovered_patches,
+                        channels=images.shape[1],
+                        grid_shape=grid_shape,
+                        patch_size=args.patch_size,
+                    )
+                    oracle_direct_mse, oracle_direct_psnr = mse_psnr(assembled_oracle, folded_reference)
+        else:
+            assembled_direct = fold_image_patches(
+                recovered,
+                channels=images.shape[1],
+                grid_shape=grid_shape,
+                patch_size=args.patch_size,
+            )
+            assembled_clustered, _assignments = cluster_and_reassemble(
+                recovered,
+                channels=images.shape[1],
+                grid_shape=grid_shape,
+                patch_size=args.patch_size,
+                seed=args.rng_seed,
+            )
+            direct_mse, direct_psnr = mse_psnr(assembled_direct, folded_reference)
+            clustered_mse, clustered_psnr = mse_psnr(assembled_clustered, folded_reference)
+            patch_mse = (recovered - reference_patches).float().pow(2).mean(dim=-1)
+            exact_count = int((patch_mse < args.patch_recovery_mse_threshold).sum().item())
+            patch_recovery_rate = exact_count / max(1, patch_count)
+            candidate_patch_count = patch_count
+            recovered_patch_count = patch_count
+            collision_patch_count = 0
+            unresolved_patch_count = 0
+        report_mse = direct_mse if direct_mse is not None else clustered_mse
+        report_psnr = direct_psnr if direct_psnr is not None else clustered_psnr
         _emit_summary(
             args,
             {
                 "device": args.device,
-                "mse": mse,
-                "psnr": psnr,
-                "patch_recovery_count": recovered_count,
-                "patch_recovery_rate": recovered_count / max(1, patch_count),
+                "attack_variant": attack_variant,
+                "mse": report_mse,
+                "psnr": report_psnr,
+                "direct_mse": direct_mse,
+                "direct_psnr": direct_psnr,
+                "clustered_mse": clustered_mse,
+                "clustered_psnr": clustered_psnr,
+                "oracle_direct_mse": oracle_direct_mse,
+                "oracle_direct_psnr": oracle_direct_psnr,
+                "candidate_patch_count": candidate_patch_count,
+                "recovered_patch_count": recovered_patch_count,
+                "collision_patch_count": collision_patch_count,
+                "unresolved_patch_count": unresolved_patch_count,
+                "patch_recovery_count": exact_count,
+                "patch_recovery_rate": patch_recovery_rate,
+                "oracle_patch_recovery_count": oracle_exact_count,
+                "oracle_patch_recovery_rate": oracle_patch_recovery_rate,
+                "oracle_recovered_patch_count": oracle_recovered_patch_count,
+                "oracle_collision_patch_count": oracle_collision_patch_count,
+                "oracle_unresolved_patch_count": oracle_unresolved_patch_count,
                 "patch_count": patch_count,
                 "runtime": str(datetime.timedelta(seconds=time.time() - start)).split(".")[0],
-                "public_patch_count": stats.num_patches,
+                "public_patch_count": probe_stats.patch_stats.num_patches,
                 "public_stats_source": stats_source if args.public_stats_path else f"{stats_source}:{public_data_source}",
                 "data_source": data_source,
                 "effective_batch_size": int(images.shape[0]),
