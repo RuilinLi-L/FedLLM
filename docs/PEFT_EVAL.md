@@ -4,16 +4,17 @@
 
 `attack.py` and `scripts/peft_eval.sh` remain the DAGER-based PEFT span evaluation route.
 
-The reportable PEFTLeak reproduction is image-side:
+The PEFTLeak-style shared-bin mechanism reproduction is image-side:
 
 ```bash
 python attack_peftleak_image.py --mode vit_adapter \
   --dataset cifar100 \
   --data_root ./models_cache \
-  --model_path torchvision_vit_small
+  --model_path torchvision_vit_small \
+  --fail_on_synthetic_fallback
 ```
 
-This entrypoint reports `attack=peftleak_image_repro`. `--mode synthetic_ratio` is kept only for fast semantic/debug checks of the adapter gradient-ratio kernel.
+This entrypoint reports `attack=peftleak_image_repro`, `attack_variant=vit_adapter_shared_bins`, and `reproduction_level=peftleak_style_shared_bins`. It should be described as a PEFTLeak-style shared-bin mechanism reproduction, not as a faithful full official PEFTLeak reproduction. `--mode synthetic_ratio` is kept only for fast semantic/debug checks of the adapter gradient-ratio kernel.
 The image-side entrypoint now runs on a resolved `--device` (default `cuda` with GPU auto-selection) and keeps tensors on that device through gradient generation, recovery, and reassembly.
 
 The non-DAGER FedLLM PEFT text adaptation is separate:
@@ -35,7 +36,7 @@ none, noise, dpsgd, topk, compression, soteria, mixup, lrb, lrbprojonly, signed_
 
 `dager` is intentionally excluded from the FedLLM PEFT text matrix because it is DAGER-specific. If `attack_peftleak.py` receives `--defense dager`, it emits an explicit `unsupported` summary instead of folding that run into the text matrix.
 
-The original image-side PEFTLeak reproduction lives in `docs/PEFTLEAK_REPRO.md` and `attacks/peftleak_image/`.
+The image-side PEFTLeak-style mechanism implementation lives in `docs/PEFTLEAK_REPRO.md` and `attacks/peftleak_image/`.
 
 > Current training-defense status: LoRA/IA3 PEFT training supports
 > `none / noise / topk / compression / lrb / lrbprojonly` plus

@@ -1,4 +1,4 @@
-"""Original PEFTLeak-style image adapter leakage helpers."""
+"""PEFTLeak-style shared-bin image adapter leakage helpers."""
 
 from .core import (
     PatchStatistics,

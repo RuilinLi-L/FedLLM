@@ -1,5 +1,5 @@
 #!/bin/bash
-# Sweep the lightweight PEFTLeak image reproduction baselines (default mode: vit_adapter).
+# Sweep the lightweight PEFTLeak-style image smoke/defense sanity matrix.
 
 set -euo pipefail
 

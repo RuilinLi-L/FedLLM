@@ -30,6 +30,8 @@ from utils.lrb_presets import apply_lrb_preset
 
 SUMMARY_START = "===== RESULT SUMMARY START ====="
 SUMMARY_END = "===== RESULT SUMMARY END ====="
+PEFTLEAK_IMAGE_REPRODUCTION_LEVEL = "peftleak_style_shared_bins"
+SYNTHETIC_RATIO_REPRODUCTION_LEVEL = "synthetic_ratio_debug"
 SUPPORTED_IMAGE_DEFENSES = {
     "none",
     "noise",
@@ -44,8 +46,14 @@ SUPPORTED_IMAGE_DEFENSES = {
 }
 
 
+class SyntheticFallbackError(RuntimeError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = str(reason)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="PEFTLeak image-adapter reproduction with synthetic ratio and torchvision ViT-adapter modes")
+    parser = argparse.ArgumentParser(description="PEFTLeak-style image-adapter shared-bin mechanism with synthetic ratio and torchvision ViT-adapter modes")
     parser.add_argument("--mode", choices=["vit_adapter", "synthetic_ratio"], default="vit_adapter")
     parser.add_argument("--dataset", type=str, default="cifar100", choices=["cifar100", "synthetic"])
     parser.add_argument("--data_root", type=str, default="./models_cache")
@@ -68,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--peftleak_embed_scale", type=float, default=0.5)
     parser.add_argument("--peftleak_gap", type=int, default=0)
     parser.add_argument("--patch_recovery_mse_threshold", type=float, default=1e-6)
+    parser.add_argument(
+        "--fail_on_synthetic_fallback",
+        action="store_true",
+        help="Fail instead of falling back to synthetic data when CIFAR100 is unavailable.",
+    )
     add_shared_defense_args(parser, default_grad_mode="eval")
     return parser
 
@@ -80,9 +93,10 @@ def _synthetic_images(n_images: int, channels: int, image_size: int, seed: int) 
     return images, labels
 
 
-def _load_images(args, *, public: bool = False) -> tuple[torch.Tensor, torch.Tensor, str]:
+def _load_images(args, *, public: bool = False) -> tuple[torch.Tensor, torch.Tensor, str, str | None]:
     n_images = int(args.public_n_images if public else args.n_images)
     seed = int(args.rng_seed) + (7919 if public else 0)
+    fallback_reason = None
     if args.dataset == "cifar100":
         try:
             from torchvision import datasets, transforms
@@ -108,12 +122,20 @@ def _load_images(args, *, public: bool = False) -> tuple[torch.Tensor, torch.Ten
                 labels.append(int(label))
             if imgs:
                 source = "cifar100_public" if public else "cifar100_train"
-                return torch.stack(imgs, dim=0), torch.tensor(labels, dtype=torch.long), source
+                return torch.stack(imgs, dim=0), torch.tensor(labels, dtype=torch.long), source, None
+            fallback_reason = f"CIFAR100 split is empty at {data_root}."
         except Exception as exc:
-            print(f"[peftleak-image] CIFAR100 unavailable ({exc}); falling back to synthetic images.", flush=True)
+            fallback_reason = str(exc)
+
+        print(
+            f"[peftleak-image] CIFAR100 unavailable ({fallback_reason}); falling back to synthetic images.",
+            flush=True,
+        )
+        if getattr(args, "fail_on_synthetic_fallback", False):
+            raise SyntheticFallbackError(fallback_reason or "CIFAR100 unavailable.")
 
     images, labels = _synthetic_images(n_images, args.channels, args.image_size, seed)
-    return images, labels % int(args.n_classes), "synthetic_public" if public else "synthetic_attack"
+    return images, labels % int(args.n_classes), "synthetic_public" if public else "synthetic_attack", fallback_reason
 
 
 def _patch_to_grads(patch: torch.Tensor, hidden_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -318,15 +340,26 @@ def _run_vit_adapter(args, images: torch.Tensor, labels: torch.Tensor, probe_sta
 
 def _emit_summary(args, fields: dict):
     defense_param_name, defense_param_value = defense_param_spec(args)
+    variant = fields.get("attack_variant", args.mode)
+    default_reproduction_level = (
+        PEFTLEAK_IMAGE_REPRODUCTION_LEVEL
+        if variant in {"vit_adapter", "vit_adapter_shared_bins"}
+        else SYNTHETIC_RATIO_REPRODUCTION_LEVEL
+    )
+    default_oracle_scope = "debug_only" if variant in {"vit_adapter", "vit_adapter_shared_bins"} else "n/a"
     ordered = [
         ("summary_version", 2),
         ("result_status", fields.get("result_status", "ok")),
         ("attack", "peftleak_image_repro"),
-        ("attack_variant", fields.get("attack_variant", args.mode)),
+        ("attack_variant", variant),
+        ("reproduction_level", fields.get("reproduction_level", default_reproduction_level)),
+        ("oracle_metric_scope", fields.get("oracle_metric_scope", default_oracle_scope)),
         ("dataset", args.dataset),
         ("device", fields.get("device")),
         ("data_source", fields.get("data_source")),
         ("public_stats_source", fields.get("public_stats_source")),
+        ("synthetic_fallback", fields.get("synthetic_fallback")),
+        ("fallback_reason", fields.get("fallback_reason")),
         ("model_path", args.model_path),
         ("finetuned_path", args.finetuned_path or "n/a"),
         ("batch_size", args.batch_size),
@@ -345,6 +378,7 @@ def _emit_summary(args, fields: dict):
         ("defense_param_value", defense_param_value),
         ("mse", fields.get("mse")),
         ("psnr", fields.get("psnr")),
+        ("primary_metric_source", fields.get("primary_metric_source")),
         ("direct_mse", fields.get("direct_mse")),
         ("direct_psnr", fields.get("direct_psnr")),
         ("clustered_mse", fields.get("clustered_mse")),
@@ -352,6 +386,9 @@ def _emit_summary(args, fields: dict):
         ("oracle_direct_mse", fields.get("oracle_direct_mse")),
         ("oracle_direct_psnr", fields.get("oracle_direct_psnr")),
         ("candidate_patch_count", fields.get("candidate_patch_count")),
+        ("nonzero_slot_count", fields.get("nonzero_slot_count")),
+        ("ambiguous_position_count", fields.get("ambiguous_position_count")),
+        ("empty_position_count", fields.get("empty_position_count")),
         ("recovered_patch_count", fields.get("recovered_patch_count")),
         ("collision_patch_count", fields.get("collision_patch_count")),
         ("unresolved_patch_count", fields.get("unresolved_patch_count")),
@@ -400,14 +437,19 @@ def main(argv=None):
         raise NotImplementedError(f"Unsupported image PEFTLeak defense: {args.defense!r}")
 
     try:
-        images, labels, data_source = _load_images(args, public=False)
+        fallback_reasons = []
+        images, labels, data_source, data_fallback_reason = _load_images(args, public=False)
+        if data_fallback_reason:
+            fallback_reasons.append(f"attack:{data_fallback_reason}")
         images = images.to(device=device, dtype=torch.float32)
         labels = labels.to(device=device, dtype=torch.long)
         if args.public_stats_path:
             public_data_source = "file"
             public_images = None
         else:
-            public_images, _public_labels, public_data_source = _load_images(args, public=True)
+            public_images, _public_labels, public_data_source, public_fallback_reason = _load_images(args, public=True)
+            if public_fallback_reason:
+                fallback_reasons.append(f"public:{public_fallback_reason}")
             public_images = public_images.to(device=device, dtype=images.dtype)
         probe_stats, stats_source = _probe_stats(args, images, public_images)
         probe_stats = move_peftleak_probe_statistics(probe_stats, device=device, dtype=images.dtype)
@@ -441,7 +483,9 @@ def main(argv=None):
         oracle_recovered_patch_count = None
         oracle_collision_patch_count = None
         oracle_unresolved_patch_count = None
+        recovery_metadata = {}
         if recovery is not None:
+            recovery_metadata = recovery.raw_candidate_metadata
             candidate_patch_count = recovery.candidate_patch_count
             recovered_patch_count = recovery.recovered_patch_count
             collision_patch_count = recovery.collision_patch_count
@@ -513,13 +557,31 @@ def main(argv=None):
             unresolved_patch_count = 0
         report_mse = direct_mse if direct_mse is not None else clustered_mse
         report_psnr = direct_psnr if direct_psnr is not None else clustered_psnr
+        if direct_mse is not None:
+            primary_metric_source = "direct"
+        elif clustered_mse is not None:
+            primary_metric_source = "clustered"
+        else:
+            primary_metric_source = "n/a"
+        synthetic_fallback = int(
+            args.dataset == "cifar100"
+            and (str(data_source).startswith("synthetic") or str(public_data_source).startswith("synthetic"))
+        )
+        fallback_reason = "; ".join(fallback_reasons) if fallback_reasons else None
         _emit_summary(
             args,
             {
                 "device": args.device,
                 "attack_variant": attack_variant,
+                "reproduction_level": (
+                    PEFTLEAK_IMAGE_REPRODUCTION_LEVEL
+                    if attack_variant == "vit_adapter_shared_bins"
+                    else SYNTHETIC_RATIO_REPRODUCTION_LEVEL
+                ),
+                "oracle_metric_scope": "debug_only" if attack_variant == "vit_adapter_shared_bins" else "n/a",
                 "mse": report_mse,
                 "psnr": report_psnr,
+                "primary_metric_source": primary_metric_source,
                 "direct_mse": direct_mse,
                 "direct_psnr": direct_psnr,
                 "clustered_mse": clustered_mse,
@@ -527,6 +589,9 @@ def main(argv=None):
                 "oracle_direct_mse": oracle_direct_mse,
                 "oracle_direct_psnr": oracle_direct_psnr,
                 "candidate_patch_count": candidate_patch_count,
+                "nonzero_slot_count": recovery_metadata.get("nonzero_slot_count"),
+                "ambiguous_position_count": recovery_metadata.get("ambiguous_position_count"),
+                "empty_position_count": recovery_metadata.get("empty_position_count"),
                 "recovered_patch_count": recovered_patch_count,
                 "collision_patch_count": collision_patch_count,
                 "unresolved_patch_count": unresolved_patch_count,
@@ -542,6 +607,8 @@ def main(argv=None):
                 "public_patch_count": probe_stats.patch_stats.num_patches,
                 "public_stats_source": stats_source if args.public_stats_path else f"{stats_source}:{public_data_source}",
                 "data_source": data_source,
+                "synthetic_fallback": synthetic_fallback,
+                "fallback_reason": fallback_reason,
                 "effective_batch_size": int(images.shape[0]),
                 "vit_adapter_loss": vit_loss,
                 "batch_top1_acc": batch_top1_acc,
@@ -550,11 +617,14 @@ def main(argv=None):
         )
         return 0
     except Exception as exc:
+        fallback_failed = isinstance(exc, SyntheticFallbackError)
         _emit_summary(
             args,
             {
                 "result_status": "failed",
                 "device": args.device,
+                "synthetic_fallback": 1 if fallback_failed else None,
+                "fallback_reason": exc.reason if fallback_failed else None,
                 "runtime": str(datetime.timedelta(seconds=time.time() - start)).split(".")[0],
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),

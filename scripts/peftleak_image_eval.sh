@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run one original PEFTLeak-style image reproduction experiment (default mode: vit_adapter).
+# Run one PEFTLeak-style image shared-bin mechanism experiment (default mode: vit_adapter).
 
 set -euo pipefail
 
@@ -8,4 +8,3 @@ DAGER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$DAGER_ROOT" || exit 1
 
 python attack_peftleak_image.py "$@"
-

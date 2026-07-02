@@ -4,7 +4,7 @@
 
 The PEFT leakage track is now split into two non-equivalent paths. Existing `attack.py` PEFT evaluation remains DAGER-based and should be reported as a DAGER PEFT span baseline.
 
-`attack_peftleak_image.py --mode vit_adapter` is the PEFTLeak image/adapter reproduction path and reports `attack=peftleak_image_repro`. It uses autograd gradients from a torchvision ViT backbone with a malicious adapter branch. `--mode synthetic_ratio` is kept only as a debug/semantic test path.
+`attack_peftleak_image.py --mode vit_adapter` is the PEFTLeak-style image/adapter shared-bin mechanism path and reports `attack=peftleak_image_repro`, `attack_variant=vit_adapter_shared_bins`, and `reproduction_level=peftleak_style_shared_bins`. It uses autograd gradients from a torchvision ViT backbone with a malicious adapter branch. `--mode synthetic_ratio` is kept only as a debug/semantic test path. Use `--fail_on_synthetic_fallback` when a run must use real CIFAR100 data rather than synthetic smoke data.
 
 `attack_peftleak.py` is the non-DAGER FedLLM PEFT text adaptation and reports `attack=fedllm_peft_text_opt`. It attacks LoRA/IA3 adapter gradients by optimizing dummy input embeddings to match shared PEFT gradients, then decodes embeddings to nearest tokenizer tokens. It should not be reported as the original PEFTLeak reproduction.
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -28,12 +30,16 @@ from attacks.peftleak_image.core import (
     save_public_patch_statistics,
 )
 from attack_peftleak_image import (
+    SUMMARY_END,
+    SUMMARY_START,
+    SyntheticFallbackError,
     _defend_gradient_tuple,
     _make_raw_gradient_tuple,
     _recover_from_gradient_tuple,
     _run_synthetic_ratio,
     _run_vit_adapter,
     build_parser,
+    main as image_main,
 )
 
 
@@ -44,6 +50,66 @@ def assert_true(condition, message):
 
 def runtime_device():
     return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+def parse_result_summary(output: str) -> dict[str, str]:
+    lines = output.splitlines()
+    try:
+        start = lines.index(SUMMARY_START)
+        end = lines.index(SUMMARY_END)
+    except ValueError as exc:
+        raise AssertionError(f"Missing result summary in output:\n{output}") from exc
+    fields = {}
+    for line in lines[start + 1 : end]:
+        if "=" in line:
+            key, value = line.split("=", 1)
+            fields[key] = value
+    return fields
+
+
+def run_image_main(argv, *, expect_error: bool = False):
+    buffer = io.StringIO()
+    caught = None
+    code = None
+    with contextlib.redirect_stdout(buffer):
+        try:
+            code = image_main(argv)
+        except Exception as exc:  # noqa: BLE001 - test helper returns the captured failure
+            caught = exc
+    if caught is not None and not expect_error:
+        raise caught
+    if caught is None and expect_error:
+        raise AssertionError("Expected image_main to raise, but it returned normally.")
+    return code, caught, parse_result_summary(buffer.getvalue()), buffer.getvalue()
+
+
+def tiny_cli_args(batch_size: int) -> list[str]:
+    return [
+        "--mode",
+        "vit_adapter",
+        "--dataset",
+        "synthetic",
+        "--n_images",
+        str(batch_size),
+        "--batch_size",
+        str(batch_size),
+        "--public_n_images",
+        "4",
+        "--image_size",
+        "4",
+        "--channels",
+        "1",
+        "--n_classes",
+        "4",
+        "--patch_size",
+        "2",
+        "--adapter_hidden_dim",
+        "3",
+        "--peftleak_num_bins",
+        "16",
+        "--device",
+        "cpu",
+    ]
 
 
 def manual_probe(mean, std, position, *, num_bins=1, embed_scale=0.5, gap=0, device=None):
@@ -265,6 +331,107 @@ def test_vit_adapter_run_reports_loss_acc_and_device_local_outputs():
     assert_true(recovery.recovered_patches.shape == recovered.shape, "run_vit_adapter should return structured recovery metadata")
     assert_true(recovered.shape[0] == 1, "multi-sample vit_adapter should not fabricate per-sample direct recovery")
     assert_true(recovery.oracle_recovered_patches.shape == reference.shape, "oracle debug recovery should stay separate from reportable output")
+
+
+def test_cli_batch1_reports_direct_primary_metric_and_shared_metadata():
+    code, _exc, summary, _output = run_image_main(tiny_cli_args(1))
+
+    assert_true(code == 0, "batch=1 CLI smoke should succeed")
+    assert_true(summary["result_status"] == "ok", "batch=1 summary should be ok")
+    assert_true(summary["attack_variant"] == "vit_adapter_shared_bins", "vit_adapter should use shared-bin variant")
+    assert_true(
+        summary["reproduction_level"] == "peftleak_style_shared_bins",
+        "summary should label the current reproduction level precisely",
+    )
+    assert_true(summary["primary_metric_source"] == "direct", "batch=1 should use non-oracle direct metrics")
+    assert_true(summary["direct_mse"] != "n/a", "batch=1 direct metric should be available")
+    assert_true(summary["oracle_metric_scope"] == "debug_only", "oracle metrics should be explicitly debug-only")
+    assert_true(summary["nonzero_slot_count"] != "n/a", "shared-bin nonzero slot metadata should be reported")
+    assert_true(summary["ambiguous_position_count"] != "n/a", "shared-bin ambiguity metadata should be reported")
+    assert_true(summary["empty_position_count"] != "n/a", "shared-bin empty-position metadata should be reported")
+
+
+def test_cli_batch2_keeps_direct_metrics_non_oracle():
+    code, _exc, summary, _output = run_image_main(tiny_cli_args(2))
+
+    assert_true(code == 0, "batch=2 CLI smoke should succeed")
+    assert_true(summary["primary_metric_source"] in {"clustered", "n/a"}, "batch=2 should not use oracle direct metrics")
+    assert_true(summary["direct_mse"] == "n/a", "batch=2 direct metric should remain unavailable without oracle assignment")
+    assert_true(summary["patch_recovery_rate"] == "n/a", "batch=2 exact recovery should not use oracle slot assignments")
+    assert_true(summary["oracle_patch_recovery_rate"] != "n/a", "oracle debug recovery can still be reported separately")
+    assert_true(summary["oracle_metric_scope"] == "debug_only", "oracle fields should be labeled debug-only")
+
+
+def test_cli_cifar100_fallback_is_marked_by_default():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code, _exc, summary, _output = run_image_main(
+            [
+                "--mode",
+                "synthetic_ratio",
+                "--dataset",
+                "cifar100",
+                "--data_root",
+                tmpdir,
+                "--cache_dir",
+                tmpdir,
+                "--n_images",
+                "1",
+                "--public_n_images",
+                "1",
+                "--image_size",
+                "4",
+                "--channels",
+                "1",
+                "--patch_size",
+                "2",
+                "--adapter_hidden_dim",
+                "3",
+                "--device",
+                "cpu",
+            ]
+        )
+
+    assert_true(code == 0, "default CIFAR100 fallback should keep smoke runs compatible")
+    assert_true(summary["result_status"] == "ok", "fallback smoke summary should be ok")
+    assert_true(summary["synthetic_fallback"] == "1", "CIFAR100 synthetic fallback should be marked")
+    assert_true(summary["fallback_reason"] != "n/a", "fallback reason should be reported")
+
+
+def test_cli_cifar100_fallback_can_fail_explicitly():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _code, exc, summary, _output = run_image_main(
+            [
+                "--mode",
+                "synthetic_ratio",
+                "--dataset",
+                "cifar100",
+                "--data_root",
+                tmpdir,
+                "--cache_dir",
+                tmpdir,
+                "--n_images",
+                "1",
+                "--public_n_images",
+                "1",
+                "--image_size",
+                "4",
+                "--channels",
+                "1",
+                "--patch_size",
+                "2",
+                "--adapter_hidden_dim",
+                "3",
+                "--device",
+                "cpu",
+                "--fail_on_synthetic_fallback",
+            ],
+            expect_error=True,
+        )
+
+    assert_true(isinstance(exc, SyntheticFallbackError), "explicit fallback guard should raise SyntheticFallbackError")
+    assert_true(summary["result_status"] == "failed", "guarded fallback should emit a failed summary")
+    assert_true(summary["synthetic_fallback"] == "1", "failed fallback summary should mark synthetic fallback")
+    assert_true(summary["fallback_reason"] != "n/a", "failed fallback summary should include the reason")
 
 
 def test_shared_adapter_gradient_shape_is_stable_across_batch_size():
@@ -507,6 +674,10 @@ def main():
         test_public_stats_move_preserves_metadata_and_device,
         test_shared_vit_adapter_autograd_gradients_recover_patches,
         test_vit_adapter_run_reports_loss_acc_and_device_local_outputs,
+        test_cli_batch1_reports_direct_primary_metric_and_shared_metadata,
+        test_cli_batch2_keeps_direct_metrics_non_oracle,
+        test_cli_cifar100_fallback_is_marked_by_default,
+        test_cli_cifar100_fallback_can_fail_explicitly,
         test_shared_adapter_gradient_shape_is_stable_across_batch_size,
         test_dpsgd_per_example_shared_gradient_shapes_match_full_batch,
         test_shared_recovery_counts_collisions_as_unresolved,
