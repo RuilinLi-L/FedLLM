@@ -176,3 +176,20 @@ def resolve_cuda_device(requested_device: str = "cuda") -> str:
 
     best = _select_gpu(snapshots)
     return f"cuda:{best.visible_index}"
+
+
+def resolve_gradient_device(requested_device_grad: str | None, resolved_device: str) -> str:
+    """Resolve the gradient device after the main device has been selected.
+
+    By default, attack gradients follow the resolved compute device. Explicit
+    CPU or indexed CUDA choices are preserved for reproducibility.
+    """
+    if requested_device_grad is None:
+        return resolved_device
+
+    normalized = str(requested_device_grad).strip().lower()
+    if normalized in {"", "auto", "follow", "same", "device"}:
+        return resolved_device
+    if normalized == "cuda" and resolved_device.startswith("cuda"):
+        return resolved_device
+    return requested_device_grad

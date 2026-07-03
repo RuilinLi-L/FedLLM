@@ -28,7 +28,7 @@ from utils.defenses import (
     requires_gradient_generation_defense,
     topk_sparsification,
 )
-from utils.gpu import resolve_cuda_device
+from utils.gpu import resolve_cuda_device, resolve_gradient_device
 from utils.lrb_defense import apply_lrb_defense
 from utils.lrb_presets import apply_lrb_preset
 from utils.representation_bottleneck import rep_bottleneck_summary_fields, validate_rep_bottleneck_args
@@ -64,7 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--finetuned_path", type=str, required=True)
     parser.add_argument("--cache_dir", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--device_grad", type=str, default="cpu")
+    parser.add_argument(
+        "--device_grad",
+        type=str,
+        default="auto",
+        help="Gradient computation device. 'auto' follows the resolved --device; use 'cpu' to reproduce the legacy path.",
+    )
     parser.add_argument("--attn_implementation", type=str, default="eager", choices=["sdpa", "eager"])
     parser.add_argument("--precision", type=str, default="full", choices=["8bit", "half", "full", "double"])
     parser.add_argument("--pad", choices=["right", "left"], default="right")
@@ -635,11 +640,11 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     args.device = resolve_cuda_device(args.device)
-    args.device_grad = args.device_grad or args.device
+    args.device_grad = resolve_gradient_device(args.device_grad, args.device)
     _validate_args(args)
     np.random.seed(args.rng_seed)
     torch.manual_seed(args.rng_seed)
-    print(f"[peftleak] Using device: {args.device}", flush=True)
+    print(f"[peftleak] Using device: {args.device} | gradient device: {args.device_grad}", flush=True)
     tracker = _init_tracker(args)
     start_time = time.time()
 

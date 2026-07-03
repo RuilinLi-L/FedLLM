@@ -38,7 +38,12 @@ def get_args(argv=None):
     parser.add_argument('--finetuned_path', type=str, default=None)
     parser.add_argument('--cache_dir', type=str, default=None)
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--device_grad', type=str, default='cpu')
+    parser.add_argument(
+        '--device_grad',
+        type=str,
+        default='auto',
+        help="Gradient computation device. 'auto' follows the resolved --device; use 'cpu' to reproduce the legacy path.",
+    )
     parser.add_argument('--attn_implementation', type=str, default='sdpa', choices=['sdpa', 'eager'])
 
     parser.add_argument('--precision', type=str, default='full', choices=['8bit', 'half', 'full', 'double'])
@@ -75,8 +80,24 @@ def get_args(argv=None):
         '--gradient_param_filter',
         type=str,
         default='all',
-        choices=['all', 'qkv_only', 'lora_only'],
-        help='Gradient exposure by parameter/module family; lora_only means PEFT adapter parameters.',
+        choices=[
+            'all',
+            'qkv_only',
+            'query_only',
+            'key_only',
+            'value_only',
+            'attn_out_only',
+            'attn_only',
+            'ffn_in_only',
+            'ffn_out_only',
+            'ffn_only',
+            'classifier_only',
+            'lora_only',
+        ],
+        help=(
+            'Gradient exposure by parameter/module family. qkv_only/lora_only are DAGER-compatible; '
+            'split attention and FFN selectors are PTG-only and should use attack_partial_gradient.py.'
+        ),
     )
     parser.add_argument(
         '--partial_nonprefix_candidate_cap',
