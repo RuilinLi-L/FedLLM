@@ -14,6 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from attacks.peftleak_image.core import (
     PatchStatistics,
     PeftLeakProbeStatistics,
+    build_official_aligned_adapter_gradients,
+    build_official_aligned_probe_statistics,
     build_peftleak_probe_statistics,
     build_public_patch_statistics,
     build_shared_adapter_gradient_bundle,
@@ -25,9 +27,12 @@ from attacks.peftleak_image.core import (
     move_patch_statistics,
     optimize_patch_baseline,
     recover_patch_from_adapter_grads,
+    recover_patches_from_official_adapter_grads,
     recover_patches_from_batch,
     recover_patches_from_shared_adapter_grads,
+    resolve_official_adapter_layer_count,
     save_public_patch_statistics,
+    simple_ssim,
 )
 from attack_peftleak_image import (
     SUMMARY_END,
@@ -248,6 +253,57 @@ def test_public_stats_move_preserves_metadata_and_device():
     assert_true(moved.num_patches == stats.num_patches, "public stats patch count should be preserved")
 
 
+def test_official_public_cdf_probe_is_deterministic():
+    images = torch.linspace(0, 1, steps=4 * 1 * 4 * 4, dtype=torch.float32).view(4, 1, 4, 4)
+
+    first = build_official_aligned_probe_statistics(images, patch_size=2, num_bins=8, seed=17)
+    second = build_official_aligned_probe_statistics(images, patch_size=2, num_bins=8, seed=17)
+
+    assert_true(torch.allclose(first.bin_edges, second.bin_edges), "official CDF bins should be deterministic")
+    assert_true(torch.allclose(first.position_embeddings, second.position_embeddings), "official position probes should be deterministic")
+    assert_true(first.bin_counts.sum().item() == first.patch_stats.num_patches, "bin counts should cover the public patch set")
+    assert_true(resolve_official_adapter_layer_count("all", vit_config="cifar_small") > 0, "official layer resolver should produce layers")
+
+
+def test_official_gradient_ratio_recovers_batch1_without_oracle():
+    device = runtime_device()
+    images = torch.rand(1, 1, 4, 4, device=device)
+    public = torch.rand(8, 1, 4, 4, device=device)
+    probe = build_official_aligned_probe_statistics(public, patch_size=2, num_bins=32, seed=31)
+    result = build_official_aligned_adapter_gradients(
+        images,
+        probe,
+        labels=torch.tensor([1], dtype=torch.long, device=device),
+        patch_size=2,
+        n_classes=4,
+        seed=31,
+        adapter_layers="first_n",
+        adapter_bottleneck_dim=3,
+    )
+    recovery = recover_patches_from_official_adapter_grads(
+        result.grads,
+        result.names,
+        probe,
+        batch_size=1,
+        n_patches=4,
+    )
+    reference = extract_image_patches(images, patch_size=2)
+
+    assert_true(recovery.oracle_recovered_patches is None, "official primary recovery should not use oracle slot assignments")
+    assert_true(recovery.recovered_patches.shape == reference.shape, "official recovery should return batch-shaped patches")
+    assert_true(bool(recovery.recovery_mask.all().item()), "official batch=1 recovery should recover all patches non-oracle")
+    assert_true(torch.allclose(recovery.recovered_patches, reference, atol=1e-5), "official batch=1 recovery should match reference patches")
+    assert_true(torch.isfinite(recovery.recovered_patches).all(), "official recovered patches should stay finite")
+
+
+def test_simple_ssim_reports_perfect_match():
+    images = torch.rand(2, 1, 4, 4)
+
+    score = simple_ssim(images, images)
+
+    assert_true(abs(score - 1.0) < 1e-6, "SSIM should be one for identical tensors")
+
+
 def test_shared_vit_adapter_autograd_gradients_recover_patches():
     device = runtime_device()
     attack_images = torch.rand(1, 1, 4, 4, device=device)
@@ -360,6 +416,92 @@ def test_cli_batch2_keeps_direct_metrics_non_oracle():
     assert_true(summary["patch_recovery_rate"] == "n/a", "batch=2 exact recovery should not use oracle slot assignments")
     assert_true(summary["oracle_patch_recovery_rate"] != "n/a", "oracle debug recovery can still be reported separately")
     assert_true(summary["oracle_metric_scope"] == "debug_only", "oracle fields should be labeled debug-only")
+
+
+def test_cli_official_batch2_reports_non_oracle_primary_metrics():
+    argv = tiny_cli_args(2)
+    mode_idx = argv.index("--mode") + 1
+    argv[mode_idx] = "official_vit_adapter"
+    argv.extend(
+        [
+            "--vit_config",
+            "cifar_small",
+            "--adapter_layers",
+            "first_n",
+            "--adapter_bottleneck_dim",
+            "3",
+            "--official_grouping",
+            "tag",
+            "--peftleak_num_bins",
+            "32",
+        ]
+    )
+
+    code, _exc, summary, _output = run_image_main(argv)
+
+    assert_true(code == 0, "official batch=2 CLI smoke should succeed")
+    assert_true(summary["attack_variant"] == "official_vit_adapter", "official mode should report its attack variant")
+    assert_true(
+        summary["reproduction_level"] == "peftleak_official_aligned_v1",
+        "official mode should use the official-aligned reproduction level",
+    )
+    assert_true(summary["non_oracle_grouping"] == "tag", "official mode should report tag grouping")
+    assert_true(summary["oracle_patch_recovery_rate"] == "n/a", "official primary metrics should not use oracle recovery")
+    assert_true(summary["primary_metric_source"] == "direct", "official tag grouping should provide direct primary metrics")
+    assert_true(summary["ssim"] != "n/a", "official mode should report SSIM")
+
+
+def test_cli_official_cluster_grouping_does_not_report_direct_metrics():
+    argv = tiny_cli_args(2)
+    mode_idx = argv.index("--mode") + 1
+    argv[mode_idx] = "official_vit_adapter"
+    argv.extend(
+        [
+            "--vit_config",
+            "cifar_small",
+            "--adapter_layers",
+            "first_n",
+            "--attack_rounds",
+            "2",
+            "--official_grouping",
+            "cluster",
+            "--peftleak_num_bins",
+            "32",
+        ]
+    )
+
+    code, _exc, summary, _output = run_image_main(argv)
+
+    assert_true(code == 0, "official cluster grouping CLI smoke should succeed")
+    assert_true(summary["non_oracle_grouping"] == "cluster", "summary should report requested cluster grouping")
+    assert_true(summary["attack_rounds"] == "2", "summary should report requested attack rounds")
+    assert_true(summary["adapter_gradient_count"] == "16", "two first_n official rounds should expose two rounds of adapter gradients")
+    assert_true(summary["direct_mse"] == "n/a", "cluster grouping should not silently reuse tag-direct metrics")
+    assert_true(summary["primary_metric_source"] in {"clustered", "n/a"}, "cluster grouping should use clustered or unavailable primary metrics")
+
+
+def test_cli_batch_size_drives_attack_batches():
+    argv = tiny_cli_args(4)
+    batch_idx = argv.index("--batch_size") + 1
+    argv[batch_idx] = "2"
+
+    code, _exc, summary, _output = run_image_main(argv)
+
+    assert_true(code == 0, "batched CLI smoke should succeed")
+    assert_true(summary["effective_batch_size"] == "2", "effective batch size should follow --batch_size")
+    assert_true(summary["attack_batch_count"] == "2", "n_images=4,batch_size=2 should run two attack batches")
+
+
+def test_cli_metrics_controls_primary_report_fields():
+    argv = tiny_cli_args(1)
+    argv.extend(["--metrics", "psnr"])
+
+    code, _exc, summary, _output = run_image_main(argv)
+
+    assert_true(code == 0, "metrics-filtered CLI smoke should succeed")
+    assert_true(summary["mse"] == "n/a", "mse should be omitted from primary report when not requested")
+    assert_true(summary["psnr"] != "n/a", "requested psnr should still be reported")
+    assert_true(summary["patch_recovery_rate"] == "n/a", "patch recovery should be omitted when not requested")
 
 
 def test_cli_cifar100_fallback_is_marked_by_default():
@@ -672,10 +814,17 @@ def main():
         test_patch_extract_fold_roundtrip_and_public_stats,
         test_public_stats_file_roundtrip_uses_explicit_file,
         test_public_stats_move_preserves_metadata_and_device,
+        test_official_public_cdf_probe_is_deterministic,
+        test_official_gradient_ratio_recovers_batch1_without_oracle,
+        test_simple_ssim_reports_perfect_match,
         test_shared_vit_adapter_autograd_gradients_recover_patches,
         test_vit_adapter_run_reports_loss_acc_and_device_local_outputs,
         test_cli_batch1_reports_direct_primary_metric_and_shared_metadata,
         test_cli_batch2_keeps_direct_metrics_non_oracle,
+        test_cli_official_batch2_reports_non_oracle_primary_metrics,
+        test_cli_official_cluster_grouping_does_not_report_direct_metrics,
+        test_cli_batch_size_drives_attack_batches,
+        test_cli_metrics_controls_primary_report_fields,
         test_cli_cifar100_fallback_is_marked_by_default,
         test_cli_cifar100_fallback_can_fail_explicitly,
         test_shared_adapter_gradient_shape_is_stable_across_batch_size,
