@@ -251,6 +251,7 @@ def _emit_result_summary(args, tracker):
         ("model_path", args.model_path),
         ("finetuned_path", args.finetuned_path),
         ("batch_size", args.batch_size),
+        ("seed", getattr(args, "rng_seed", None)),
         ("train_method", args.train_method),
         ("peft_method", getattr(args, "peft_method", None)),
         ("peft_type", getattr(args, "peft_type", None)),

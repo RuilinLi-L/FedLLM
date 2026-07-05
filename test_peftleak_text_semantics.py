@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 from types import ModuleType, SimpleNamespace
@@ -468,6 +470,53 @@ def test_attack_entrypoint_policy_rejects_prefix_and_keeps_dager_unsupported():
     assert_true(validated.defense == "dager", "DAGER defense should parse so the entrypoint can emit unsupported summary")
 
 
+def test_attack_result_summary_emits_seed():
+    from attack_peftleak import _emit_result_summary, _init_tracker, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--dataset", "sst2",
+            "--split", "val",
+            "--n_inputs", "1",
+            "--finetuned_path", "dummy",
+            "--peft_method", "adapter",
+            "--peftleak_attack_mode", "ratio",
+            "--rng_seed", "202",
+        ]
+    )
+    tracker = _init_tracker(args)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _emit_result_summary(args, tracker)
+    text = buf.getvalue()
+
+    assert_true("\nseed=202\n" in text, f"PEFTLeak text summary should emit the rng seed, got:\n{text}")
+
+
+def test_peftleak_eval_script_multi_seed_logging_contract():
+    root = os.path.dirname(os.path.abspath(__file__))
+    script_path = os.path.join(root, "scripts", "peftleak_eval.sh")
+    with open(script_path, "r", encoding="utf-8") as handle:
+        script = handle.read()
+
+    assert_true("PEFTLEAK_SEEDS:-101 202 303" in script, "default PEFTLeak text seeds should be 101/202/303")
+    assert_true("PEFTLEAK_LOG_DIR:-log/peftleak_text_${DATASET}/privacy" in script, "privacy log dir should be overridable")
+    assert_true("_seed${seed}.txt" in script, "log filenames should include the seed suffix")
+    assert_true('tee "$log_file"' in script, "wrapper should tee terminal output into each seed log")
+    assert_true('if has_flag "--rng_seed"' in script, "explicit --rng_seed should switch the wrapper to single-seed mode")
+    assert_true('RUN_EXTRA+=( "$arg" )' in script, "wrapper should remove user seed args before appending per-run seed")
+
+    for expected in (
+        "--defense_topk_ratio",
+        "--defense_n_bits",
+        "--defense_noise",
+        "--defense_lrb_keep_ratio_sensitive",
+    ):
+        assert_true(expected in script, f"filename parameter labels should cover {expected}")
+
+
 def main():
     tests = [
         test_peft_gradient_inventory_selects_lora_ia3_and_excludes_saved_heads,
@@ -481,6 +530,8 @@ def main():
         test_ratio_decode_skips_degenerate_gradient_slots_without_aborting,
         test_public_bin_routing_reports_collisions_without_oracle,
         test_attack_entrypoint_policy_rejects_prefix_and_keeps_dager_unsupported,
+        test_attack_result_summary_emits_seed,
+        test_peftleak_eval_script_multi_seed_logging_contract,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")
