@@ -106,6 +106,9 @@ utility_default_param() {
     noise|dpsgd)
       printf '5e-4'
       ;;
+    dpsgd_opacus)
+      printf '0.01'
+      ;;
     mixup)
       printf '0.3'
       ;;
@@ -172,7 +175,7 @@ parse_script_args
 
 if [ -n "$BASELINE_DEFENSE" ]; then
   case "$BASELINE_DEFENSE" in
-    none|noise|dpsgd|topk|compression|soteria|mixup|lrb|lrbprojonly|signed_bottleneck)
+    none|noise|dpsgd|dpsgd_opacus|topk|compression|soteria|mixup|lrb|lrbprojonly|signed_bottleneck)
       ;;
     *)
       echo "[utility] Unsupported --baseline_defense: ${BASELINE_DEFENSE}" >&2
@@ -240,7 +243,7 @@ run_variant() {
     none)
       extra_flag=()
       ;;
-    noise|dpsgd)
+    noise|dpsgd|dpsgd_opacus)
       extra_flag=( --defense_noise "$param" )
       ;;
     topk)

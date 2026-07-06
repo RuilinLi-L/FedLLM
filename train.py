@@ -50,6 +50,8 @@ from utils.training_defense_wrapper import TrainingDefenseModelWrapper
 
 TRAIN_SUMMARY_START = "===== TRAIN RESULT SUMMARY START ====="
 TRAIN_SUMMARY_END = "===== TRAIN RESULT SUMMARY END ====="
+DPSGD_OPACUS_DEFENSE = "dpsgd_opacus"
+UTILITY_ONLY_DEFENSE_CHOICES = (DPSGD_OPACUS_DEFENSE,)
 
 
 def resolve_default_output_dir(args) -> Path:
@@ -243,6 +245,44 @@ def apply_training_defense(model, wrapper, trainable_params, batch, labels, loss
     overwrite_gradients(trainable_params, defended_grads)
 
 
+def normalize_dpsgd_opacus_args(args):
+    if getattr(args, "defense", "none") == DPSGD_OPACUS_DEFENSE and getattr(args, "defense_noise", None) is None:
+        args.defense_noise = 0.01
+    return args
+
+
+def freeze_position_embeddings(model) -> int:
+    frozen = 0
+    for name, param in model.named_parameters():
+        if "position_embeddings" in name:
+            param.requires_grad = False
+            frozen += 1
+    return frozen
+
+
+def _is_empty_opacus_batch(batch) -> bool:
+    if isinstance(batch, dict):
+        tensors = [value for value in batch.values() if torch.is_tensor(value)]
+        return bool(tensors) and any(tensor.nelement() == 0 for tensor in tensors)
+    if isinstance(batch, (list, tuple)):
+        tensors = [value for value in batch if torch.is_tensor(value)]
+        return bool(tensors) and all(tensor.nelement() == 0 for tensor in tensors)
+    return False
+
+
+def _count_nonempty_batches(loader) -> int:
+    count = 0
+    for batch in loader:
+        if _is_empty_opacus_batch(batch):
+            continue
+        count += 1
+    return max(1, count)
+
+
+def _opacus_public_model(model):
+    return getattr(model, "_module", model)
+
+
 def build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", choices=["cola", "sst2", "rte", "rotten_tomatoes"], default="cola")
@@ -290,8 +330,110 @@ def build_parser():
         help="Mirror stdout/stderr to this UTF-8 file (Python streams only).",
     )
     parser.add_argument("--log_append", action="store_true", help="Append to log_file instead of truncating.")
-    add_shared_defense_args(parser, default_grad_mode="train")
+    add_shared_defense_args(
+        parser,
+        default_grad_mode="train",
+        extra_defense_choices=UTILITY_ONLY_DEFENSE_CHOICES,
+    )
     return parser
+
+
+def run_training_dpsgd_opacus(args, tracker: dict, model, tokenizer, train_loader, eval_loader, device, output_dir: Path) -> None:
+    try:
+        from opacus import PrivacyEngine
+    except ImportError as exc:
+        raise ImportError(
+            "--defense dpsgd_opacus requires opacus. Install opacus to run source-style DP-SGD utility."
+        ) from exc
+
+    normalize_dpsgd_opacus_args(args)
+    frozen = freeze_position_embeddings(model)
+    if frozen:
+        print(f"[dager] Frozen {frozen} position embedding parameter(s) for dpsgd_opacus.", flush=True)
+
+    trainable_params = iter_trainable_parameters(model)
+    opt = AdamW(trainable_params, lr=5e-5)
+    privacy_engine = PrivacyEngine()
+    model.train()
+    model, opt, train_loader = privacy_engine.make_private(
+        module=model,
+        optimizer=opt,
+        data_loader=train_loader,
+        noise_multiplier=float(args.defense_noise),
+        max_grad_norm=float(args.defense_clip_norm),
+    )
+
+    trainloader_len = _count_nonempty_batches(train_loader)
+    num_training_steps = max(1, args.num_epochs * trainloader_len)
+    lr_scheduler = get_scheduler(
+        "linear",
+        optimizer=opt,
+        num_warmup_steps=0,
+        num_training_steps=num_training_steps,
+    )
+    progress_bar = tqdm(range(num_training_steps))
+    train_start = time.time()
+    n_steps = 0
+
+    print(
+        f"[dager] Running dpsgd_opacus utility: noise_multiplier={float(args.defense_noise):.6g} "
+        f"max_grad_norm={float(args.defense_clip_norm):.6g}",
+        flush=True,
+    )
+
+    for epoch in range(args.num_epochs):
+        model.train()
+        epoch_loss = 0.0
+        train_predictions = []
+        train_references = []
+        epoch_steps = 0
+
+        for batch in train_loader:
+            if _is_empty_opacus_batch(batch):
+                continue
+            batch = {k: v.to(device) for k, v in batch.items()}
+            labels = batch["labels"]
+            model_inputs = {k: v for k, v in batch.items() if k != "labels"}
+
+            opt.zero_grad(set_to_none=True)
+            outputs = model(**model_inputs, labels=labels)
+            logits = outputs.logits
+            loss = outputs.loss
+
+            epoch_loss += float(loss.item())
+            epoch_steps += 1
+            train_predictions.extend(torch.argmax(logits, dim=-1).detach().cpu().tolist())
+            train_references.extend(labels.detach().cpu().tolist())
+
+            loss.backward()
+            opt.step()
+            lr_scheduler.step()
+            progress_bar.update(1)
+
+            n_steps += 1
+            tracker["steps_completed"] = n_steps
+            if args.save_every > 0 and n_steps % args.save_every == 0:
+                ckpt_dir = output_dir / "checkpoints" / f"step_{n_steps}"
+                tracker["last_checkpoint_path"] = save_model(
+                    _opacus_public_model(model),
+                    tokenizer,
+                    ckpt_dir,
+                    args.train_method,
+                )
+
+        train_metrics = classification_metrics(train_predictions, train_references, args.dataset)
+        tracker["final_train_loss"] = epoch_loss / max(1, epoch_steps)
+        print("metric train: ", train_metrics)
+        print("loss train: ", f"{tracker['final_train_loss']:.6f}")
+
+        eval_metrics = evaluate_model(model, eval_loader, device, args.dataset)
+        tracker["eval_metrics"] = eval_metrics
+        print("metric eval: ", eval_metrics)
+
+    tracker["total_train_time"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - train_start))
+    final_path = output_dir / ("final" if not peft_active(args) else "final_adapter")
+    tracker["final_model_path"] = save_model(_opacus_public_model(model), tokenizer, final_path, args.train_method)
+    print("END")
 
 
 def run_training(args, tracker: dict) -> None:
@@ -317,6 +459,19 @@ def run_training(args, tracker: dict) -> None:
         batch_size=args.batch_size,
         collate_fn=data_collator,
     )
+
+    if args.defense == DPSGD_OPACUS_DEFENSE:
+        run_training_dpsgd_opacus(
+            args,
+            tracker,
+            model,
+            tokenizer,
+            train_loader,
+            eval_loader,
+            device,
+            output_dir,
+        )
+        return
 
     trainable_params = iter_trainable_parameters(model)
     opt = AdamW(trainable_params, lr=5e-5)
@@ -396,6 +551,7 @@ def main():
     args = parser.parse_args()
     normalize_peft_args(args)
     normalize_legacy_training_defense_args(args)
+    normalize_dpsgd_opacus_args(args)
     apply_lrb_preset(args)
     validate_rep_bottleneck_args(args)
     apply_peft_config_to_args(args, require_checkpoint=False)

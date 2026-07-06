@@ -25,15 +25,25 @@ DEFENSE_CHOICES = [
 ]
 
 
-def add_shared_defense_args(parser: ArgumentParser, *, default_grad_mode: str = "eval") -> ArgumentParser:
+def add_shared_defense_args(
+    parser: ArgumentParser,
+    *,
+    default_grad_mode: str = "eval",
+    extra_defense_choices: Sequence[str] = (),
+) -> ArgumentParser:
     """Add the shared defense CLI used by attack.py and training-side utilities."""
+
+    defense_choices = list(DEFENSE_CHOICES)
+    for choice in extra_defense_choices:
+        if choice not in defense_choices:
+            defense_choices.append(choice)
 
     parser.add_argument("--rng_seed", type=int, default=101)
     parser.add_argument(
         "--defense",
         type=str,
         default="none",
-        choices=DEFENSE_CHOICES,
+        choices=defense_choices,
         help="Defense applied to shared gradients or generated defended gradients.",
     )
     parser.add_argument(
@@ -293,6 +303,7 @@ def defense_param_spec(args) -> tuple[str, object]:
     mapping = {
         "noise": ("defense_noise", getattr(args, "defense_noise", None)),
         "dpsgd": ("defense_noise", getattr(args, "defense_noise", None)),
+        "dpsgd_opacus": ("defense_noise", getattr(args, "defense_noise", None)),
         "topk": ("defense_topk_ratio", getattr(args, "defense_topk_ratio", None)),
         "compression": ("defense_n_bits", getattr(args, "defense_n_bits", None)),
         "soteria": (

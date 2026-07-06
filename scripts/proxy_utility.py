@@ -41,6 +41,8 @@ except ImportError:  # pragma: no cover - older torch fallback
 
 PROXY_SUMMARY_START = "===== PROXY UTILITY SUMMARY START ====="
 PROXY_SUMMARY_END = "===== PROXY UTILITY SUMMARY END ====="
+DPSGD_OPACUS_DEFENSE = "dpsgd_opacus"
+UTILITY_ONLY_DEFENSE_CHOICES = (DPSGD_OPACUS_DEFENSE,)
 
 
 def install_terminal_logging(args) -> None:
@@ -88,6 +90,24 @@ def init_tracker(args) -> dict:
     }
 
 
+def normalize_dpsgd_opacus_args(args):
+    if getattr(args, "defense", "none") == DPSGD_OPACUS_DEFENSE and getattr(args, "defense_noise", None) is None:
+        args.defense_noise = 0.01
+    return args
+
+
+def proxy_defense_semantics(args) -> str:
+    if getattr(args, "defense", "none") == DPSGD_OPACUS_DEFENSE:
+        return "dpsgd_style_one_step_approximation"
+    return "native"
+
+
+def proxy_effective_defense(args) -> str:
+    if getattr(args, "defense", "none") == DPSGD_OPACUS_DEFENSE:
+        return "dpsgd"
+    return getattr(args, "defense", "none")
+
+
 def emit_proxy_summary(args, tracker: dict) -> None:
     if tracker.get("summary_emitted"):
         return
@@ -104,6 +124,7 @@ def emit_proxy_summary(args, tracker: dict) -> None:
         ("defense", args.defense),
         ("defense_param_name", defense_param_name),
         ("defense_param_value", defense_param_value),
+        ("proxy_defense_semantics", proxy_defense_semantics(args)),
         ("n_train_batches", args.n_train_batches),
         ("val_size", args.val_size),
         ("steps_completed", tracker.get("steps_completed", 0)),
@@ -199,7 +220,11 @@ def build_parser():
         help="Mirror stdout/stderr to this UTF-8 file (Python streams only).",
     )
     parser.add_argument("--log_append", action="store_true", help="Append to log_file instead of truncating.")
-    add_shared_defense_args(parser, default_grad_mode="train")
+    add_shared_defense_args(
+        parser,
+        default_grad_mode="train",
+        extra_defense_choices=UTILITY_ONLY_DEFENSE_CHOICES,
+    )
     return parser
 
 
@@ -209,6 +234,7 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     normalize_legacy_training_defense_args(args)
+    normalize_dpsgd_opacus_args(args)
     apply_lrb_preset(args)
     install_terminal_logging(args)
     tracker = init_tracker(args)
@@ -262,35 +288,40 @@ def main():
             outputs = model(**model_inputs, labels=labels)
             base_train_loss = float(outputs.loss.item())
 
-            if requires_gradient_generation_defense(args.defense):
-                outputs.loss.backward()
-                raw_grads = tuple(
-                    None if param.grad is None else param.grad.detach().clone()
-                    for param in trainable_params
-                )
-                model.zero_grad(set_to_none=True)
-                args.defense_rng_step = batch_idx
-                defended_grads = apply_defense(
-                    None,
-                    args,
-                    model_wrapper=wrapper,
-                    batch=batch,
-                    labels=labels,
-                )
-            else:
-                outputs.loss.backward()
-                raw_grads = tuple(
-                    None if param.grad is None else param.grad.detach().clone()
-                    for param in trainable_params
-                )
-                args.defense_rng_step = batch_idx
-                defended_grads = apply_defense(
-                    raw_grads,
-                    args,
-                    model_wrapper=wrapper,
-                    batch=batch,
-                    labels=labels,
-                )
+            original_defense = args.defense
+            args.defense = proxy_effective_defense(args)
+            try:
+                if requires_gradient_generation_defense(args.defense):
+                    outputs.loss.backward()
+                    raw_grads = tuple(
+                        None if param.grad is None else param.grad.detach().clone()
+                        for param in trainable_params
+                    )
+                    model.zero_grad(set_to_none=True)
+                    args.defense_rng_step = batch_idx
+                    defended_grads = apply_defense(
+                        None,
+                        args,
+                        model_wrapper=wrapper,
+                        batch=batch,
+                        labels=labels,
+                    )
+                else:
+                    outputs.loss.backward()
+                    raw_grads = tuple(
+                        None if param.grad is None else param.grad.detach().clone()
+                        for param in trainable_params
+                    )
+                    args.defense_rng_step = batch_idx
+                    defended_grads = apply_defense(
+                        raw_grads,
+                        args,
+                        model_wrapper=wrapper,
+                        batch=batch,
+                        labels=labels,
+                    )
+            finally:
+                args.defense = original_defense
 
             grad_cosine, norm_retention = grad_similarity_metrics(raw_grads, defended_grads)
             updated_state = build_updated_param_state(named_trainable_params, defended_grads, args.learning_rate)

@@ -59,6 +59,7 @@ utility 主表默认比较下面这些 operating points：
 
 - 主表不默认放 `lrb@0.35` 和 `compression@16`。
 - 如果想把它们也一起跑，使用 `--include_sensitivity`。
+- `dpsgd` 是 FedLLM 统一防御框架里的 per-example clipping/noise utility；`dpsgd_opacus` 是贴近官方源码 `PrivacyEngine.make_private(...)` 的 Opacus 训练期 utility。为了避免默认运行突然变慢或要求本地安装 `opacus`，`dpsgd_opacus` 不放进默认主表，只在 focused 模式中显式运行。
 
 ## 3. 运行前准备
 
@@ -187,11 +188,34 @@ bash scripts/utility_baselines.sh sst2 2 gpt2 1 \
 - `none`
 - `dpsgd@1e-4`
 
+例如只跑官方源码风格的 Opacus DP-SGD utility：
+
+```bash
+bash scripts/utility_baselines.sh sst2 2 gpt2 1 \
+  --anchor_dir ./models/gpt2-ft-rt \
+  --baseline_defense dpsgd_opacus
+```
+
+这条命令实际会跑：
+
+- `none`
+- `dpsgd_opacus@0.01`
+
+`dpsgd_opacus@0.01` 中的 `0.01` 对应 Opacus `noise_multiplier`，默认 `--defense_clip_norm` 仍为 `1.0`，对应 Opacus `max_grad_norm`。如果要覆盖噪声倍率，可以使用：
+
+```bash
+bash scripts/utility_baselines.sh sst2 2 gpt2 1 \
+  --anchor_dir ./models/gpt2-ft-rt \
+  --baseline_defense dpsgd_opacus \
+  --baseline_param 0.02
+```
+
 注意：
 
 - `--baseline_param` 必须和 `--baseline_defense` 一起使用。
 - `--baseline_defense none` 不能和 `--baseline_param` 一起使用。
 - `--include_sensitivity` 在 focused 模式下仍然有效，但只会对当前聚焦 defense 追加 utility 脚本已有的敏感性点，例如 `lrb@0.35` 或 `compression@16`。
+- `dpsgd_opacus` 的 proxy 阶段不是完整 Opacus 训练，只是用现有 `dpsgd` one-step 梯度近似来给快速参考；正式 utility 结论以 `train.py --defense dpsgd_opacus` 的训练期结果为准。
 
 ## 5. 只跑单个 utility 组件
 
@@ -284,6 +308,8 @@ proxy utility 默认关注的指标包括：
 - `delta_val_macro_f1_mean`
 - `step_runtime_mean`
 
+当 `--defense dpsgd_opacus` 用在 proxy utility 中时，summary 会保留 `defense=dpsgd_opacus`，并额外输出 `proxy_defense_semantics=dpsgd_style_one_step_approximation`。这表示该 proxy 只是 one-step 近似，不是 Opacus `PrivacyEngine` 的完整训练路径。
+
 ### 5.2 只跑训练期 end-to-end utility
 
 主入口是 [`train.py`](../train.py)。
@@ -342,6 +368,27 @@ python3 train.py \
   --output_dir ./models/utility_dpsgd_seed101 \
   --log_file log/runs/train_dpsgd_seed101.txt
 ```
+
+例如测试官方源码风格的 `dpsgd_opacus@0.01`：
+
+```bash
+python3 train.py \
+  --dataset sst2 \
+  --task seq_class \
+  --batch_size 2 \
+  --num_epochs 1 \
+  --save_every 0 \
+  --model_path ./models/gpt2-ft-rt \
+  --train_method full \
+  --rng_seed 101 \
+  --defense dpsgd_opacus \
+  --defense_noise 0.01 \
+  --defense_clip_norm 1.0 \
+  --output_dir ./models/utility_dpsgd_opacus_seed101 \
+  --log_file log/runs/train_dpsgd_opacus_seed101.txt
+```
+
+`dpsgd_opacus` 会在训练期调用 Opacus `PrivacyEngine.make_private(...)`，把 `--defense_noise` 映射为 `noise_multiplier`，把 `--defense_clip_norm` 映射为 `max_grad_norm`。如果环境没有安装 `opacus`，该分支会直接报出清晰的 ImportError；旧的 `dpsgd` 不受影响。
 
 例如只跑 `none` 对照组：
 

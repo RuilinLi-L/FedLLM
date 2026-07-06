@@ -59,6 +59,8 @@ def _resolve_working_bash() -> str | None:
                 [candidate, "-lc", "echo codex-bash-ok"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
         except (OSError, subprocess.SubprocessError):
@@ -182,6 +184,8 @@ def _run_utility_script(extra_args: list[str]) -> dict:
         [WORKING_BASH, "-lc", cmd],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
     )
     return {
@@ -306,6 +310,70 @@ def test_focus_param_override_reaches_proxy_and_train():
     result["tmpdir"].cleanup()
 
 
+def test_focus_dpsgd_opacus_runs_none_plus_source_default_point():
+    result = _run_utility_script(["--baseline_defense", "dpsgd_opacus"])
+    proc = result["proc"]
+    assert_true(proc.returncode == 0, proc.stderr or proc.stdout)
+
+    proxy_calls, train_calls, _ = _split_calls(result["calls"])
+    proxy_labels = {_call_label(call) for call in proxy_calls}
+    train_labels = {_call_label(call) for call in train_calls}
+    expected_train = {
+        "train_none_seed101",
+        "train_none_seed202",
+        "train_none_seed303",
+        "train_dpsgd_opacus_0.01_seed101",
+        "train_dpsgd_opacus_0.01_seed202",
+        "train_dpsgd_opacus_0.01_seed303",
+    }
+    assert_true(
+        proxy_labels == {"proxy_none", "proxy_dpsgd_opacus_0.01"},
+        f"unexpected proxy labels: {proxy_labels}",
+    )
+    assert_true(train_labels == expected_train, f"unexpected train labels: {train_labels}")
+
+    defenses = {_arg_value(call, "--defense") for call in proxy_calls + train_calls}
+    assert_true(defenses == {"none", "dpsgd_opacus"}, f"unexpected focused defenses: {defenses}")
+
+    opacus_calls = [
+        call for call in proxy_calls + train_calls if _arg_value(call, "--defense") == "dpsgd_opacus"
+    ]
+    assert_true(
+        all(_arg_value(call, "--defense_noise") == "0.01" for call in opacus_calls),
+        "focused dpsgd_opacus run should use the source default noise multiplier",
+    )
+
+    run_dirs = _run_dir_names(result["repo_root"])
+    assert_true(
+        len(run_dirs) == 1 and "_focus_dpsgd_opacus_" in run_dirs[0],
+        "focused dpsgd_opacus run dir should advertise the focus defense",
+    )
+    result["tmpdir"].cleanup()
+
+
+def test_focus_dpsgd_opacus_param_override_reaches_proxy_and_train():
+    result = _run_utility_script(["--baseline_defense", "dpsgd_opacus", "--baseline_param", "0.02"])
+    proc = result["proc"]
+    assert_true(proc.returncode == 0, proc.stderr or proc.stdout)
+
+    proxy_calls, train_calls, _ = _split_calls(result["calls"])
+    opacus_calls = [
+        call for call in proxy_calls + train_calls if _arg_value(call, "--defense") == "dpsgd_opacus"
+    ]
+    assert_true(opacus_calls, "focused override should schedule dpsgd_opacus calls")
+    assert_true(
+        all(_arg_value(call, "--defense_noise") == "0.02" for call in opacus_calls),
+        "focused override should replace the source default in both proxy and train calls",
+    )
+
+    run_dirs = _run_dir_names(result["repo_root"])
+    assert_true(
+        len(run_dirs) == 1 and "_focus_dpsgd_opacus_0.02_" in run_dirs[0],
+        "focused override run dir should include the parameter slug",
+    )
+    result["tmpdir"].cleanup()
+
+
 def test_malformed_cli_combinations_exit_with_code_2():
     bad_cases = [
         ["--baseline_param", "1e-4"],
@@ -400,6 +468,8 @@ def main():
         test_focus_none_runs_only_none_pipeline,
         test_focus_dpsgd_runs_none_plus_default_point,
         test_focus_param_override_reaches_proxy_and_train,
+        test_focus_dpsgd_opacus_runs_none_plus_source_default_point,
+        test_focus_dpsgd_opacus_param_override_reaches_proxy_and_train,
         test_malformed_cli_combinations_exit_with_code_2,
         test_focused_lrb_sensitivity_adds_extra_point_without_sweep,
         test_focus_signed_bottleneck_runs_uniform_projection_preset,

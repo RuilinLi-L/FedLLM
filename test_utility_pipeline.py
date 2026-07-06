@@ -34,6 +34,16 @@ def test_defense_param_spec_tracks_shared_cli_mapping():
     assert_true(name == "defense_lrb_keep_ratio_sensitive", "lrb should report its keep-ratio parameter")
     assert_true(float(value) == 0.2, "lrb parameter value should round-trip")
 
+    args = SimpleNamespace(defense="dpsgd", defense_noise=5e-4)
+    name, value = defense_param_spec(args)
+    assert_true(name == "defense_noise", "dpsgd should report defense_noise")
+    assert_true(float(value) == 5e-4, "dpsgd noise should round-trip")
+
+    args = SimpleNamespace(defense="dpsgd_opacus", defense_noise=0.01)
+    name, value = defense_param_spec(args)
+    assert_true(name == "defense_noise", "dpsgd_opacus should report defense_noise")
+    assert_true(float(value) == 0.01, "dpsgd_opacus noise multiplier should round-trip")
+
 
 def test_grad_similarity_metrics_returns_cosine_and_norm_retention():
     base = (torch.tensor([1.0, 0.0]), torch.tensor([0.0, 1.0]))
@@ -104,6 +114,7 @@ batch_size=2
 defense=lrb
 defense_param_name=defense_lrb_keep_ratio_sensitive
 defense_param_value=0.200000
+proxy_defense_semantics=native
 grad_cosine_mean=0.750000
 delta_val_accuracy_mean=-0.020000
 ===== PROXY UTILITY SUMMARY END =====
@@ -114,6 +125,7 @@ delta_val_accuracy_mean=-0.020000
     assert_true(proxy_rows[0]["log_kind"] == "proxy_utility", "proxy summary should classify as proxy_utility")
     assert_true(train_rows[0]["eval_accuracy"] == "0.850000", "train eval accuracy should come from summary block")
     assert_true(proxy_rows[0]["grad_cosine_mean"] == "0.750000", "proxy metrics should come from summary block")
+    assert_true(proxy_rows[0]["proxy_defense_semantics"] == "native", "proxy semantics should be preserved")
     assert_true(train_rows[0]["train_method"] == "lora", "train summary should preserve train_method")
     assert_true(train_rows[0]["lora_r"] == "16", "train summary should preserve lora_r")
 
