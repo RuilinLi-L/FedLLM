@@ -30,6 +30,7 @@ from attacks.peftleak_image.core import (
     recover_patches_from_official_adapter_grads,
     recover_patches_from_batch,
     recover_patches_from_shared_adapter_grads,
+    resolve_cluster_method,
     resolve_official_adapter_layer_count,
     save_public_patch_statistics,
     simple_ssim,
@@ -504,6 +505,192 @@ def test_cli_metrics_controls_primary_report_fields():
     assert_true(summary["patch_recovery_rate"] == "n/a", "patch recovery should be omitted when not requested")
 
 
+def test_official_cifar32_profile_sets_official_like_defaults():
+    code, _exc, summary, _output = run_image_main(
+        [
+            "--mode",
+            "synthetic_ratio",
+            "--peftleak_profile",
+            "official_cifar32",
+            "--dataset",
+            "synthetic",
+            "--n_images",
+            "1",
+            "--batch_size",
+            "1",
+            "--public_n_images",
+            "1",
+            "--device",
+            "cpu",
+            "--metrics",
+            "psnr",
+        ]
+    )
+
+    assert_true(code == 0, "official_cifar32 profile smoke should succeed")
+    assert_true(summary["peftleak_profile"] == "official_cifar32", "summary should report requested profile")
+    assert_true(summary["official_like_config"] == "true", "official profile should use official-like defaults")
+    assert_true(summary["profile_override_count"] == "0", "official profile should have no overrides here")
+    assert_true(summary["patch_size"] == "16", "official profile should set patch_size=16")
+    assert_true(summary["adapter_hidden_dim"] == "64", "official profile should set adapter hidden dim")
+    assert_true(summary["peftleak_num_bins"] == "320", "official profile should set official-style bin count")
+    assert_true(summary["non_oracle_primary_only"] == "true", "summary should mark primary metrics as non-oracle")
+
+
+def test_official_cifar32_profile_respects_explicit_overrides():
+    code, _exc, summary, _output = run_image_main(
+        [
+            "--mode",
+            "synthetic_ratio",
+            "--peftleak_profile",
+            "official_cifar32",
+            "--dataset",
+            "synthetic",
+            "--n_images",
+            "1",
+            "--batch_size",
+            "1",
+            "--public_n_images",
+            "1",
+            "--patch_size",
+            "8",
+            "--device",
+            "cpu",
+            "--metrics",
+            "psnr",
+        ]
+    )
+
+    assert_true(code == 0, "official profile override smoke should succeed")
+    assert_true(summary["patch_size"] == "8", "explicit CLI patch_size should override profile")
+    assert_true(summary["official_like_config"] == "false", "overriding official geometry should clear official-like flag")
+    assert_true(summary["profile_override_count"] == "1", "one profile field should be counted as overridden")
+    assert_true(summary["config_warning"] == "profile_overrides:patch_size", "summary should name overridden profile field")
+
+
+def test_cli_official_cifar32_profile_batch1_smoke():
+    code, _exc, summary, _output = run_image_main(
+        [
+            "--mode",
+            "official_vit_adapter",
+            "--peftleak_profile",
+            "official_cifar32",
+            "--dataset",
+            "synthetic",
+            "--n_images",
+            "1",
+            "--batch_size",
+            "1",
+            "--public_split_size",
+            "4",
+            "--adapter_layers",
+            "first_n",
+            "--device",
+            "cpu",
+            "--metrics",
+            "mse,psnr,ssim,lpips,patch_recovery",
+        ]
+    )
+
+    assert_true(code == 0, "official profile official_vit_adapter smoke should succeed")
+    assert_true(summary["attack_variant"] == "official_vit_adapter", "official profile smoke should use official variant")
+    assert_true(summary["reproduction_level"] == "peftleak_official_aligned_v1", "official profile smoke should remain v1 aligned")
+    assert_true(summary["official_like_config"] == "true", "official profile smoke should be marked official-like")
+    assert_true(summary["non_oracle_primary_only"] == "true", "main metrics should be explicitly non-oracle")
+    assert_true(summary["lpips_status"] in {"ok", "unavailable"} or summary["lpips_status"].startswith("failed:"), "LPIPS status should be explicit")
+    assert_true(summary["cluster_method"] in {"deterministic", "constrained_kmeans"}, "cluster method should be explicit")
+
+
+def test_cli_lpips_unavailable_is_nonfatal():
+    code, _exc, summary, _output = run_image_main([*tiny_cli_args(1), "--metrics", "lpips"])
+
+    assert_true(code == 0, "missing LPIPS dependency should not fail the attack")
+    assert_true(summary["lpips"] == "n/a" or summary["lpips"] != "", "LPIPS field should be present")
+    assert_true(summary["lpips_status"] in {"ok", "unavailable"} or summary["lpips_status"].startswith("failed:"), "LPIPS status should explain availability")
+
+
+def test_cli_lpips_fake_module_reports_value():
+    previous = sys.modules.get("lpips")
+
+    class FakeLpipsModule:
+        class LPIPS:
+            def __init__(self, net="alex"):
+                self.net = net
+
+            def to(self, device=None):
+                return self
+
+            def eval(self):
+                return self
+
+            def __call__(self, recovered, reference):
+                return torch.ones(recovered.shape[0], 1, 1, 1, device=recovered.device) * 0.25
+
+    sys.modules["lpips"] = FakeLpipsModule()
+    try:
+        code, _exc, summary, _output = run_image_main([*tiny_cli_args(1), "--metrics", "lpips"])
+    finally:
+        if previous is None:
+            sys.modules.pop("lpips", None)
+        else:
+            sys.modules["lpips"] = previous
+
+    assert_true(code == 0, "fake LPIPS dependency smoke should succeed")
+    assert_true(summary["lpips_status"] == "ok", "fake LPIPS dependency should report ok")
+    assert_true(summary["lpips"] == "0.250000", "fake LPIPS value should be summarized")
+
+
+def test_cli_synthetic_ratio_defense_matrix_smoke():
+    defense_args = {
+        "none": [],
+        "noise": ["--defense_noise", "1e-5"],
+        "dpsgd": ["--defense_noise", "1e-5"],
+        "topk": ["--defense_topk_ratio", "0.5"],
+        "compression": ["--defense_n_bits", "8"],
+        "soteria": [],
+        "mixup": ["--defense_mixup_alpha", "1.0"],
+        "lrb": ["--defense_lrb_keep_ratio_sensitive", "0.8"],
+        "lrbprojonly": ["--defense_lrb_keep_ratio_sensitive", "0.8"],
+        "signed_bottleneck": ["--defense_lrb_preset", "signed_bottleneck", "--defense_lrb_keep_ratio_sensitive", "0.99"],
+    }
+    base_args = [
+        "--mode",
+        "synthetic_ratio",
+        "--dataset",
+        "synthetic",
+        "--n_images",
+        "1",
+        "--batch_size",
+        "1",
+        "--public_n_images",
+        "1",
+        "--image_size",
+        "4",
+        "--channels",
+        "1",
+        "--n_classes",
+        "4",
+        "--patch_size",
+        "2",
+        "--adapter_hidden_dim",
+        "3",
+        "--peftleak_num_bins",
+        "8",
+        "--device",
+        "cpu",
+        "--metrics",
+        "mse,psnr,patch_recovery",
+    ]
+
+    for defense, extra in defense_args.items():
+        code, _exc, summary, _output = run_image_main([*base_args, "--defense", defense, *extra])
+        assert_true(code == 0, f"{defense} CLI defense smoke should succeed")
+        assert_true(summary["result_status"] == "ok", f"{defense} summary status should be ok")
+        assert_true(summary["defense"] == defense, f"{defense} summary should report the selected defense")
+        assert_true(summary["reproduction_level"] == "synthetic_ratio_debug", f"{defense} smoke should use synthetic ratio mode")
+        assert_true(summary["non_oracle_primary_only"] == "true", f"{defense} summary should mark non-oracle primary metrics")
+
+
 def test_cli_cifar100_fallback_is_marked_by_default():
     with tempfile.TemporaryDirectory() as tmpdir:
         code, _exc, summary, _output = run_image_main(
@@ -731,6 +918,13 @@ def test_clustering_reassembly_preserves_device():
     assert_true(assignments.device == device, "cluster assignments should stay on runtime device")
 
 
+def test_cluster_method_resolver_is_explicit():
+    method = resolve_cluster_method("auto")
+
+    assert_true(method in {"deterministic", "constrained_kmeans"}, "auto cluster method should resolve to an explicit backend")
+    assert_true(resolve_cluster_method("deterministic") == "deterministic", "deterministic cluster method should be stable")
+
+
 def test_synthetic_ratio_is_exact_without_defense_and_device_local():
     device = runtime_device()
     parser = build_parser()
@@ -825,6 +1019,12 @@ def main():
         test_cli_official_cluster_grouping_does_not_report_direct_metrics,
         test_cli_batch_size_drives_attack_batches,
         test_cli_metrics_controls_primary_report_fields,
+        test_official_cifar32_profile_sets_official_like_defaults,
+        test_official_cifar32_profile_respects_explicit_overrides,
+        test_cli_official_cifar32_profile_batch1_smoke,
+        test_cli_lpips_unavailable_is_nonfatal,
+        test_cli_lpips_fake_module_reports_value,
+        test_cli_synthetic_ratio_defense_matrix_smoke,
         test_cli_cifar100_fallback_is_marked_by_default,
         test_cli_cifar100_fallback_can_fail_explicitly,
         test_shared_adapter_gradient_shape_is_stable_across_batch_size,
@@ -834,6 +1034,7 @@ def main():
         test_clustering_reassembly_is_deterministic_for_fixed_seed,
         test_clustered_reassembly_changes_patch_order_for_unsorted_inputs,
         test_clustering_reassembly_preserves_device,
+        test_cluster_method_resolver_is_explicit,
         test_synthetic_ratio_is_exact_without_defense_and_device_local,
         test_image_defense_branches_return_device_local_gradients,
         test_optimization_patch_baseline_loss_decreases,

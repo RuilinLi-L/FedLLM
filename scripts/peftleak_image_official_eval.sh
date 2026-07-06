@@ -9,6 +9,7 @@ cd "$DAGER_ROOT" || exit 1
 
 python attack_peftleak_image.py \
   --mode official_vit_adapter \
+  --peftleak_profile official_cifar32 \
   --dataset "${DATASET:-cifar100}" \
   --data_root "${DATA_ROOT:-./models_cache}" \
   --cache_dir "${CACHE_DIR:-./models_cache}" \
@@ -18,7 +19,7 @@ python attack_peftleak_image.py \
   --vit_config "${VIT_CONFIG:-cifar_small}" \
   --adapter_layers "${ADAPTER_LAYERS:-all}" \
   --attack_rounds "${ATTACK_ROUNDS:-1}" \
-  --adapter_bottleneck_dim "${ADAPTER_BOTTLENECK_DIM:-8}" \
+  --adapter_bottleneck_dim "${ADAPTER_BOTTLENECK_DIM:-64}" \
   --official_grouping "${OFFICIAL_GROUPING:-tag}" \
   --metrics "${METRICS:-mse,psnr,ssim,lpips,patch_recovery}" \
   --fail_on_synthetic_fallback \

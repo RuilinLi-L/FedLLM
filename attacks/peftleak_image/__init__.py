@@ -24,5 +24,6 @@ from .core import (
     recover_patches_from_batch,
     recover_patches_from_named_adapter_grads,
     recover_patches_from_shared_adapter_grads,
+    resolve_cluster_method,
     save_public_patch_statistics,
 )

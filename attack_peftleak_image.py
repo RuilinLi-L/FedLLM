@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import sys
 import time
 import torch
 
@@ -23,6 +24,7 @@ from attacks.peftleak_image.core import (
     recover_patches_from_official_adapter_grads,
     recover_patches_from_shared_adapter_grads,
     recover_patch_from_adapter_grads,
+    resolve_cluster_method,
     save_public_patch_statistics,
     simple_ssim,
 )
@@ -38,6 +40,17 @@ SUMMARY_END = "===== RESULT SUMMARY END ====="
 PEFTLEAK_IMAGE_REPRODUCTION_LEVEL = "peftleak_style_shared_bins"
 PEFTLEAK_IMAGE_OFFICIAL_REPRODUCTION_LEVEL = "peftleak_official_aligned_v1"
 SYNTHETIC_RATIO_REPRODUCTION_LEVEL = "synthetic_ratio_debug"
+PEFTLEAK_PROFILE_OFFICIAL_CIFAR32 = {
+    "image_size": 32,
+    "channels": 3,
+    "n_classes": 100,
+    "patch_size": 16,
+    "peftleak_num_bins": 320,
+    "adapter_hidden_dim": 64,
+    "adapter_bottleneck_dim": 64,
+    "peftleak_embed_scale": 0.5,
+    "peftleak_gap": 0,
+}
 SUPPORTED_IMAGE_DEFENSES = {
     "none",
     "noise",
@@ -61,6 +74,12 @@ class SyntheticFallbackError(RuntimeError):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="PEFTLeak-style image-adapter shared-bin mechanism with synthetic ratio and torchvision ViT-adapter modes")
     parser.add_argument("--mode", choices=["vit_adapter", "official_vit_adapter", "synthetic_ratio"], default="vit_adapter")
+    parser.add_argument(
+        "--peftleak_profile",
+        choices=["lightweight", "official_cifar32", "custom"],
+        default="lightweight",
+        help="Preset for PEFTLeak image geometry/probe settings. Explicit CLI values override preset defaults.",
+    )
     parser.add_argument(
         "--dataset",
         type=str,
@@ -101,6 +120,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_shared_defense_args(parser, default_grad_mode="eval")
     return parser
+
+
+def _explicit_cli_fields(argv) -> set[str]:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    fields = set()
+    for item in raw:
+        if not isinstance(item, str) or not item.startswith("--"):
+            continue
+        option = item.split("=", 1)[0]
+        key = option[2:].replace("-", "_")
+        fields.add(key)
+    return fields
+
+
+def _apply_peftleak_profile(args, explicit_fields: set[str]):
+    profile = str(getattr(args, "peftleak_profile", "lightweight"))
+    profile_fields = set(PEFTLEAK_PROFILE_OFFICIAL_CIFAR32)
+    override_fields = sorted(profile_fields.intersection(explicit_fields))
+    if profile == "official_cifar32":
+        for field, value in PEFTLEAK_PROFILE_OFFICIAL_CIFAR32.items():
+            if field not in explicit_fields:
+                setattr(args, field, value)
+    official_like = all(
+        getattr(args, field, None) == value
+        for field, value in PEFTLEAK_PROFILE_OFFICIAL_CIFAR32.items()
+    )
+    if profile == "official_cifar32" and override_fields:
+        warning = "profile_overrides:" + ",".join(override_fields)
+    elif profile == "custom":
+        warning = "custom_profile"
+    else:
+        warning = None
+    args.profile_override_count = len(override_fields) if profile == "official_cifar32" else 0
+    args.official_like_config = bool(official_like)
+    args.config_warning = warning
+    return args
 
 
 def _synthetic_images(n_images: int, channels: int, image_size: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -485,6 +540,35 @@ def _requested_metrics(args) -> set[str]:
     return {aliases.get(metric, metric) for metric in metrics}
 
 
+def _as_lpips_rgb(images: torch.Tensor) -> torch.Tensor:
+    x = images.detach().float().clamp(0.0, 1.0)
+    if x.shape[1] == 1:
+        x = x.repeat(1, 3, 1, 1)
+    elif x.shape[1] > 3:
+        x = x[:, :3]
+    return x.mul(2.0).sub(1.0)
+
+
+def _compute_optional_lpips(recovered: torch.Tensor | None, reference: torch.Tensor, requested: bool) -> tuple[float | None, str]:
+    if not requested:
+        return None, "not_requested"
+    if recovered is None:
+        return None, "unavailable"
+    try:
+        import lpips
+    except Exception:
+        return None, "unavailable"
+    try:
+        model = lpips.LPIPS(net="alex")
+        model = model.to(device=reference.device)
+        model.eval()
+        with torch.no_grad():
+            score = model(_as_lpips_rgb(recovered).to(reference.device), _as_lpips_rgb(reference))
+        return float(score.detach().float().mean().item()), "ok"
+    except Exception as exc:
+        return None, f"failed:{type(exc).__name__}"
+
+
 def _mean_or_none(values: list[float], weights: list[int]) -> float | None:
     if not values:
         return None
@@ -787,7 +871,12 @@ def _emit_summary(args, fields: dict):
         ("attack", "peftleak_image_repro"),
         ("attack_variant", variant),
         ("reproduction_level", fields.get("reproduction_level", default_reproduction_level)),
+        ("peftleak_profile", getattr(args, "peftleak_profile", None)),
+        ("official_like_config", getattr(args, "official_like_config", None)),
+        ("profile_override_count", getattr(args, "profile_override_count", None)),
+        ("config_warning", fields.get("config_warning", getattr(args, "config_warning", None))),
         ("oracle_metric_scope", fields.get("oracle_metric_scope", default_oracle_scope)),
+        ("non_oracle_primary_only", fields.get("non_oracle_primary_only", True)),
         ("dataset", args.dataset),
         ("device", fields.get("device")),
         ("data_source", fields.get("data_source")),
@@ -822,7 +911,9 @@ def _emit_summary(args, fields: dict):
         ("psnr", fields.get("psnr")),
         ("ssim", fields.get("ssim")),
         ("lpips", fields.get("lpips")),
+        ("lpips_status", fields.get("lpips_status")),
         ("primary_metric_source", fields.get("primary_metric_source")),
+        ("cluster_method", fields.get("cluster_method")),
         ("direct_mse", fields.get("direct_mse")),
         ("direct_psnr", fields.get("direct_psnr")),
         ("clustered_mse", fields.get("clustered_mse")),
@@ -862,6 +953,8 @@ def _emit_summary(args, fields: dict):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    explicit_fields = _explicit_cli_fields(argv)
+    _apply_peftleak_profile(args, explicit_fields)
     apply_lrb_preset(args)
     device = _resolve_runtime_device(args.device)
     args.device = str(device)
@@ -911,6 +1004,7 @@ def main(argv=None):
             effective_batch_size,
         ) = _run_attack_batches(args, images, labels, probe_stats)
         requested_metrics = _requested_metrics(args)
+        cluster_method = resolve_cluster_method("auto")
         grid_shape = (images.shape[2] // args.patch_size, images.shape[3] // args.patch_size)
         folded_reference = fold_image_patches(
             reference_patches,
@@ -969,6 +1063,7 @@ def main(argv=None):
                     grid_shape=grid_shape,
                     patch_size=args.patch_size,
                     seed=args.rng_seed,
+                    method=cluster_method,
                 )
                 clustered_mse, clustered_psnr = mse_psnr(assembled_clustered, folded_reference)
             if recovery.oracle_recovered_patches is not None and recovery.oracle_recovery_mask is not None:
@@ -1000,6 +1095,7 @@ def main(argv=None):
                 grid_shape=grid_shape,
                 patch_size=args.patch_size,
                 seed=args.rng_seed,
+                method=cluster_method,
             )
             direct_mse, direct_psnr = mse_psnr(assembled_direct, folded_reference)
             clustered_mse, clustered_psnr = mse_psnr(assembled_clustered, folded_reference)
@@ -1014,6 +1110,7 @@ def main(argv=None):
         report_psnr = (direct_psnr if direct_psnr is not None else clustered_psnr) if "psnr" in requested_metrics else None
         report_image = assembled_direct if direct_mse is not None else assembled_clustered
         report_ssim = simple_ssim(report_image, folded_reference) if report_image is not None and "ssim" in requested_metrics else None
+        report_lpips, lpips_status = _compute_optional_lpips(report_image, folded_reference, "lpips" in requested_metrics)
         if direct_mse is not None:
             primary_metric_source = "direct"
         elif clustered_mse is not None:
@@ -1045,8 +1142,10 @@ def main(argv=None):
                 "mse": report_mse,
                 "psnr": report_psnr,
                 "ssim": report_ssim,
-                "lpips": None if "lpips" in requested_metrics else None,
+                "lpips": report_lpips,
+                "lpips_status": lpips_status,
                 "primary_metric_source": primary_metric_source,
+                "cluster_method": cluster_method,
                 "direct_mse": direct_mse,
                 "direct_psnr": direct_psnr,
                 "clustered_mse": clustered_mse,
@@ -1075,6 +1174,8 @@ def main(argv=None):
                 "data_source": data_source,
                 "synthetic_fallback": synthetic_fallback,
                 "fallback_reason": fallback_reason,
+                "config_warning": getattr(args, "config_warning", None),
+                "non_oracle_primary_only": True,
                 "effective_batch_size": effective_batch_size,
                 "attack_batch_count": attack_batch_count,
                 "vit_adapter_loss": vit_loss,

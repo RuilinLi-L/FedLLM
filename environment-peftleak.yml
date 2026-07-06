@@ -34,3 +34,4 @@ dependencies:
       - sentencepiece==0.2.0
       - einops==0.8.0
       - neptune-client==0.16.15
+      - lpips==0.1.4

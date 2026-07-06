@@ -10,7 +10,7 @@ cd "$DAGER_ROOT" || exit 1
 DATASETS=( ${DATASETS:-cifar10 cifar100} )
 BATCHES=( ${BATCHES:-1 2} )
 LAYERS=( ${LAYERS:-all msa mlp} )
-BOTTLENECKS=( ${BOTTLENECKS:-4 8 16} )
+BOTTLENECKS=( ${BOTTLENECKS:-64} )
 ROUNDS=( ${ROUNDS:-1} )
 
 for dataset in "${DATASETS[@]}"; do
@@ -21,6 +21,7 @@ for dataset in "${DATASETS[@]}"; do
           echo "========== official_vit_adapter dataset=${dataset} batch=${batch} layers=${layers} bottleneck=${bottleneck} rounds=${rounds} =========="
           python attack_peftleak_image.py \
             --mode official_vit_adapter \
+            --peftleak_profile official_cifar32 \
             --dataset "$dataset" \
             --data_root "${DATA_ROOT:-./models_cache}" \
             --cache_dir "${CACHE_DIR:-./models_cache}" \

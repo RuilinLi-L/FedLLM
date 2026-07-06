@@ -1713,6 +1713,54 @@ def deterministic_kmeans(
     return assignments.detach()
 
 
+def resolve_cluster_method(method: str = "auto") -> str:
+    value = str(method or "auto").strip().lower()
+    if value in {"deterministic", "deterministic_kmeans"}:
+        return "deterministic"
+    if value in {"constrained", "constrained_kmeans"}:
+        try:
+            from k_means_constrained import KMeansConstrained  # noqa: F401
+        except Exception:
+            return "deterministic"
+        return "constrained_kmeans"
+    if value != "auto":
+        raise ValueError("cluster method must be 'auto', 'deterministic', or 'constrained_kmeans'.")
+    try:
+        from k_means_constrained import KMeansConstrained  # noqa: F401
+    except Exception:
+        return "deterministic"
+    return "constrained_kmeans"
+
+
+def constrained_kmeans_assignments(
+    features: torch.Tensor,
+    n_clusters: int,
+    *,
+    size_max: int,
+    seed: int = 0,
+) -> torch.Tensor:
+    if features.ndim != 2:
+        raise ValueError("features must have shape [n_items, dim].")
+    if n_clusters <= 0 or n_clusters > features.shape[0]:
+        raise ValueError("n_clusters must be in [1, n_items].")
+    try:
+        from k_means_constrained import KMeansConstrained
+    except Exception:
+        return deterministic_kmeans(features, n_clusters=n_clusters, seed=seed)
+    clustering = KMeansConstrained(
+        n_clusters=int(n_clusters),
+        size_min=0,
+        size_max=max(1, min(int(size_max), int(features.shape[0]))),
+        init="k-means++",
+        n_init=40,
+        max_iter=900,
+        tol=1e-6,
+        random_state=int(seed),
+    )
+    labels = clustering.fit_predict(features.detach().float().cpu().numpy())
+    return torch.as_tensor(labels, dtype=torch.long, device=features.device)
+
+
 def cluster_and_reassemble(
     patches: torch.Tensor,
     *,
@@ -1720,6 +1768,7 @@ def cluster_and_reassemble(
     grid_shape: tuple[int, int],
     patch_size: int,
     seed: int = 0,
+    method: str = "auto",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Deterministically order recovered patches and fold them to images."""
 
@@ -1733,12 +1782,22 @@ def cluster_and_reassemble(
 
     assembled_batches = []
     assignments = []
+    resolved_method = resolve_cluster_method(method)
     for sample in patches:
         feature = torch.stack((sample.mean(dim=1), sample.std(dim=1)), dim=1)
-        assignments.append(deterministic_kmeans(feature, n_clusters=max(1, grid_shape[0]), seed=seed))
+        if resolved_method == "constrained_kmeans":
+            sample_assignments = constrained_kmeans_assignments(
+                feature,
+                n_clusters=max(1, grid_shape[0]),
+                size_max=max(1, grid_shape[1]),
+                seed=seed,
+            )
+        else:
+            sample_assignments = deterministic_kmeans(feature, n_clusters=max(1, grid_shape[0]), seed=seed)
+        assignments.append(sample_assignments)
         ordering = sorted(
             range(sample.shape[0]),
-            key=lambda idx: (float(feature[idx, 0]), float(feature[idx, 1]), idx),
+            key=lambda idx: (int(sample_assignments[idx].item()), float(feature[idx, 0]), float(feature[idx, 1]), idx),
         )
         ordered = sample[torch.tensor(ordering, device=sample.device)]
         assembled_batches.append(
