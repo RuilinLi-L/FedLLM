@@ -17,13 +17,14 @@ from attacks.partial_transformer_gradients import (
     PTG_OPTIMIZERS,
     PTG_PARAM_FILTERS,
     filter_partial_transformer_gradients,
+    is_ptg_word_embedding_param,
     optimize_partial_text_embeddings,
     parse_ptg_attack_layers,
     ptg_selector_summary_fields,
     selected_partial_gradient_tensors,
     validate_ptg_selector_args,
 )
-from attacks.peftleak_text import summarize_token_predictions
+from attacks.peftleak_text import get_token_embedding_matrix, summarize_token_predictions
 from attack_peftleak import compute_text_metrics
 from utils.defense_common import add_shared_defense_args, defense_param_spec, fmt_summary_value, safe_mean
 from utils.defenses import apply_defense, requires_gradient_generation_defense
@@ -167,6 +168,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ptg_tv_weight", type=float, default=0.0)
     parser.add_argument("--ptg_embed_norm_weight", type=float, default=None)
     parser.add_argument("--ptg_entropy_weight", type=float, default=0.0)
+    parser.add_argument(
+        "--use_embedding",
+        "--ptg_use_embedding",
+        dest="ptg_use_embedding",
+        action="store_true",
+        default=False,
+        help="Infer unused tokens from visible word-embedding gradient rows, matching the official source option.",
+    )
     parser.add_argument("--ptg_fix_special_tokens", action="store_true", default=True)
     parser.add_argument("--no_ptg_fix_special_tokens", action="store_false", dest="ptg_fix_special_tokens")
     parser.add_argument("--ptg_know_padding", action="store_true", default=True)
@@ -217,6 +226,9 @@ def _init_tracker(args):
         "ptg_initial_loss_values": [],
         "ptg_loss_reduction_values": [],
         "ptg_lm_loss_values": [],
+        "ptg_use_embedding_status": None,
+        "ptg_unused_token_count_values": [],
+        "ptg_unused_token_count_last": None,
         "aggregate_metrics": {},
         "selected_gradient_count": None,
         "selected_gradient_names": None,
@@ -241,6 +253,143 @@ def _ignored_token_ids(tokenizer, model_wrapper) -> set[int | None]:
         getattr(tokenizer, "cls_token_id", None),
         getattr(tokenizer, "sep_token_id", None),
     }
+
+
+def _tokenizer_vocab_size(tokenizer) -> int | None:
+    raw = getattr(tokenizer, "vocab_size", None)
+    if raw is None:
+        try:
+            raw = len(tokenizer)
+        except Exception:
+            raw = None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if value > 0 else None
+
+
+def _token_embedding_row_count(tokenizer, model_wrapper) -> int | None:
+    try:
+        raw = int(get_token_embedding_matrix(model_wrapper).shape[0])
+    except Exception:
+        return _tokenizer_vocab_size(tokenizer)
+    return raw if raw > 0 else _tokenizer_vocab_size(tokenizer)
+
+
+def _same_parameter(left, right) -> bool:
+    if left is right:
+        return True
+    try:
+        return torch.is_tensor(left) and torch.is_tensor(right) and left.data_ptr() == right.data_ptr()
+    except Exception:
+        return False
+
+
+def _input_embedding_parameter_names(model_wrapper) -> set[str]:
+    names: set[str] = set()
+    modules = []
+    for attr in ("model", "base_model"):
+        module = getattr(model_wrapper, attr, None)
+        if module is not None and all(module is not existing for existing in modules):
+            modules.append(module)
+    for module in modules:
+        get_embeddings = getattr(module, "get_input_embeddings", None)
+        named_parameters = getattr(module, "named_parameters", None)
+        if not callable(get_embeddings) or not callable(named_parameters):
+            continue
+        try:
+            embedding = get_embeddings()
+        except Exception:
+            continue
+        weight = getattr(embedding, "weight", None)
+        if weight is None:
+            continue
+        try:
+            for name, param in named_parameters():
+                if _same_parameter(param, weight):
+                    names.add(str(name))
+        except Exception:
+            continue
+    return names
+
+
+def _matches_input_embedding_name(name: str, input_embedding_names: set[str]) -> bool:
+    if not input_embedding_names:
+        return False
+    name = str(name)
+    for known in input_embedding_names:
+        known = str(known)
+        if name == known or name.endswith(f".{known}") or known.endswith(f".{name}"):
+            return True
+    return False
+
+
+def _valid_token_id_count(token_ids) -> int:
+    valid = set()
+    for token_id in token_ids or []:
+        if token_id is None:
+            continue
+        try:
+            valid.add(int(token_id))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return len(valid)
+
+
+def _dynamic_unused_token_ids_from_embedding_gradient(tokenizer, model_wrapper, partial_grads, parameter_names):
+    token_row_count = _token_embedding_row_count(tokenizer, model_wrapper)
+    input_embedding_names = _input_embedding_parameter_names(model_wrapper)
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    try:
+        pad_token_id = None if pad_token_id is None else int(pad_token_id)
+    except (TypeError, ValueError, OverflowError):
+        pad_token_id = None
+
+    for idx, grad in enumerate(partial_grads):
+        if grad is None:
+            continue
+        name = parameter_names[idx] if idx < len(parameter_names) else f"param_{idx}"
+        if not (_matches_input_embedding_name(name, input_embedding_names) or is_ptg_word_embedding_param(name)):
+            continue
+        if not torch.is_tensor(grad) or grad.ndim != 2:
+            continue
+        row_count = int(grad.shape[0])
+        if token_row_count is not None:
+            if row_count < token_row_count:
+                continue
+            row_count = int(token_row_count)
+        if row_count <= 0:
+            continue
+        row_sums = grad.detach()[:row_count].float().abs().reshape(row_count, -1).sum(dim=1)
+        zero_rows = torch.nonzero(row_sums < 1e-9, as_tuple=False).view(-1).detach().cpu().tolist()
+        return {int(token_id) for token_id in zero_rows if pad_token_id is None or int(token_id) != pad_token_id}
+    return None
+
+
+def _record_ptg_use_embedding(args, status: str, token_ids) -> None:
+    setattr(args, "ptg_use_embedding_status", status)
+    setattr(args, "ptg_unused_token_count", _valid_token_id_count(token_ids))
+
+
+def _resolve_ignored_token_ids(args, tokenizer, model_wrapper, partial_grads, parameter_names):
+    if getattr(args, "ptg_use_embedding", False):
+        dynamic_ids = _dynamic_unused_token_ids_from_embedding_gradient(
+            tokenizer,
+            model_wrapper,
+            partial_grads,
+            parameter_names,
+        )
+        if dynamic_ids is not None:
+            _record_ptg_use_embedding(args, "dynamic", dynamic_ids)
+            return dynamic_ids
+        fallback_ids = _ignored_token_ids(tokenizer, model_wrapper)
+        _record_ptg_use_embedding(args, "fallback_no_embedding_grad", fallback_ids)
+        return fallback_ids
+
+    fixed_ids = _ignored_token_ids(tokenizer, model_wrapper)
+    _record_ptg_use_embedding(args, "fixed", fixed_ids)
+    return fixed_ids
 
 
 def _source_bert_parity_active(args) -> bool:
@@ -456,6 +605,12 @@ def _emit_result_summary(args, tracker):
     if tracker.get("summary_emitted"):
         return
     defense_param_name, defense_param_value = defense_param_spec(args)
+    unused_count_values = tracker.get("ptg_unused_token_count_values", [])
+    unused_count = (
+        safe_mean(unused_count_values)
+        if unused_count_values
+        else getattr(args, "ptg_unused_token_count", None)
+    )
     fields = [
         ("summary_version", tracker.get("summary_version", 2)),
         ("result_status", tracker.get("result_status", "ok")),
@@ -493,6 +648,16 @@ def _emit_result_summary(args, tracker):
         ("ptg_tv_weight", args.ptg_tv_weight),
         ("ptg_embed_norm_weight", args.ptg_embed_norm_weight),
         ("ptg_entropy_weight", args.ptg_entropy_weight),
+        ("ptg_use_embedding", getattr(args, "ptg_use_embedding", False)),
+        (
+            "ptg_use_embedding_status",
+            tracker.get("ptg_use_embedding_status") or getattr(args, "ptg_use_embedding_status", "not_evaluated"),
+        ),
+        ("ptg_unused_token_count", unused_count),
+        (
+            "ptg_unused_token_count_last",
+            tracker.get("ptg_unused_token_count_last", getattr(args, "ptg_unused_token_count", None)),
+        ),
         ("ptg_fix_special_tokens", args.ptg_fix_special_tokens),
         ("ptg_know_padding", args.ptg_know_padding),
         ("ptg_init", args.ptg_init),
@@ -540,6 +705,8 @@ def _emit_result_summary(args, tracker):
 
 def _validate_args(args):
     args.train_method = "full"
+    args.ptg_use_embedding_status = "not_evaluated"
+    args.ptg_unused_token_count = None
     _normalize_ptg_source_args(args)
     if args.defense == "dager":
         raise NotImplementedError("DAGER defense is DAGER-specific and is excluded from PTG reproduction runs.")
@@ -622,7 +789,6 @@ def reconstruct(args, sample, model_wrapper, *, precomputed_partial=None, lm_mod
     attention_mask = batch.get("attention_mask")
     reference_mask = None if attention_mask is None else attention_mask.detach().cpu().tolist()
     references = _decode_reference_ids(args, tokenizer, batch["input_ids"])
-    ignored_token_ids = _ignored_token_ids(tokenizer, model_wrapper)
 
     if precomputed_partial is None:
         partial_grads, parameter_names, selected_names = _compute_defended_partial_grads(
@@ -639,6 +805,13 @@ def reconstruct(args, sample, model_wrapper, *, precomputed_partial=None, lm_mod
             getattr(args, "ptg_gradient_info", {}),
         )
         _mark_ptg_variant(args, selected_names)
+    ignored_token_ids = _resolve_ignored_token_ids(
+        args,
+        tokenizer,
+        model_wrapper,
+        partial_grads,
+        parameter_names,
+    )
     attack_result = optimize_partial_text_embeddings(
         model_wrapper=model_wrapper,
         batch=batch,
@@ -696,6 +869,17 @@ def _record_attack_result(args, tracker, input_idx, input_start, start_time, att
         tracker["ptg_loss_reduction_values"].append(float(attack_result["loss_reduction"]))
     if attack_result.get("lm_loss") is not None:
         tracker["ptg_lm_loss_values"].append(float(attack_result["lm_loss"]))
+    use_embedding_status = getattr(args, "ptg_use_embedding_status", None)
+    if use_embedding_status is not None:
+        previous = tracker.get("ptg_use_embedding_status")
+        if previous in (None, use_embedding_status):
+            tracker["ptg_use_embedding_status"] = use_embedding_status
+        elif str(use_embedding_status) not in str(previous).split(";"):
+            tracker["ptg_use_embedding_status"] = f"{previous};{use_embedding_status}"
+    unused_token_count = getattr(args, "ptg_unused_token_count", None)
+    if unused_token_count is not None:
+        tracker["ptg_unused_token_count_values"].append(float(unused_token_count))
+        tracker["ptg_unused_token_count_last"] = int(unused_token_count)
     tracker["fixed_token_values"].append(float(attack_result.get("fixed_token_count", 0)))
     tracker["selected_gradient_count"] = attack_result.get("selected_gradient_count", len(selected_names))
     tracker["selected_gradient_names"] = ";".join(selected_names)

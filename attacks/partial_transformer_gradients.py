@@ -299,6 +299,31 @@ def _is_word_embedding_param(lower_name: str) -> bool:
     )
 
 
+def _is_token_embedding_param(lower_name: str) -> bool:
+    if any(
+        part in lower_name
+        for part in (
+            "position_embeddings",
+            "position_embedding",
+            "token_type_embeddings",
+            "token_type_embedding",
+            "layernorm",
+            "layer_norm",
+        )
+    ):
+        return False
+    if "word_embeddings" in lower_name or "embed_tokens" in lower_name:
+        return True
+    parts = lower_name.replace("[", ".").replace("]", ".").split(".")
+    if "wte" in parts:
+        return True
+    return lower_name.endswith("embedding.weight") or lower_name.endswith("embeddings.weight")
+
+
+def is_ptg_word_embedding_param(name: str) -> bool:
+    return _is_token_embedding_param(str(name).lower())
+
+
 def _source_grad_type_matches(name: str, grad_type: str, attack_layers: Sequence[int] | None) -> bool:
     lower = name.lower()
     layer_match = _source_layer_matches(name, attack_layers)

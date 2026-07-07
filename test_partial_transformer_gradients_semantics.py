@@ -19,7 +19,7 @@ from attacks.partial_transformer_gradients import (
     ptg_selector_summary_fields,
     selected_partial_gradient_tensors,
 )
-from attack_partial_gradient import _capture_source_opacus_grads, _validate_args, build_parser
+from attack_partial_gradient import _capture_source_opacus_grads, _resolve_ignored_token_ids, _validate_args, build_parser
 
 
 def assert_true(condition, message):
@@ -28,6 +28,7 @@ def assert_true(condition, message):
 
 
 class TinyTokenizer:
+    vocab_size = 8
     pad_token_id = 0
     eos_token_id = None
     bos_token_id = None
@@ -251,6 +252,92 @@ def test_source_grad_type_selectors_match_official_names():
         assert_true(kept == expected, f"{grad_type} selected {kept}, expected {expected}")
         assert_true(info["grad_type"] == grad_type, "source grad_type should be summarized")
         assert_true(info["attack_layer"] == "0", "source attack_layer should be summarized")
+
+
+def test_ptg_use_embedding_dynamic_unused_tokens_from_visible_embedding_grad():
+    wrapper = TinyPTGWrapper()
+    args = type("Args", (), {"ptg_use_embedding": True})()
+    embedding_grad = torch.zeros(8, 4)
+    embedding_grad[1].fill_(1.0)
+    embedding_grad[3].fill_(0.5)
+    grads = (embedding_grad, torch.ones(2, 2))
+    names = [
+        "bert.embeddings.word_embeddings.weight",
+        "bert.encoder.layer.0.attention.self.query.weight",
+    ]
+
+    ignored = _resolve_ignored_token_ids(args, wrapper.tokenizer, wrapper, grads, names)
+
+    assert_true(ignored == {2, 4, 5, 6, 7}, f"dynamic embedding unused tokens mismatch: {ignored}")
+    assert_true(0 not in ignored, "dynamic embedding inference should keep PAD out of unused tokens")
+    assert_true(args.ptg_use_embedding_status == "dynamic", "dynamic embedding status should be recorded")
+    assert_true(args.ptg_unused_token_count == 5, "dynamic unused token count should be recorded")
+
+
+def test_ptg_use_embedding_ignores_non_token_embedding_tables():
+    wrapper = TinyPTGWrapper()
+    args = type("Args", (), {"ptg_use_embedding": True})()
+    position_grad = torch.zeros(8, 4)
+    position_grad[1].fill_(1.0)
+    grads = (position_grad,)
+    names = ["bert.embeddings.position_embeddings.weight"]
+
+    ignored = _resolve_ignored_token_ids(args, wrapper.tokenizer, wrapper, grads, names)
+
+    assert_true(0 in ignored, "non-token embedding tables should fall back to fixed ignored tokens")
+    assert_true(args.ptg_use_embedding_status == "fallback_no_embedding_grad", "position embeddings should not trigger dynamic status")
+
+
+def test_ptg_use_embedding_scans_resized_embedding_rows():
+    wrapper = TinyPTGWrapper()
+    wrapper.model.embedding = torch.nn.Embedding(10, 4)
+    args = type("Args", (), {"ptg_use_embedding": True})()
+    embedding_grad = torch.zeros(10, 4)
+    embedding_grad[1].fill_(1.0)
+    embedding_grad[3].fill_(0.5)
+    embedding_grad[9].fill_(0.25)
+    grads = (embedding_grad,)
+    names = ["bert.embeddings.word_embeddings.weight"]
+
+    ignored = _resolve_ignored_token_ids(args, wrapper.tokenizer, wrapper, grads, names)
+
+    assert_true(8 in ignored, "dynamic inference should use the model embedding row count, not tokenizer.vocab_size")
+    assert_true(9 not in ignored, "nonzero resized embedding rows should remain decodable")
+    assert_true(args.ptg_unused_token_count == 6, "resized dynamic unused token count should include row 8 and exclude PAD")
+
+
+def test_ptg_use_embedding_falls_back_without_visible_embedding_grad():
+    wrapper = TinyPTGWrapper()
+    args = type("Args", (), {"ptg_use_embedding": True})()
+    grads = (torch.ones(2, 2),)
+    names = ["bert.encoder.layer.0.attention.self.query.weight"]
+
+    ignored = _resolve_ignored_token_ids(args, wrapper.tokenizer, wrapper, grads, names)
+
+    assert_true(0 in ignored, "fallback should use the fixed ignored-token set")
+    assert_true(args.ptg_use_embedding_status == "fallback_no_embedding_grad", "fallback status should be recorded")
+    assert_true(args.ptg_unused_token_count == 1, "fallback count should ignore non-token None values")
+
+
+def test_ptg_use_embedding_cli_aliases_set_shared_flag():
+    for flag in ("--use_embedding", "--ptg_use_embedding"):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--dataset",
+                "sst2",
+                "--split",
+                "test",
+                "--n_inputs",
+                "2",
+                "--finetuned_path",
+                "dummy",
+                flag,
+            ]
+        )
+        _validate_args(args)
+        assert_true(args.ptg_use_embedding is True, f"{flag} should enable ptg_use_embedding")
+        assert_true(args.ptg_use_embedding_status == "not_evaluated", "status should be initialized before attack")
 
 
 def test_source_gpt2_query_key_value_aliases_pack_to_c_attn():
@@ -610,6 +697,11 @@ def main():
         test_selected_partial_gradient_tensors_ignores_hidden_gradients,
         test_ptg_selector_does_not_emit_dager_variant_or_reason,
         test_source_grad_type_selectors_match_official_names,
+        test_ptg_use_embedding_dynamic_unused_tokens_from_visible_embedding_grad,
+        test_ptg_use_embedding_ignores_non_token_embedding_tables,
+        test_ptg_use_embedding_scans_resized_embedding_rows,
+        test_ptg_use_embedding_falls_back_without_visible_embedding_grad,
+        test_ptg_use_embedding_cli_aliases_set_shared_flag,
         test_source_gpt2_query_key_value_aliases_pack_to_c_attn,
         test_ptg_source_loss_names_match_formulas,
         test_source_bert_parity_uses_raw_word_embeddings,
