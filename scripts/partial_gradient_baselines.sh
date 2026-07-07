@@ -5,7 +5,7 @@
 # Script-only flags:
 #   --exposure <first2|last2|mid2|qkv_only|lora_only>
 #   --train_method <full|lora|peft>
-#   --baseline_defense <none|noise|dpsgd|topk|compression|soteria|mixup|dager|lrb|lrbprojonly|signed_bottleneck>
+#   --baseline_defense <none|noise|dpsgd|dpsgd_opacus|topk|compression|soteria|mixup|dager|lrb|lrbprojonly|signed_bottleneck>
 #   --baseline_param <value>
 #   --lrb_variants <comma-separated LRB presets>
 #   --lrb_main_k <value>
@@ -193,7 +193,7 @@ is_known_lrb_variant() {
 
 dager_param_name() {
   case "$1" in
-    noise|dpsgd)
+    noise|dpsgd|dpsgd_opacus)
       printf 'defense_noise'
       ;;
     topk)
@@ -235,6 +235,9 @@ dager_set_param_values() {
       ;;
     noise|dpsgd)
       param_vals=( 1e-6 1e-5 1e-4 5e-4 1e-3 )
+      ;;
+    dpsgd_opacus)
+      param_vals=( 0.01 )
       ;;
     topk)
       param_vals=( 0.01 0.05 0.1 0.3 0.5 0.7 0.9 )
@@ -556,7 +559,7 @@ fi
 
 if [ -n "$BASELINE_DEFENSE" ]; then
   case "$BASELINE_DEFENSE" in
-    none|noise|dpsgd|topk|compression|soteria|mixup|dager|lrb|lrbprojonly|signed_bottleneck)
+    none|noise|dpsgd|dpsgd_opacus|topk|compression|soteria|mixup|dager|lrb|lrbprojonly|signed_bottleneck)
       ;;
     *)
       echo "[partial-gradient] Unsupported --baseline_defense: ${BASELINE_DEFENSE}" >&2
@@ -793,7 +796,7 @@ for defense in "${selected_defenses[@]}"; do
       log_base="${defense}_${slug}"
       param="$val"
       case "$defense" in
-        noise|dpsgd)
+        noise|dpsgd|dpsgd_opacus)
           DEF_EXTRA=( --defense_noise "$val" )
           ;;
         topk)
@@ -824,7 +827,7 @@ for defense in "${selected_defenses[@]}"; do
     if [ "$ADAPTIVE_ATTACK_CHECK" = "1" ] && [ "$defense" != "none" ] && [ "$defense" != "dager" ]; then
       log_base="${log_base}_adaptive"
       DEF_EXTRA+=( --adaptive_attack defense_aware )
-      if [ "$defense" = "noise" ] || [ "$defense" = "dpsgd" ]; then
+      if [ "$defense" = "noise" ] || [ "$defense" = "dpsgd" ] || [ "$defense" = "dpsgd_opacus" ]; then
         DEF_EXTRA+=( --defense_adaptive_decoding )
       fi
     fi

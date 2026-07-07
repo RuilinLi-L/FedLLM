@@ -29,6 +29,7 @@ dependencies:
       - peft==0.13.0
       - huggingface-hub==0.25.1
       - safetensors==0.4.5
+      - opacus==1.5.4
       - rouge-score==0.1.2
       - sentencepiece==0.2.0
       - einops==0.8.0

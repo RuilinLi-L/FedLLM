@@ -7,6 +7,11 @@ from utils.peft_utils import normalize_peft_args, validate_peft_eval_args
 from utils.partial_gradient import validate_partial_gradient_args
 from utils.representation_bottleneck import REP_BOTTLENECK_CHOICES, validate_rep_bottleneck_args
 from utils.adaptive_attack import ADAPTIVE_ATTACK_CHOICES, validate_adaptive_attack_args
+from utils.dpsgd_opacus import (
+    DPSGD_OPACUS_DEFAULT_DELTA,
+    DPSGD_OPACUS_DEFENSE,
+    normalize_dpsgd_opacus_args,
+)
 
 def get_args(argv=None):
     parser = argparse.ArgumentParser(description='DAGER attack')
@@ -108,6 +113,12 @@ def get_args(argv=None):
     
     #DP
     parser.add_argument('--defense_noise', type=float, default=None) # add noise to true grads
+    parser.add_argument(
+        '--defense_dp_delta',
+        type=float,
+        default=DPSGD_OPACUS_DEFAULT_DELTA,
+        help='Target delta used when reporting Opacus DP-SGD epsilon.',
+    )
     parser.add_argument('--max_len', type=int, default=1e10) 
     parser.add_argument('--p1_std_thrs', type=float, default=5)
     parser.add_argument('--l2_std_thrs', type=float, default=5)
@@ -153,14 +164,14 @@ def get_args(argv=None):
         '--defense',
         type=str,
         default='none',
-        choices=['none', 'noise', 'dpsgd', 'topk', 'compression', 'soteria', 'mixup', 'dager', 'lrb', 'lrbprojonly', 'signed_bottleneck'],
+        choices=['none', 'noise', 'dpsgd', DPSGD_OPACUS_DEFENSE, 'topk', 'compression', 'soteria', 'mixup', 'dager', 'lrb', 'lrbprojonly', 'signed_bottleneck'],
         help='Defense applied to client gradients before attack reconstruction; some defenses generate gradients directly.',
     )
     parser.add_argument(
         '--defense_clip_norm',
         type=float,
         default=1.0,
-        help='Per-example L2 clip norm C for the DP-SGD-style baseline.',
+        help='Per-example L2 clip norm C for dpsgd / dpsgd_opacus.',
     )
     parser.add_argument(
         '--defense_topk_ratio',
@@ -393,6 +404,7 @@ def get_args(argv=None):
     validate_rep_bottleneck_args(args)
     validate_adaptive_attack_args(args)
     validate_peft_eval_args(args)
+    normalize_dpsgd_opacus_args(args)
     apply_lrb_preset(args)
 
     if args.neptune is not None:

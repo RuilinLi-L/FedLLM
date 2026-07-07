@@ -24,6 +24,7 @@ from utils.defense_common import (
     normalize_legacy_training_defense_args,
 )
 from utils.defenses import apply_defense, requires_gradient_generation_defense
+from utils.dpsgd_opacus import DPSGD_OPACUS_DEFENSE, normalize_dpsgd_opacus_args
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import apply_lrb_preset
 from utils.seq_class_utils import (
@@ -41,7 +42,6 @@ except ImportError:  # pragma: no cover - older torch fallback
 
 PROXY_SUMMARY_START = "===== PROXY UTILITY SUMMARY START ====="
 PROXY_SUMMARY_END = "===== PROXY UTILITY SUMMARY END ====="
-DPSGD_OPACUS_DEFENSE = "dpsgd_opacus"
 UTILITY_ONLY_DEFENSE_CHOICES = (DPSGD_OPACUS_DEFENSE,)
 
 
@@ -88,12 +88,6 @@ def init_tracker(args) -> dict:
         "error_type": None,
         "error_message": None,
     }
-
-
-def normalize_dpsgd_opacus_args(args):
-    if getattr(args, "defense", "none") == DPSGD_OPACUS_DEFENSE and getattr(args, "defense_noise", None) is None:
-        args.defense_noise = 0.01
-    return args
 
 
 def proxy_defense_semantics(args) -> str:

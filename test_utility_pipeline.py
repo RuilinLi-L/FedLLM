@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import collect_experiment_logs as cel  # noqa: E402
 if torch is not None:
     from utils.defense_common import defense_param_spec, grad_similarity_metrics  # noqa: E402
+    from utils.dpsgd_opacus import dpsgd_opacus_summary_fields, record_dpsgd_opacus_summary  # noqa: E402
 
 
 def assert_true(condition, message):
@@ -43,6 +44,28 @@ def test_defense_param_spec_tracks_shared_cli_mapping():
     name, value = defense_param_spec(args)
     assert_true(name == "defense_noise", "dpsgd_opacus should report defense_noise")
     assert_true(float(value) == 0.01, "dpsgd_opacus noise multiplier should round-trip")
+
+
+def test_dpsgd_opacus_summary_fields_include_accounting_terms():
+    class FakePrivacyEngine:
+        def get_epsilon(self, delta):
+            return 3.25 + float(delta)
+
+    args = SimpleNamespace(
+        defense="dpsgd_opacus",
+        defense_noise=0.01,
+        defense_clip_norm=1.0,
+        defense_dp_delta=1e-5,
+    )
+    tracker = {}
+    record_dpsgd_opacus_summary(args, tracker, FakePrivacyEngine())
+    fields = dict(dpsgd_opacus_summary_fields(args, tracker))
+
+    assert_true(fields["dpsgd_noise_multiplier"] == 0.01, "summary should include Opacus noise multiplier")
+    assert_true(fields["dpsgd_max_grad_norm"] == 1.0, "summary should include Opacus clipping bound")
+    assert_true(fields["dpsgd_delta"] == 1e-5, "summary should include DP delta")
+    assert_true(fields["dpsgd_accountant"] == "opacus_rdp", "summary should name the accountant")
+    assert_true(abs(fields["dpsgd_epsilon"] - 3.25001) < 1e-9, "summary should include epsilon from privacy engine")
 
 
 def test_grad_similarity_metrics_returns_cosine_and_norm_retention():
@@ -429,6 +452,7 @@ def main():
         tests.extend(
             [
                 test_defense_param_spec_tracks_shared_cli_mapping,
+                test_dpsgd_opacus_summary_fields_include_accounting_terms,
                 test_grad_similarity_metrics_returns_cosine_and_norm_retention,
             ]
         )

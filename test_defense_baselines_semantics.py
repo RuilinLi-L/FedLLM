@@ -11,6 +11,7 @@ These tests focus on the paper-aligned changes:
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -21,8 +22,9 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from utils.defense_common import grad_similarity_metrics
+from utils.defense_common import add_shared_defense_args, grad_similarity_metrics
 from utils.defenses import (
+    SPECIAL_GRADIENT_DEFENSES,
     _apply_random_mask,
     apply_defense,
     dpsgd_defense,
@@ -30,7 +32,9 @@ from utils.defenses import (
     noise_injection,
     soteria_defense,
     topk_sparsification,
+    uses_noisy_gradient_decoding,
 )
+from utils.dpsgd_opacus import DPSGD_OPACUS_DEFENSE, normalize_dpsgd_opacus_args
 from utils.lrb_defense import (
     _adaptive_avg_pool2d_manual,
     _adaptive_bin_bounds,
@@ -97,6 +101,25 @@ def test_dpsgd_matches_manual_formula():
 
     assert_true(torch.allclose(defended[0], expected, atol=1e-5), "dpsgd must clip each example before averaging")
     assert_true(not torch.allclose(defended[0], aggregated_clip, atol=1e-5), "dpsgd must differ from aggregated clipping")
+
+
+def test_dpsgd_opacus_is_shared_cli_not_style_transform():
+    parser = argparse.ArgumentParser()
+    add_shared_defense_args(parser)
+    args = parser.parse_args(["--defense", DPSGD_OPACUS_DEFENSE])
+
+    assert_true(args.defense == DPSGD_OPACUS_DEFENSE, "shared CLI should accept dpsgd_opacus")
+    assert_true(args.defense_dp_delta == 1e-5, "dpsgd_opacus should default delta to 1e-5")
+    assert_true(DPSGD_OPACUS_DEFENSE not in SPECIAL_GRADIENT_DEFENSES, "dpsgd_opacus must not use style direct-generation path")
+    normalize_dpsgd_opacus_args(args)
+    assert_true(uses_noisy_gradient_decoding(args), "dpsgd_opacus should use noisy DAGER decoding")
+
+    try:
+        apply_defense((torch.ones(1),), args)
+    except ValueError as exc:
+        assert_true("training-loop defense" in str(exc), "dpsgd_opacus misuse should explain the dedicated path")
+    else:
+        raise AssertionError("dpsgd_opacus should not run through apply_defense")
 
 
 def test_topk_keeps_expected_support_and_minimum_one_entry():
@@ -745,6 +768,7 @@ def main():
         test_noise_rng_behavior,
         test_apply_defense_advances_stochastic_randomness_by_call,
         test_dpsgd_matches_manual_formula,
+        test_dpsgd_opacus_is_shared_cli_not_style_transform,
         test_topk_keeps_expected_support_and_minimum_one_entry,
         test_qsgd_compression_matches_seeded_formula_and_bit_granularity,
         test_soteria_masks_representation_during_gradient_generation,

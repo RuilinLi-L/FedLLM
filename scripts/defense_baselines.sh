@@ -12,7 +12,7 @@
 #   ./scripts/defense_baselines.sh sst2 2 gpt2 3 --baseline_defense soteria --baseline_param 60 --finetuned_path ./models/gpt2-ft-rt
 #
 # Script-only flags handled here and not forwarded to attack.py:
-#   --baseline_defense <none|noise|dpsgd|topk|compression|soteria|mixup|lrb|lrbprojonly|signed_bottleneck>
+#   --baseline_defense <none|noise|dpsgd|dpsgd_opacus|topk|compression|soteria|mixup|lrb|lrbprojonly|signed_bottleneck>
 #   --baseline_param <value>
 #   --adaptive_attack_check
 #
@@ -101,7 +101,7 @@ dager_param_slug() {
 
 dager_param_name() {
   case "$1" in
-    noise|dpsgd)
+    noise|dpsgd|dpsgd_opacus)
       printf 'defense_noise'
       ;;
     topk)
@@ -136,6 +136,9 @@ dager_set_param_values() {
       ;;
     noise|dpsgd)
       param_vals=( 1e-6 3e-6 1e-5 3e-5 1e-4 2e-4 3e-4 5e-4 7e-4 1e-3 2e-3 3e-3 5e-3 1e-2 )
+      ;;
+    dpsgd_opacus)
+      param_vals=( 0.01 )
       ;;
     topk)
       param_vals=( 0.01 0.05 0.10 0.20 0.30 0.40 0.50 0.60 0.70 0.80 0.90 0.95 0.97 0.98 0.99 )
@@ -256,7 +259,7 @@ parse_script_args
 
 if [ -n "$BASELINE_DEFENSE" ]; then
   case "$BASELINE_DEFENSE" in
-    none|noise|dpsgd|topk|compression|soteria|mixup|lrb|lrbprojonly|signed_bottleneck)
+    none|noise|dpsgd|dpsgd_opacus|topk|compression|soteria|mixup|lrb|lrbprojonly|signed_bottleneck)
       ;;
     *)
       echo "[dager] Unsupported --baseline_defense: ${BASELINE_DEFENSE}" >&2
@@ -436,7 +439,7 @@ for defense in "${selected_defenses[@]}"; do
       log_base="${defense}_${slug}"
       param="$val"
       case "$defense" in
-        noise|dpsgd)
+        noise|dpsgd|dpsgd_opacus)
           DEF_EXTRA=( --defense_noise "$val" )
           ;;
         topk)
@@ -467,7 +470,7 @@ for defense in "${selected_defenses[@]}"; do
     if [ "$ADAPTIVE_ATTACK_CHECK" = "1" ] && [ "$defense" != "none" ]; then
       log_base="${log_base}_adaptive"
       DEF_EXTRA+=( --adaptive_attack defense_aware )
-      if [ "$defense" = "noise" ] || [ "$defense" = "dpsgd" ]; then
+      if [ "$defense" = "noise" ] || [ "$defense" = "dpsgd" ] || [ "$defense" = "dpsgd_opacus" ]; then
         DEF_EXTRA+=( --defense_adaptive_decoding )
       fi
     fi

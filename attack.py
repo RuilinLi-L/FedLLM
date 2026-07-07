@@ -8,6 +8,19 @@ from utils.filtering_encoder import filter_encoder
 from utils.filtering_decoder import filter_decoder
 from utils.functional import remove_padding, filter_outliers
 from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
+from utils.dpsgd_opacus import (
+    DPSGD_OPACUS_DEFENSE,
+    capture_private_grads,
+    create_source_dpsgd_dataloader,
+    decode_batch_texts,
+    dpsgd_opacus_summary_fields,
+    freeze_position_embeddings,
+    is_empty_opacus_batch,
+    make_private_with_opacus,
+    normalize_dpsgd_opacus_args,
+    record_dpsgd_opacus_summary,
+    sync_private_model_to_public_model,
+)
 from utils.gpu import resolve_cuda_device, resolve_gradient_device
 from utils.lrb_presets import lrb_preset_param_value
 from utils.adaptive_attack import (
@@ -158,6 +171,7 @@ def _defense_param_spec(args):
     mapping = {
         'noise': ('defense_noise', getattr(args, 'defense_noise', None)),
         'dpsgd': ('defense_noise', getattr(args, 'defense_noise', None)),
+        'dpsgd_opacus': ('defense_noise', getattr(args, 'defense_noise', None)),
         'topk': ('defense_topk_ratio', getattr(args, 'defense_topk_ratio', None)),
         'compression': ('defense_n_bits', getattr(args, 'defense_n_bits', None)),
         'soteria': (
@@ -294,6 +308,7 @@ def _emit_result_summary(args):
         ('defense', getattr(args, 'defense', 'none')),
         ('defense_param_name', defense_param_name),
         ('defense_param_value', defense_param_value),
+        *dpsgd_opacus_summary_fields(args, tracker),
         *rep_bottleneck_summary_fields(args),
         *partial_gradient_summary_fields(args),
         *adaptive_attack_summary_fields(args),
@@ -355,6 +370,36 @@ def emit_rec_metrics(
         args.neptune['logs/token'].log(rec_token)
         args.neptune['logs/rec_l2'].log(np.array(rec_l2).sum())
 
+
+def _ranked_bert_l1_candidates(args, model_wrapper, R_Q, embeds):
+    size = adaptive_check_if_in_span(
+        args,
+        R_Q,
+        embeds,
+        args.dist_norm,
+        layer_position=0,
+    )
+    flat = size.reshape(-1)
+    cap = min(
+        int(flat.numel()),
+        max(
+            int(args.batch_size),
+            max(50 * int(args.batch_size), int(0.05 * len(model_wrapper.tokenizer))),
+        ),
+    )
+    _, flat_idx = torch.topk(flat, k=cap, largest=False)
+
+    coords = []
+    remaining = flat_idx
+    for dim in reversed(size.shape):
+        coords.append(remaining % int(dim))
+        remaining = torch.div(remaining, int(dim), rounding_mode="floor")
+    coords = tuple(reversed(coords))
+    if len(coords) < 3:
+        raise ValueError(f"Expected BERT token/type candidate dimensions, got shape={tuple(size.shape)}.")
+    return coords[-2], coords[-1]
+
+
 def filter_l1(args, model_wrapper, R_Qs):
     tokenizer = model_wrapper.tokenizer
     res_pos, res_ids, res_types = [], [], []
@@ -378,7 +423,12 @@ def filter_l1(args, model_wrapper, R_Qs):
                     layer_position=0,
                 )
             else:
-                raise NotImplementedError
+                res_ids_new, res_types_new = _ranked_bert_l1_candidates(
+                    args,
+                    model_wrapper,
+                    R_Qs[0],
+                    embeds,
+                )
         else:
             if not uses_noisy_gradient_decoding(args):
                 _, res_ids_new = adaptive_get_top_B_in_span(
@@ -594,7 +644,7 @@ def _decode_gpt2_nonprefix(args, model_wrapper, R_Qs, orig_batch):
         predicted_scores = [float(completed[0][1])]
     return res_pos, res_ids, res_types, [], predicted_sentences, predicted_scores
 
-def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
+def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper, precomputed_true_grads=None):
     global total_correct_tokens, total_tokens, total_correct_maxB_tokens
 
     tokenizer = model_wrapper.tokenizer
@@ -604,7 +654,9 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper):
     orig_batch = tokenizer(sequences,padding=True, truncation=True, max_length=min(tokenizer.model_max_length, model_wrapper.emb_size - 20),return_tensors='pt').to(args.device)
     args.defense_rng_step = int(args.result_tracker.get('n_inputs_completed', 0))
     
-    if requires_gradient_generation_defense(getattr(args, "defense", "none")):
+    if precomputed_true_grads is not None:
+        true_grads = precomputed_true_grads
+    elif requires_gradient_generation_defense(getattr(args, "defense", "none")):
         true_grads = apply_defense(
             None, args, model_wrapper=model_wrapper, batch=orig_batch, labels=true_labels
         )
@@ -902,12 +954,142 @@ def print_metrics(args, res, suffix):
     print()
     return summary
 
+
+def _run_dpsgd_opacus_attack(args, device, metric, t_start):
+    normalize_dpsgd_opacus_args(args, active=True)
+    train_wrapper = ModelWrapper(args)
+    attack_wrapper = ModelWrapper(args)
+    frozen_train = freeze_position_embeddings(train_wrapper.model)
+    frozen_attack = freeze_position_embeddings(attack_wrapper.model)
+    if frozen_train or frozen_attack:
+        print(
+            f"[dager:dpsgd_opacus] Frozen BERT position embeddings "
+            f"(train={frozen_train}, attack={frozen_attack}).",
+            flush=True,
+        )
+
+    train_wrapper.set_model_device(args.device)
+    attack_wrapper.set_model_device(args.device)
+    train_loader = create_source_dpsgd_dataloader(args, train_wrapper.tokenizer, shuffle=False)
+    optimizer = torch.optim.AdamW(
+        (param for param in train_wrapper.model.parameters() if param.requires_grad),
+        lr=5e-5,
+    )
+    privacy_engine, private_model, optimizer, train_loader = make_private_with_opacus(
+        train_wrapper.model,
+        optimizer,
+        train_loader,
+        args,
+    )
+    train_wrapper.model = private_model
+
+    print('\n\nAttacking with source-style Opacus DP-SGD..\n', flush=True)
+    predictions, references = [], []
+    recover_idx = 0
+    requested_stop = min(args.n_inputs, args.end_input)
+    for next_batch in train_loader:
+        if recover_idx >= requested_stop:
+            break
+        if is_empty_opacus_batch(next_batch):
+            continue
+
+        batch = {key: value.to(args.device) for key, value in next_batch.items()}
+        labels = batch["labels"]
+        model_inputs = {key: value for key, value in batch.items() if key != "labels"}
+        optimizer.zero_grad(set_to_none=True)
+        outputs = private_model(**model_inputs, labels=labels.view(-1).long())
+        outputs.loss.backward()
+
+        if recover_idx >= args.start_input:
+            t_input_start = time.time()
+            args.defense_rng_step = int(args.result_tracker.get('n_inputs_completed', 0))
+            sample = (decode_batch_texts(train_wrapper.tokenizer, batch), labels)
+            print(f'Running input #{recover_idx} of {args.n_inputs}.', flush=True)
+            if args.neptune:
+                args.neptune['logs/curr_input'].log(recover_idx)
+
+            print('reference: ', flush=True)
+            for seq in sample[0]:
+                print('========================', flush=True)
+                print(seq, flush=True)
+            print('========================', flush=True)
+
+            true_grads, _ = capture_private_grads(private_model)
+            missing, unexpected = sync_private_model_to_public_model(private_model, attack_wrapper.model)
+            if missing or unexpected:
+                print(
+                    f"[dager:dpsgd_opacus] Loaded private state with "
+                    f"missing={len(missing)} unexpected={len(unexpected)}.",
+                    flush=True,
+                )
+            attack_wrapper.model.eval()
+            prediction, reference = reconstruct(
+                args,
+                device,
+                sample,
+                metric,
+                attack_wrapper,
+                precomputed_true_grads=true_grads,
+            )
+            predictions += prediction
+            references += reference
+
+            print(f'Done with input #{recover_idx} of {args.n_inputs}.', flush=True)
+            print('reference: ', flush=True)
+            for seq in reference:
+                print('========================', flush=True)
+                print(seq, flush=True)
+            print('========================', flush=True)
+
+            print('predicted: ', flush=True)
+            for seq in prediction:
+                print('========================', flush=True)
+                print(seq, flush=True)
+            print('========================', flush=True)
+
+            print('[Curr input metrics]:', flush=True)
+            res = metric.compute(predictions=prediction, references=reference)
+            curr_metric_summary = print_metrics(args, res, suffix='curr')
+            _record_input_metric_summary(args, curr_metric_summary)
+
+            print('[Aggregate metrics]:', flush=True)
+            res = metric.compute(predictions=predictions, references=references)
+            args.result_tracker['aggregate_metrics'] = print_metrics(args, res, suffix='agg')
+
+            input_time = str(datetime.timedelta(seconds=time.time() - t_input_start)).split(".")[0]
+            total_time = str(datetime.timedelta(seconds=time.time() - t_start)).split(".")[0]
+            args.result_tracker['n_inputs_completed'] += 1
+            args.result_tracker['last_input_idx'] = recover_idx
+            args.result_tracker['last_input_time'] = input_time
+            args.result_tracker['last_total_time'] = total_time
+            print(f'input #{recover_idx} time: {input_time} | total time: {total_time}', flush=True)
+            print()
+            print()
+
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        recover_idx += 1
+
+    if args.result_tracker['last_total_time'] is None:
+        args.result_tracker['last_total_time'] = str(datetime.timedelta(seconds=time.time() - t_start)).split(".")[0]
+    record_dpsgd_opacus_summary(args, args.result_tracker, privacy_engine)
+    print('Done with all.', flush=True)
+    _print_sequence_stats_table(args)
+    if args.neptune:
+        args.neptune['logs/curr_input'].log(args.n_inputs)
+    _emit_result_summary(args)
+
+
 def main():
     args.result_tracker = _init_result_tracker(args)
     t_start = time.time()
     try:
         device = torch.device(args.device)
         metric = load_metric('rouge', cache_dir=args.cache_dir)
+        if getattr(args, "defense", "none") == DPSGD_OPACUS_DEFENSE:
+            _run_dpsgd_opacus_attack(args, device, metric, t_start)
+            return
+
         dataset = TextDataset(args.device, args.dataset, args.split, args.n_inputs, args.batch_size, args.cache_dir)
 
         model_wrapper = ModelWrapper(args)

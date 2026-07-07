@@ -19,7 +19,7 @@ from attacks.partial_transformer_gradients import (
     ptg_selector_summary_fields,
     selected_partial_gradient_tensors,
 )
-from attack_partial_gradient import _capture_source_opacus_grads
+from attack_partial_gradient import _capture_source_opacus_grads, _validate_args, build_parser
 
 
 def assert_true(condition, message):
@@ -582,6 +582,29 @@ def test_ptg_variant_constant_names_summary_variant():
     assert_true(PTG_GRADIENT_MATCHING_VARIANT == "ptg_gradient_matching", "PTG summary variant should stay stable")
 
 
+def test_dpsgd_opacus_defense_selects_source_opacus_mode():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--dataset",
+            "sst2",
+            "--split",
+            "test",
+            "--n_inputs",
+            "2",
+            "--finetuned_path",
+            "dummy",
+            "--defense",
+            "dpsgd_opacus",
+        ]
+    )
+    _validate_args(args)
+    assert_true(args.ptg_dpsgd_mode == "source_opacus", "dpsgd_opacus should select the source Opacus loop")
+    assert_true(args.defense_noise == 0.01, "dpsgd_opacus should use the source default noise multiplier")
+    assert_true(args.noise_multiplier == 0.01, "source alias should mirror defense_noise")
+    assert_true(args.defense_dp_delta == 1e-5, "dpsgd_opacus should default delta to 1e-5")
+
+
 def main():
     tests = [
         test_selected_partial_gradient_tensors_ignores_hidden_gradients,
@@ -599,6 +622,7 @@ def main():
         test_source_attack_layer_parser,
         test_source_opacus_capture_uses_parameter_grads,
         test_ptg_variant_constant_names_summary_variant,
+        test_dpsgd_opacus_defense_selects_source_opacus_mode,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

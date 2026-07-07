@@ -8,12 +8,18 @@ import torch
 from utils.lrb_presets import LRB_PRESET_CHOICES, lrb_preset_param_value
 from utils.representation_bottleneck import REP_BOTTLENECK_CHOICES
 from utils.adaptive_attack import ADAPTIVE_ATTACK_CHOICES
+from utils.dpsgd_opacus import (
+    DPSGD_OPACUS_DEFAULT_DELTA,
+    DPSGD_OPACUS_DEFAULT_NOISE_MULTIPLIER,
+    DPSGD_OPACUS_DEFENSE,
+)
 
 
 DEFENSE_CHOICES = [
     "none",
     "noise",
     "dpsgd",
+    DPSGD_OPACUS_DEFENSE,
     "topk",
     "compression",
     "soteria",
@@ -50,13 +56,19 @@ def add_shared_defense_args(
         "--defense_noise",
         type=float,
         default=None,
-        help="Gaussian noise scale for noise / dpsgd or legacy none+noise mode.",
+        help="Gaussian noise scale for noise / dpsgd, or Opacus noise multiplier for dpsgd_opacus.",
     )
     parser.add_argument(
         "--defense_clip_norm",
         type=float,
         default=1.0,
-        help="Per-example L2 clip norm C for dpsgd.",
+        help="Per-example L2 clip norm C for dpsgd / dpsgd_opacus.",
+    )
+    parser.add_argument(
+        "--defense_dp_delta",
+        type=float,
+        default=DPSGD_OPACUS_DEFAULT_DELTA,
+        help="Target delta used when reporting Opacus DP-SGD epsilon.",
     )
     parser.add_argument(
         "--defense_topk_ratio",
@@ -294,6 +306,10 @@ def normalize_legacy_training_defense_args(args):
         args.defense_noise = args.noise
     if getattr(args, "pct_mask", None) is not None and getattr(args, "defense_pct_mask", None) is None:
         args.defense_pct_mask = args.pct_mask
+    if getattr(args, "defense", "none") == DPSGD_OPACUS_DEFENSE and getattr(args, "defense_noise", None) is None:
+        args.defense_noise = DPSGD_OPACUS_DEFAULT_NOISE_MULTIPLIER
+    if getattr(args, "defense_dp_delta", None) is None:
+        args.defense_dp_delta = DPSGD_OPACUS_DEFAULT_DELTA
     return args
 
 

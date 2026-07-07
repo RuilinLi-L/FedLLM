@@ -3,6 +3,7 @@ Defense baselines for gradient inversion experiments (FL-LLM.md).
 
 Post-gradient: noise, topk, compression, optional random mask (defense_pct_mask).
 Direct gradient generation: dpsgd-style, soteria-style, manifold-mixup-style.
+DPSGD Opacus: source-style training loop handled outside apply_defense().
 DAGER-specific: dager defense methods targeting DAGER attack assumptions.
 """
 from __future__ import annotations
@@ -10,6 +11,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+from utils.dpsgd_opacus import DPSGD_OPACUS_DEFENSE
 
 try:
     from .dager_defense import apply_dager_defense
@@ -43,7 +46,7 @@ def uses_noisy_gradient_decoding(args) -> bool:
         return False
     if float(sigma) <= 0:
         return False
-    if defense in ("noise", "dpsgd"):
+    if defense in ("noise", "dpsgd", DPSGD_OPACUS_DEFENSE):
         return True
     if defense == "none":
         return True
@@ -300,6 +303,12 @@ def apply_defense(grads, args, model_wrapper=None, batch=None, labels=None):
     Returns: gradient tuple (same structure as compute_grads).
     """
     defense = getattr(args, "defense", "none")
+    if defense == DPSGD_OPACUS_DEFENSE:
+        raise ValueError(
+            "dpsgd_opacus is a source-style Opacus training-loop defense and "
+            "cannot be applied as a post-gradient transform. Use the dedicated "
+            "dpsgd_opacus path in train.py, attack.py, or attack_partial_gradient.py."
+        )
     base_seed = int(getattr(args, "rng_seed", 0))
     stochastic_main = (
         defense in {"noise", "dpsgd", "compression", "dager"}

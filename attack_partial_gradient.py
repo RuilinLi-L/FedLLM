@@ -27,6 +27,18 @@ from attacks.peftleak_text import summarize_token_predictions
 from attack_peftleak import compute_text_metrics
 from utils.defense_common import add_shared_defense_args, defense_param_spec, fmt_summary_value, safe_mean
 from utils.defenses import apply_defense, requires_gradient_generation_defense
+from utils.dpsgd_opacus import (
+    DPSGD_OPACUS_DEFENSE,
+    capture_private_grads,
+    create_source_dpsgd_dataloader,
+    dpsgd_opacus_summary_fields,
+    freeze_position_embeddings,
+    is_empty_opacus_batch,
+    make_private_with_opacus,
+    normalize_dpsgd_opacus_args,
+    record_dpsgd_opacus_summary,
+    sync_private_model_to_public_model,
+)
 from utils.gpu import resolve_cuda_device, resolve_gradient_device
 from utils.lrb_presets import apply_lrb_preset
 from utils.representation_bottleneck import rep_bottleneck_summary_fields, validate_rep_bottleneck_args
@@ -38,6 +50,7 @@ SUPPORTED_PTG_DEFENSES = {
     "none",
     "noise",
     "dpsgd",
+    DPSGD_OPACUS_DEFENSE,
     "topk",
     "compression",
     "soteria",
@@ -411,10 +424,13 @@ def _normalize_ptg_source_args(args):
         args.ptg_lm_prior_weight = 0.0
         args.ptg_embed_norm_weight = 0.0
 
-    if args.defense == "dpsgd":
-        if args.ptg_dpsgd_mode == "source_opacus" and args.noise_multiplier is None and args.defense_noise is None:
-            args.noise_multiplier = 0.01
-            args.defense_noise = 0.01
+    if args.defense == DPSGD_OPACUS_DEFENSE:
+        args.ptg_dpsgd_mode = "source_opacus"
+    if args.defense == "dpsgd" and args.ptg_dpsgd_mode == "source_opacus":
+        normalize_dpsgd_opacus_args(args, active=True)
+    elif args.defense == DPSGD_OPACUS_DEFENSE:
+        normalize_dpsgd_opacus_args(args, active=True)
+    elif args.defense == "dpsgd":
         if args.noise_multiplier is None and args.defense_noise is not None:
             args.noise_multiplier = float(args.defense_noise)
         if args.defense_noise is None and args.noise_multiplier is not None:
@@ -459,6 +475,7 @@ def _emit_result_summary(args, tracker):
         ("clipping_bound", args.clipping_bound),
         ("defense_param_name", defense_param_name),
         ("defense_param_value", defense_param_value),
+        *dpsgd_opacus_summary_fields(args, tracker),
         *rep_bottleneck_summary_fields(args),
         *ptg_selector_summary_fields(args),
         ("ptg_steps", args.ptg_steps),
@@ -528,8 +545,8 @@ def _validate_args(args):
         raise NotImplementedError("DAGER defense is DAGER-specific and is excluded from PTG reproduction runs.")
     if args.defense not in SUPPORTED_PTG_DEFENSES:
         raise NotImplementedError(f"PTG supports defenses {sorted(SUPPORTED_PTG_DEFENSES)}; got {args.defense!r}.")
-    if args.ptg_dpsgd_mode == "source_opacus" and args.defense != "dpsgd":
-        raise ValueError("--ptg_dpsgd_mode source_opacus requires --defense dpsgd.")
+    if args.ptg_dpsgd_mode == "source_opacus" and args.defense not in {"dpsgd", DPSGD_OPACUS_DEFENSE}:
+        raise ValueError("--ptg_dpsgd_mode source_opacus requires --defense dpsgd or --defense dpsgd_opacus.")
     if getattr(args, "attn_implementation", None) == "sdpa":
         print(
             "[ptg] Switching --attn_implementation sdpa -> eager: PTG matching needs second-order gradients.",
@@ -691,50 +708,11 @@ def _record_attack_result(args, tracker, input_idx, input_start, start_time, att
 
 
 def _create_source_dpsgd_dataloader(args, tokenizer):
-    from datasets import load_dataset
-    from torch.utils.data import DataLoader
-    from transformers import DataCollatorWithPadding
-
-    if args.dataset in ["cola", "sst2", "rte"]:
-        datasets = load_dataset("glue", args.dataset, cache_dir=args.cache_dir)
-    elif args.dataset == "rotten_tomatoes":
-        datasets = load_dataset(args.dataset, cache_dir=args.cache_dir)
-    else:
-        raise NotImplementedError(
-            "source_opacus DP-SGD parity currently follows the official source datasets: "
-            "cola, sst2, rte, rotten_tomatoes."
-        )
-
-    if args.dataset == "rotten_tomatoes":
-        text_columns = ("text",)
-    elif args.dataset == "rte":
-        text_columns = ("sentence1", "sentence2")
-    else:
-        text_columns = ("sentence",)
-
-    def tokenize_function(examples):
-        if len(text_columns) == 2:
-            return tokenizer(examples[text_columns[0]], examples[text_columns[1]], truncation=True)
-        return tokenizer(examples[text_columns[0]], truncation=True)
-
-    tokenized = datasets.map(tokenize_function, batched=True)
-    remove_columns = [column for column in tokenized["train"].column_names if column not in {"label", "input_ids", "attention_mask", "token_type_ids"}]
-    if remove_columns:
-        tokenized = tokenized.remove_columns(remove_columns)
-    tokenized = tokenized.rename_column("label", "labels")
-    tokenized.set_format("torch")
-    collator = DataCollatorWithPadding(tokenizer=tokenizer)
-    return DataLoader(tokenized["train"], shuffle=False, batch_size=args.batch_size, collate_fn=collator)
+    return create_source_dpsgd_dataloader(args, tokenizer, shuffle=False)
 
 
 def _capture_source_opacus_grads(args, private_model):
-    names = []
-    grads = []
-    for name, param in private_model.named_parameters():
-        if not getattr(param, "requires_grad", False):
-            continue
-        names.append(name.replace("_module.", ""))
-        grads.append(None if param.grad is None else param.grad.detach().clone())
+    grads, names = capture_private_grads(private_model)
     partial_grads, info = filter_partial_transformer_gradients(
         tuple(grads),
         parameter_names=names,
@@ -753,9 +731,7 @@ def _capture_source_opacus_grads(args, private_model):
 
 
 def _sync_private_model_to_attack_model(private_model, attack_model):
-    source_module = getattr(private_model, "_module", private_model)
-    state = source_module.state_dict()
-    missing, unexpected = attack_model.load_state_dict(state, strict=False)
+    missing, unexpected = sync_private_model_to_public_model(private_model, attack_model)
     if missing or unexpected:
         print(
             f"[ptg:dpsgd] Loaded private state with missing={len(missing)} unexpected={len(unexpected)}.",
@@ -764,22 +740,13 @@ def _sync_private_model_to_attack_model(private_model, attack_model):
 
 
 def _freeze_source_position_embeddings(model) -> int:
-    frozen = 0
-    for name, param in model.named_parameters():
-        if "position_embeddings" in name:
-            param.requires_grad = False
-            frozen += 1
-    return frozen
+    return freeze_position_embeddings(model)
 
 
 def _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=None, lm_tokenizer=None):
-    try:
-        from opacus import PrivacyEngine
-    except ImportError as exc:
-        raise ImportError("--ptg_dpsgd_mode source_opacus requires opacus to be installed.") from exc
-
     from utils.models import ModelWrapper
 
+    normalize_dpsgd_opacus_args(args, active=True)
     attack_wrapper = ModelWrapper(args)
     train_wrapper = ModelWrapper(args)
     if _source_bert_parity_active(args):
@@ -793,14 +760,15 @@ def _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=None, lm_tokeni
     train_wrapper.model.train()
     train_wrapper.set_model_device(args.device)
     train_loader = _create_source_dpsgd_dataloader(args, train_wrapper.tokenizer)
-    optimizer = torch.optim.AdamW(train_wrapper.model.parameters(), lr=5e-5)
-    privacy_engine = PrivacyEngine()
-    private_model, optimizer, train_loader = privacy_engine.make_private(
-        module=train_wrapper.model,
-        optimizer=optimizer,
-        data_loader=train_loader,
-        noise_multiplier=float(args.noise_multiplier if args.noise_multiplier is not None else 0.01),
-        max_grad_norm=float(args.clipping_bound if args.clipping_bound is not None else 1.0),
+    optimizer = torch.optim.AdamW(
+        (param for param in train_wrapper.model.parameters() if param.requires_grad),
+        lr=5e-5,
+    )
+    privacy_engine, private_model, optimizer, train_loader = make_private_with_opacus(
+        train_wrapper.model,
+        optimizer,
+        train_loader,
+        args,
     )
     train_wrapper.model = private_model
 
@@ -812,6 +780,8 @@ def _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=None, lm_tokeni
     for next_batch in train_loader:
         if recover_idx >= requested_stop:
             break
+        if is_empty_opacus_batch(next_batch):
+            continue
         batch = {key: value.to(args.device) for key, value in next_batch.items()}
         labels = batch.pop("labels").to(args.device)
         optimizer.zero_grad(set_to_none=True)
@@ -856,6 +826,7 @@ def _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=None, lm_tokeni
     tracker["aggregate_metrics"] = compute_text_metrics(predictions, references)
     if tracker["last_total_time"] is None:
         tracker["last_total_time"] = str(datetime.timedelta(seconds=time.time() - start_time)).split(".")[0]
+    record_dpsgd_opacus_summary(args, tracker, privacy_engine)
 
 
 def main(argv=None):
@@ -875,7 +846,9 @@ def main(argv=None):
 
     try:
         lm_model, lm_tokenizer = _load_ptg_lm(args)
-        if args.defense == "dpsgd" and args.ptg_dpsgd_mode == "source_opacus":
+        if args.defense == DPSGD_OPACUS_DEFENSE or (
+            args.defense == "dpsgd" and args.ptg_dpsgd_mode == "source_opacus"
+        ):
             _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=lm_model, lm_tokenizer=lm_tokenizer)
             _emit_result_summary(args, tracker)
             return 0
