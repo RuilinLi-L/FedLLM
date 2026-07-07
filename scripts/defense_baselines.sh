@@ -16,9 +16,13 @@
 #   --baseline_param <value>
 #   --adaptive_attack_check
 #
+# Seed behavior:
+# - If --rng_seed is passed in the extra attack args, run only that seed.
+# - Otherwise, run DAGER_SEEDS or the default "101 202 303".
+#
 # Logging:
 # - Creates a run directory under log/runs/ by default.
-# - Writes one summary file per variant, plus summary.txt, results.csv, and results.md.
+# - Writes one summary file per variant/seed, plus summary.txt, results.csv, and results.md.
 # - Full stdout/stderr still stream to the terminal.
 
 set -euo pipefail
@@ -40,6 +44,7 @@ BASELINE_DEFENSE=""
 BASELINE_PARAM=""
 ADAPTIVE_ATTACK_CHECK=0
 EXTRA=()
+SEEDS=()
 
 ALL_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb lrbprojonly )
 
@@ -93,6 +98,80 @@ has_attack_extra_flag() {
     fi
   done
   return 1
+}
+
+attack_extra_flag_value() {
+  local flag="$1"
+  local idx=0
+  local value=""
+  local found=1
+  while [ "$idx" -lt "${#EXTRA[@]}" ]; do
+    local arg="${EXTRA[$idx]}"
+    if [[ "$arg" == "$flag" ]]; then
+      if [ $((idx + 1)) -ge "${#EXTRA[@]}" ]; then
+        echo "[dager] ${flag} requires a value." >&2
+        return 2
+      fi
+      value="${EXTRA[$((idx + 1))]}"
+      found=0
+      idx=$((idx + 2))
+      continue
+    elif [[ "$arg" == "${flag}="* ]]; then
+      value="${arg#*=}"
+      found=0
+    fi
+    idx=$((idx + 1))
+  done
+  if [ "$found" -eq 0 ]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  return 1
+}
+
+configure_seeds() {
+  local seeds_raw
+  if has_attack_extra_flag "--rng_seed"; then
+    local seed_value
+    if ! seed_value="$(attack_extra_flag_value "--rng_seed")"; then
+      exit 2
+    fi
+    if [ -z "$seed_value" ]; then
+      echo "[dager] --rng_seed requires a non-empty value." >&2
+      exit 2
+    fi
+    SEEDS=( "$seed_value" )
+  else
+    seeds_raw="${DAGER_SEEDS:-101 202 303}"
+    seeds_raw="${seeds_raw//,/ }"
+    read -r -a SEEDS <<< "$seeds_raw"
+  fi
+
+  if [ "${#SEEDS[@]}" -eq 0 ]; then
+    echo "[dager] No seeds requested. Set DAGER_SEEDS or pass --rng_seed." >&2
+    exit 2
+  fi
+
+  local filtered=()
+  local idx=0
+  while [ "$idx" -lt "${#EXTRA[@]}" ]; do
+    local arg="${EXTRA[$idx]}"
+    if [[ "$arg" == "--rng_seed" ]]; then
+      if [ $((idx + 1)) -ge "${#EXTRA[@]}" ]; then
+        echo "[dager] --rng_seed requires a value." >&2
+        exit 2
+      fi
+      idx=$((idx + 2))
+      continue
+    fi
+    if [[ "$arg" == "--rng_seed="* ]]; then
+      idx=$((idx + 1))
+      continue
+    fi
+    filtered+=( "$arg" )
+    idx=$((idx + 1))
+  done
+  EXTRA=( "${filtered[@]}" )
 }
 
 dager_param_slug() {
@@ -219,6 +298,7 @@ dager_fallback_summary_block() {
   local rc="$4"
   local t_start="$5"
   local t_end="$6"
+  local seed="${7:-n/a}"
   cat <<EOF
 ===== RESULT SUMMARY START =====
 summary_version=1
@@ -229,6 +309,7 @@ task=seq_class
 model_path=${MODEL}
 finetuned_path=n/a
 batch_size=${BATCH}
+seed=${seed}
 defense=${defense}
 defense_param_name=$(dager_param_name "$defense")
 defense_param_value=${param:-n/a}
@@ -256,6 +337,7 @@ EOF
 }
 
 parse_script_args
+configure_seeds
 
 if [ -n "$BASELINE_DEFENSE" ]; then
   case "$BASELINE_DEFENSE" in
@@ -328,15 +410,18 @@ if [ -z "${DAGER_NO_AUTO_LOG:-}" ]; then
     echo "focus_baseline_defense=${BASELINE_DEFENSE:-all}"
     echo "focus_baseline_param=${BASELINE_PARAM:-all}"
     echo "selected_defenses=${selected_defenses[*]}"
+    echo "seeds=${SEEDS[*]}"
   } >"${run_dir}/_run_header.txt"
   {
     echo "$header_line"
     echo "focus_baseline_defense=${BASELINE_DEFENSE:-all}"
     echo "focus_baseline_param=${BASELINE_PARAM:-all}"
     echo "selected_defenses=${selected_defenses[*]}"
+    echo "seeds=${SEEDS[*]}"
   } >"${summary_path}"
   echo "[dager] Run directory: ${run_dir}" >&2
-  echo "[dager] Variant summaries: ${run_dir}/<defense>_<param>.txt" >&2
+  echo "[dager] Seeds: ${SEEDS[*]}" >&2
+  echo "[dager] Variant summaries: ${run_dir}/<defense>_<param>_seed<seed>.txt" >&2
   echo "[dager] Summary: ${summary_path}" >&2
 fi
 
@@ -360,10 +445,11 @@ run_variant() {
   local defense="$1"
   local log_base="$2"
   local param="$3"
-  shift 3
+  local seed="$4"
+  shift 4
   local def_extra=( "$@" )
 
-  echo "---------- ${log_base} ----------"
+  echo "---------- ${log_base} (seed=${seed}) ----------"
 
   if [ -n "$run_dir" ]; then
     local tmpfile
@@ -376,7 +462,7 @@ run_variant() {
     tmpfile=$(mktemp)
     t_start=$(date '+%Y-%m-%d %H:%M:%S')
     set +e
-    "${BASE[@]}" --defense "$defense" "${def_extra[@]}" "${EXTRA[@]}" 2>&1 | tee "$tmpfile"
+    "${BASE[@]}" --defense "$defense" "${def_extra[@]}" "${EXTRA[@]}" --rng_seed "$seed" 2>&1 | tee "$tmpfile"
     rc=${PIPESTATUS[0]}
     set -e
     t_end=$(date '+%Y-%m-%d %H:%M:%S')
@@ -384,12 +470,12 @@ run_variant() {
     if dager_has_result_summary "$tmpfile"; then
       summary_block="$(dager_result_summary_block_from_file "$tmpfile")"
     else
-      summary_block="$(dager_fallback_summary_block "$defense" "$param" "$log_base" "$rc" "$t_start" "$t_end")"
+      summary_block="$(dager_fallback_summary_block "$defense" "$param" "$log_base" "$rc" "$t_start" "$t_end" "$seed")"
     fi
 
     def_file="${run_dir}/${log_base}.txt"
     {
-      echo "===== VARIANT START defense=${defense} param=${param:-n/a} dataset=${DATASET} batch=${BATCH} model=$(basename "$MODEL") start=${t_start} ====="
+      echo "===== VARIANT START defense=${defense} param=${param:-n/a} seed=${seed} dataset=${DATASET} batch=${BATCH} model=$(basename "$MODEL") start=${t_start} ====="
       if ! dager_has_result_summary "$tmpfile"; then
         printf '%s\n' "$summary_block"
       fi
@@ -401,7 +487,7 @@ run_variant() {
 
     {
       echo ""
-      echo "========== variant=${log_base} defense=${defense} param=${param:-n/a} =========="
+      echo "========== variant=${log_base} defense=${defense} param=${param:-n/a} seed=${seed} =========="
       printf '%s\n' "$summary_block"
     } >>"${summary_path}"
 
@@ -409,7 +495,7 @@ run_variant() {
     echo "[dager] Wrote variant log: ${def_file}" >&2
     rm -f "$tmpfile"
   else
-    "${BASE[@]}" --defense "$defense" "${def_extra[@]}" "${EXTRA[@]}"
+    "${BASE[@]}" --defense "$defense" "${def_extra[@]}" "${EXTRA[@]}" --rng_seed "$seed"
   fi
 }
 
@@ -474,7 +560,10 @@ for defense in "${selected_defenses[@]}"; do
         DEF_EXTRA+=( --defense_adaptive_decoding )
       fi
     fi
-    run_variant "$RUN_DEFENSE" "$log_base" "$param" "${DEF_EXTRA[@]}"
+    for seed in "${SEEDS[@]}"; do
+      seed_slug="$(dager_param_slug "$seed")"
+      run_variant "$RUN_DEFENSE" "${log_base}_seed${seed_slug}" "$param" "$seed" "${DEF_EXTRA[@]}"
+    done
   done
 done
 
@@ -482,11 +571,12 @@ if [ -n "$run_dir" ]; then
   {
     echo ""
     echo "===== COMPARISON ====="
-    printf "%-28s | %-11s | %-10s | %-14s | %-14s | %-12s | %-12s | %-12s | %-15s | %-12s | %s\n" \
-      "variant" "defense" "param" "rec_token" "rec_maxb_token" "rouge1_fm" "rouge2_fm" "r1+r2" "last_rec_status" "total_time" "status"
+    printf "%-34s | %-8s | %-11s | %-18s | %-14s | %-14s | %-12s | %-12s | %-12s | %-15s | %-12s | %s\n" \
+      "variant" "seed" "defense" "param" "rec_token" "rec_maxb_token" "rouge1_fm" "rouge2_fm" "r1+r2" "last_rec_status" "total_time" "status"
     local_file=""
     for local_file in "${variant_files[@]}"; do
       variant_name="$(basename "${local_file%.txt}")"
+      seed_disp="$(dager_summary_value "$local_file" "seed")"
       defense_disp="$(dager_summary_value "$local_file" "defense")"
       param_disp="$(dager_summary_value "$local_file" "defense_param_value")"
       rec_tok="$(dager_summary_value "$local_file" "rec_token_mean")"
@@ -497,8 +587,9 @@ if [ -n "$run_dir" ]; then
       last_rec="$(dager_summary_value "$local_file" "last_rec_status")"
       total_time="$(dager_summary_value "$local_file" "last_total_time")"
       status="$(dager_summary_value "$local_file" "result_status")"
-      printf "%-28s | %-11s | %-10s | %-14s | %-14s | %-12s | %-12s | %-12s | %-15s | %-12s | %s\n" \
+      printf "%-34s | %-8s | %-11s | %-18s | %-14s | %-14s | %-12s | %-12s | %-12s | %-15s | %-12s | %s\n" \
         "${variant_name}" \
+        "${seed_disp:-n/a}" \
         "${defense_disp:-?}" \
         "${param_disp:-n/a}" \
         "${rec_tok:-n/a}" \

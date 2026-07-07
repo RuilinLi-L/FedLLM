@@ -38,12 +38,27 @@ bash scripts/defense_baselines.sh sst2 2 gpt2 3 --finetuned_path ./models/gpt2-f
 | `$4` | `n_inputs`，测试样本数 |
 | `$5+` | 透传给 `attack.py` 的额外参数 |
 
-脚本自己额外支持两个“只影响 baseline 选择、不透传给 attack.py”的参数：
+脚本自己额外支持这些 wrapper 级参数：
 
 | 参数 | 含义 |
 |---|---|
 | `--baseline_defense <name>` | 只测试某个 baseline |
 | `--baseline_param <value>` | 只测试该 baseline 的某一个参数值 |
+
+随机种子语义与 PEFTLeak 文字侧保持一致：如果额外参数里显式传了 `--rng_seed 202` 或 `--rng_seed=202`，脚本只跑这个 seed；如果不传 `--rng_seed`，脚本会读取环境变量 `DAGER_SEEDS`，默认跑 `101 202 303` 三个 seed。`DAGER_SEEDS` 支持空格或逗号分隔，例如：
+
+```bash
+DAGER_SEEDS="101,202,303" bash scripts/defense_baselines.sh sst2 2 gpt2 100 \
+  --finetuned_path ./models/gpt2-ft-rt
+```
+
+如果想恢复旧的单 seed 运行量，显式追加：
+
+```bash
+bash scripts/defense_baselines.sh sst2 2 gpt2 100 \
+  --finetuned_path ./models/gpt2-ft-rt \
+  --rng_seed 101
+```
 
 ## 2. 一次跑完整套防御 baselines
 
@@ -141,7 +156,10 @@ bash scripts/defense_baselines.sh sst2 2 gpt2 20 \
   --baseline_param 1e-4 \
   --finetuned_path ./models/gpt2-ft-rt
 ```
-
+bash scripts/defense_baselines.sh sst2 2 gpt2 20 \
+  --baseline_defense compression \
+  --baseline_param 22 \
+  --finetuned_path ./models/gpt2_sst2_clean_num_epochs_2/final
 这条命令只会跑：
 
 - `none`
@@ -320,7 +338,7 @@ python attack.py --dataset sst2 --split val --n_inputs 10 --batch_size 2 \
 | 文件 | 作用 |
 |---|---|
 | `_run_header.txt` | 本次 run 的头信息 |
-| `none.txt`、`noise_1e-4.txt` 等 | 每个变体的最终结果摘要 |
+| `none_seed101.txt`、`noise_1e-4_seed202.txt` 等 | 每个变体、每个 seed 的最终结果摘要 |
 | `summary.txt` | 所有变体的汇总结果和 comparison 表 |
 | `results.csv` | 结构化结果表，适合后续统计/画图 |
 | `results.md` | Markdown 表格版结果 |
@@ -334,6 +352,7 @@ python attack.py --dataset sst2 --split val --n_inputs 10 --batch_size 2 \
 summary_version=1
 result_status=ok
 dataset=...
+seed=...
 defense=...
 defense_param_name=...
 defense_param_value=...
@@ -358,6 +377,7 @@ agg_r1fm_r2fm=...
 `COMPARISON` 表至少包含：
 
 - `variant`
+- `seed`
 - `defense`
 - `param`
 - `rec_token`

@@ -278,6 +278,7 @@ def _emit_result_summary(args):
         ('model_path', args.model_path),
         ('finetuned_path', args.finetuned_path if args.finetuned_path is not None else 'n/a'),
         ('batch_size', args.batch_size),
+        ('seed', getattr(args, 'rng_seed', None)),
         ('train_method', getattr(args, 'train_method', 'full')),
         ('peft_method', getattr(args, 'peft_method', None)),
         ('peft_type', getattr(args, 'peft_type', None)),
