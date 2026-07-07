@@ -25,6 +25,7 @@ for dataset in "${DATASETS[@]}"; do
             --dataset "$dataset" \
             --data_root "${DATA_ROOT:-./models_cache}" \
             --cache_dir "${CACHE_DIR:-./models_cache}" \
+            --n_classes "${N_CLASSES:-100}" \
             --n_images "${N_IMAGES:-8}" \
             --batch_size "$batch" \
             --public_split_size "${PUBLIC_SPLIT_SIZE:-64}" \

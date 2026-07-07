@@ -878,6 +878,7 @@ def _emit_summary(args, fields: dict):
         ("oracle_metric_scope", fields.get("oracle_metric_scope", default_oracle_scope)),
         ("non_oracle_primary_only", fields.get("non_oracle_primary_only", True)),
         ("dataset", args.dataset),
+        ("rng_seed", getattr(args, "rng_seed", None)),
         ("device", fields.get("device")),
         ("data_source", fields.get("data_source")),
         ("public_stats_source", fields.get("public_stats_source")),

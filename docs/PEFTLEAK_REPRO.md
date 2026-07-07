@@ -2,6 +2,8 @@
 
 This repository contains the PEFTLeak-style image-side shared-bin mechanism path under `attacks/peftleak_image/` and `attack_peftleak_image.py`.
 
+For the Linux CIFAR10 privacy matrix and proxy-utility table workflow, use `docs/PEFTLEAK_IMAGE_RUNBOOK.md`.
+
 Scope:
 
 - `--mode vit_adapter` is the PEFTLeak-style shared-bin mechanism mode.
@@ -28,7 +30,7 @@ Implementation notes:
 - `vit_adapter` should be used for shared-bin mechanism experiments.
 - The image entrypoint accepts `--model_path`, `--finetuned_path`, and `--cache_dir` in the same server-style way as the DAGER attack entrypoints.
 - The image entrypoint also accepts `--device`; the default `cuda` reuses the repository GPU selector and falls back to CPU if CUDA is unavailable.
-- Add `--fail_on_synthetic_fallback` for runs that must use real CIFAR100 data. Without it, missing CIFAR100 falls back to synthetic smoke data and marks `synthetic_fallback=1` in the summary.
+- Add `--fail_on_synthetic_fallback` for runs that must use real CIFAR10/CIFAR100 data. Without it, missing CIFAR data falls back to synthetic smoke data and marks `synthetic_fallback=1` in the summary.
 - Runtime tensors stay on the selected device through gradient generation, defense, recovery, clustering, and metric computation. Public-stat files are still serialized on CPU for portability.
 - `--n_images` is the total number of attacked images; `--batch_size` controls the client batch size used for each attack call. The summary reports `effective_batch_size` and `attack_batch_count`.
 - `--peftleak_profile lightweight|official_cifar32|custom` controls the geometry/probe defaults. `lightweight` preserves smoke-friendly defaults; `official_cifar32` sets CIFAR32-style official parameters (`image_size=32`, `patch_size=16`, `num_bins=320`, adapter dims `64`); `custom` only records that a custom setting is being used.
@@ -61,7 +63,7 @@ python attack_peftleak_image.py --mode official_vit_adapter \
   --defense none
 ```
 
-For real CIFAR100 reporting, add `--dataset cifar100 --data_root ./models_cache --fail_on_synthetic_fallback` and do not mix fallback runs into result tables.
+For real CIFAR10/CIFAR100 reporting, add `--data_root ./models_cache --fail_on_synthetic_fallback` and do not mix fallback runs into result tables.
 
 ## Official PEFTLeak Alignment
 

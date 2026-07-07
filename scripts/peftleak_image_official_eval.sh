@@ -13,6 +13,7 @@ python attack_peftleak_image.py \
   --dataset "${DATASET:-cifar100}" \
   --data_root "${DATA_ROOT:-./models_cache}" \
   --cache_dir "${CACHE_DIR:-./models_cache}" \
+  --n_classes "${N_CLASSES:-100}" \
   --n_images "${N_IMAGES:-8}" \
   --batch_size "${BATCH_SIZE:-2}" \
   --public_split_size "${PUBLIC_SPLIT_SIZE:-64}" \
