@@ -1,4 +1,9 @@
 # Code for the NeurIPS 2024 submission: </br></br>"DAGER: Extracting Text from Gradients with Language Model Priors"
+
+## FedLLM Project Runbooks
+
+- [Partial Gradient 中文 Runbook](./PARTIAL_GRADIENT_RUNBOOK_ZH.md): privacy and utility commands for DAGER partial exposure and PTG/LAMP-lite gradient matching.
+
 ## Prerequisites
 - Install Anaconda. 
 - Create the conda environment:<br>

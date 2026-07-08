@@ -6,7 +6,22 @@ from typing import Iterable, Sequence
 
 DEFAULT_LAYER_SUBSET = "all"
 DEFAULT_PARAM_FILTER = "all"
-VALID_PARAM_FILTERS = frozenset({"all", "qkv_only", "lora_only"})
+VALID_PARAM_FILTERS = frozenset(
+    {
+        "all",
+        "qkv_only",
+        "query_only",
+        "key_only",
+        "value_only",
+        "attn_out_only",
+        "attn_only",
+        "ffn_in_only",
+        "ffn_out_only",
+        "ffn_only",
+        "classifier_only",
+        "lora_only",
+    }
+)
 PARTIAL_ATTACK_FULL_VISIBLE = "full_gradient_visible"
 PARTIAL_ATTACK_DAGER_PREFIX = "dager_prefix_visible"
 PARTIAL_ATTACK_DAGER_NONPREFIX = "dager_nonprefix_visible"
@@ -16,7 +31,9 @@ PARTIAL_ATTACK_PEFT_ADAPTER = PARTIAL_ATTACK_LORA_ADAPTER
 PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX = "unsupported_nonprefix_dager"
 PARTIAL_ATTACK_UNSUPPORTED_INSUFFICIENT = "unsupported_insufficient_visible_matrices"
 PARTIAL_ATTACK_UNSUPPORTED_FEATURE_DIM = "unsupported_feature_dim_mismatch"
+PARTIAL_ATTACK_UNSUPPORTED_PTG_ONLY = "unsupported_ptg_only_filter"
 GPT2_NONPREFIX_DAGER_MODELS = frozenset({"gpt2", "openai-community/gpt2-large"})
+DAGER_PARAM_FILTERS = frozenset({DEFAULT_PARAM_FILTER, "qkv_only", "lora_only"})
 
 
 class UnsupportedPartialGradientExposureError(RuntimeError):
@@ -52,6 +69,8 @@ def infer_partial_attack_variant(args) -> str:
     if not partial_gradient_active(args):
         return PARTIAL_ATTACK_FULL_VISIBLE
     mode, _ = _parse_layer_subset(layer_subset)
+    if param_filter not in DAGER_PARAM_FILTERS:
+        return PARTIAL_ATTACK_UNSUPPORTED_PTG_ONLY
     if mode in {"last", "mid", "middle"}:
         if supports_nonprefix_dager(args):
             return PARTIAL_ATTACK_DAGER_NONPREFIX
@@ -71,6 +90,8 @@ def partial_gradient_unsupported_reason(args) -> str:
     layer_subset = getattr(args, "gradient_layer_subset", DEFAULT_LAYER_SUBSET)
     param_filter = getattr(args, "gradient_param_filter", DEFAULT_PARAM_FILTER)
     mode, n_layers = _parse_layer_subset(layer_subset)
+    if param_filter not in DAGER_PARAM_FILTERS:
+        return "ptg_only_filter_requires_attack_partial_gradient"
     if mode in {"last", "mid", "middle"}:
         if n_layers is not None and n_layers < 2:
             return "nonprefix_dager_requires_at_least_two_visible_layers"
@@ -126,9 +147,12 @@ def nonprefix_layer_indices(args) -> list[int]:
 
 
 def _default_partial_gradient_info(args=None):
+    param_filter = getattr(args, "gradient_param_filter", DEFAULT_PARAM_FILTER)
+    model_path = getattr(args, "model_path", None)
     return {
         "gradient_layer_subset": getattr(args, "gradient_layer_subset", DEFAULT_LAYER_SUBSET),
-        "gradient_param_filter": getattr(args, "gradient_param_filter", DEFAULT_PARAM_FILTER),
+        "gradient_param_filter": param_filter,
+        "effective_gradient_param_filter": effective_param_filter_for_model(param_filter, model_path),
         "partial_filter_active": partial_gradient_active(args) if args is not None else False,
         "partial_attack_variant": infer_partial_attack_variant(args) if args is not None else PARTIAL_ATTACK_FULL_VISIBLE,
         "visible_grad_count": "n/a",
@@ -149,6 +173,10 @@ def apply_partial_gradient_filter(grads, args, parameter_names: Iterable[str] | 
     info = _default_partial_gradient_info(args)
     info["gradient_layer_subset"] = layer_subset
     info["gradient_param_filter"] = param_filter
+    info["effective_gradient_param_filter"] = effective_param_filter_for_model(
+        param_filter,
+        getattr(args, "model_path", None),
+    )
     info["partial_filter_active"] = active
 
     if not active:
@@ -196,6 +224,7 @@ def partial_gradient_summary_fields(args):
     return [
         ("gradient_layer_subset", info.get("gradient_layer_subset", DEFAULT_LAYER_SUBSET)),
         ("gradient_param_filter", info.get("gradient_param_filter", DEFAULT_PARAM_FILTER)),
+        ("effective_gradient_param_filter", info.get("effective_gradient_param_filter", DEFAULT_PARAM_FILTER)),
         ("partial_filter_active", info.get("partial_filter_active", False)),
         ("partial_attack_variant", info.get("partial_attack_variant", PARTIAL_ATTACK_FULL_VISIBLE)),
         ("visible_grad_count", info.get("visible_grad_count", "n/a")),
@@ -316,6 +345,8 @@ def _param_filter_matches(name: str, param_filter: str) -> bool:
     lower = name.lower()
     if param_filter == DEFAULT_PARAM_FILTER:
         return True
+    if param_filter == "classifier_only":
+        return _is_classifier_param(lower)
     if param_filter == "lora_only":
         if "modules_to_save" in lower:
             return False
@@ -331,21 +362,103 @@ def _param_filter_matches(name: str, param_filter: str) -> bool:
             or "down_proj" in lower
             or "up_proj" in lower
         )
-    if param_filter == "qkv_only":
-        qkv_parts = (
-            "c_attn",
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            ".query.",
-            ".key.",
-            ".value.",
-            "query.weight",
-            "key.weight",
-            "value.weight",
-        )
-        return any(part in lower for part in qkv_parts)
+    if param_filter in {"qkv_only", "query_only", "key_only", "value_only"}:
+        return _is_qkv_param(lower, param_filter)
+    if param_filter == "attn_out_only":
+        return _is_attn_output_param(lower)
+    if param_filter == "attn_only":
+        return _is_qkv_param(lower, "qkv_only") or _is_attn_output_param(lower)
+    if param_filter == "ffn_in_only":
+        return _is_ffn_input_param(lower)
+    if param_filter == "ffn_out_only":
+        return _is_ffn_output_param(lower)
+    if param_filter == "ffn_only":
+        return _is_ffn_input_param(lower) or _is_ffn_output_param(lower)
     raise ValueError(f"Unknown gradient_param_filter: {param_filter!r}")
+
+
+def effective_param_filter_for_model(param_filter: str, model_path: str | None = None) -> str:
+    """Return the v1 effective selector for packed-projection model families."""
+    if param_filter in {"query_only", "key_only", "value_only"} and model_path in GPT2_NONPREFIX_DAGER_MODELS:
+        return "qkv_only"
+    return param_filter
+
+
+def _is_classifier_param(lower_name: str) -> bool:
+    return any(
+        part in lower_name
+        for part in (
+            "classifier",
+            "score.",
+            "score.weight",
+            "score.bias",
+            "lm_head",
+            "classification_head",
+            "modules_to_save",
+        )
+    )
+
+
+def _is_qkv_param(lower_name: str, param_filter: str) -> bool:
+    if "c_attn" in lower_name:
+        # GPT-2 packs q/k/v in one c_attn tensor, so single-projection selectors
+        # intentionally expose the whole packed projection in v1.
+        return True
+    query_parts = (".query.", "query.weight", "query.bias", "q_proj")
+    key_parts = (".key.", "key.weight", "key.bias", "k_proj")
+    value_parts = (".value.", "value.weight", "value.bias", "v_proj")
+    if param_filter == "query_only":
+        return any(part in lower_name for part in query_parts)
+    if param_filter == "key_only":
+        return any(part in lower_name for part in key_parts)
+    if param_filter == "value_only":
+        return any(part in lower_name for part in value_parts)
+    return any(part in lower_name for part in query_parts + key_parts + value_parts)
+
+
+def _is_attn_output_param(lower_name: str) -> bool:
+    return any(
+        part in lower_name
+        for part in (
+            "attn.c_proj",
+            "attention.output.dense",
+            "self_attn.o_proj",
+            "self_attn.out_proj",
+            ".o_proj.",
+            "o_proj.weight",
+            "o_proj.bias",
+        )
+    )
+
+
+def _is_ffn_input_param(lower_name: str) -> bool:
+    return any(
+        part in lower_name
+        for part in (
+            "mlp.c_fc",
+            "intermediate.dense",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            ".gate_proj.",
+            ".up_proj.",
+            "gate_proj.weight",
+            "up_proj.weight",
+        )
+    )
+
+
+def _is_ffn_output_param(lower_name: str) -> bool:
+    return any(
+        part in lower_name
+        for part in (
+            "mlp.c_proj",
+            "output.dense",
+            "mlp.down_proj",
+            ".down_proj.",
+            "down_proj.weight",
+            "down_proj.bias",
+        )
+    ) and not _is_attn_output_param(lower_name)
 
 
 def _summarize_names(names: Sequence[str], limit: int = 8) -> str:

@@ -13,6 +13,7 @@ from utils.partial_gradient import (
     PARTIAL_ATTACK_DAGER_QKV,
     PARTIAL_ATTACK_LORA_ADAPTER,
     PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+    PARTIAL_ATTACK_UNSUPPORTED_PTG_ONLY,
     apply_partial_gradient_filter,
     infer_partial_attack_variant,
     nonprefix_candidate_cap,
@@ -126,6 +127,104 @@ def test_qkv_only_matches_supported_model_families():
         infer_partial_attack_variant(_args(param_filter="qkv_only")) == PARTIAL_ATTACK_DAGER_QKV,
         "qkv_only should be classified as QKV-visible DAGER",
     )
+
+
+def test_split_projection_filters_match_bert_and_llama_modules():
+    names = [
+        "bert.encoder.layer.0.attention.self.query.weight",
+        "bert.encoder.layer.0.attention.self.key.weight",
+        "bert.encoder.layer.0.attention.self.value.weight",
+        "bert.encoder.layer.0.attention.output.dense.weight",
+        "bert.encoder.layer.0.intermediate.dense.weight",
+        "bert.encoder.layer.0.output.dense.weight",
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.self_attn.k_proj.weight",
+        "model.layers.0.self_attn.v_proj.weight",
+        "model.layers.0.self_attn.o_proj.weight",
+        "model.layers.0.mlp.up_proj.weight",
+        "model.layers.0.mlp.down_proj.weight",
+        "classifier.weight",
+    ]
+
+    query_kept = [
+        idx for idx, grad in enumerate(apply_partial_gradient_filter(_grads(len(names)), _args(param_filter="query_only"), names))
+        if grad is not None
+    ]
+    key_kept = [
+        idx for idx, grad in enumerate(apply_partial_gradient_filter(_grads(len(names)), _args(param_filter="key_only"), names))
+        if grad is not None
+    ]
+    value_kept = [
+        idx for idx, grad in enumerate(apply_partial_gradient_filter(_grads(len(names)), _args(param_filter="value_only"), names))
+        if grad is not None
+    ]
+    attn_out_kept = [
+        idx for idx, grad in enumerate(apply_partial_gradient_filter(_grads(len(names)), _args(param_filter="attn_out_only"), names))
+        if grad is not None
+    ]
+    ffn_in_kept = [
+        idx for idx, grad in enumerate(apply_partial_gradient_filter(_grads(len(names)), _args(param_filter="ffn_in_only"), names))
+        if grad is not None
+    ]
+    ffn_out_kept = [
+        idx for idx, grad in enumerate(apply_partial_gradient_filter(_grads(len(names)), _args(param_filter="ffn_out_only"), names))
+        if grad is not None
+    ]
+    classifier_kept = [
+        idx for idx, grad in enumerate(apply_partial_gradient_filter(_grads(len(names)), _args(param_filter="classifier_only"), names))
+        if grad is not None
+    ]
+
+    assert_true(query_kept == [0, 6], f"query_only kept wrong indices: {query_kept}")
+    assert_true(key_kept == [1, 7], f"key_only kept wrong indices: {key_kept}")
+    assert_true(value_kept == [2, 8], f"value_only kept wrong indices: {value_kept}")
+    assert_true(attn_out_kept == [3, 9], f"attn_out_only kept wrong indices: {attn_out_kept}")
+    assert_true(ffn_in_kept == [4, 10], f"ffn_in_only kept wrong indices: {ffn_in_kept}")
+    assert_true(ffn_out_kept == [5, 11], f"ffn_out_only kept wrong indices: {ffn_out_kept}")
+    assert_true(classifier_kept == [12], f"classifier_only kept wrong indices: {classifier_kept}")
+
+
+def test_gpt2_split_projection_filters_expose_packed_c_attn():
+    names = [
+        "transformer.h.0.attn.c_attn.weight",
+        "transformer.h.0.attn.c_proj.weight",
+        "transformer.h.0.mlp.c_fc.weight",
+        "transformer.h.0.mlp.c_proj.weight",
+    ]
+    for param_filter in ("query_only", "key_only", "value_only"):
+        args = _args(param_filter=param_filter)
+        kept = [idx for idx, grad in enumerate(apply_partial_gradient_filter(_grads(len(names)), args, names)) if grad is not None]
+        assert_true(kept == [0], f"{param_filter} should expose GPT-2 packed c_attn, got {kept}")
+        fields = dict(partial_gradient_summary_fields(args))
+        assert_true(
+            fields["effective_gradient_param_filter"] == "qkv_only",
+            f"{param_filter} should be summarized as effective qkv_only for GPT-2",
+        )
+        assert_true(
+            fields["partial_attack_variant"] == PARTIAL_ATTACK_UNSUPPORTED_PTG_ONLY,
+            f"{param_filter} should be explicit unsupported in the DAGER entrypoint",
+        )
+
+
+def test_ptg_only_filters_are_not_reported_as_full_gradient_dager():
+    for param_filter in (
+        "query_only",
+        "key_only",
+        "value_only",
+        "attn_out_only",
+        "ffn_in_only",
+        "ffn_out_only",
+        "ffn_only",
+    ):
+        args = _args(param_filter=param_filter)
+        assert_true(
+            infer_partial_attack_variant(args) == PARTIAL_ATTACK_UNSUPPORTED_PTG_ONLY,
+            f"{param_filter} should be marked PTG-only for the DAGER entrypoint",
+        )
+        assert_true(
+            partial_gradient_unsupported_reason(args) == "ptg_only_filter_requires_attack_partial_gradient",
+            f"{param_filter} should point users to attack_partial_gradient.py",
+        )
 
 
 def test_lora_only_excludes_modules_to_save_heads():
@@ -338,6 +437,9 @@ def main():
         test_first2_keeps_first_two_transformer_blocks,
         test_last2_keeps_last_two_transformer_blocks,
         test_qkv_only_matches_supported_model_families,
+        test_split_projection_filters_match_bert_and_llama_modules,
+        test_gpt2_split_projection_filters_expose_packed_c_attn,
+        test_ptg_only_filters_are_not_reported_as_full_gradient_dager,
         test_lora_only_excludes_modules_to_save_heads,
         test_lora_only_filter_includes_peft_adapter_families,
         test_first2_qkv_is_and_filter,

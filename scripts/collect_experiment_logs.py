@@ -454,6 +454,7 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "model_path_guess",
         "summary_version",
         "result_status",
+        "attack",
         "dataset",
         "split",
         "task",
@@ -491,6 +492,7 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "defense",
         "defense_param_name",
         "defense_param_value",
+        "proxy_defense_semantics",
         "rep_bottleneck_type",
         "rep_keep_ratio",
         "rep_dropout_p",
@@ -508,6 +510,7 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "adaptive_selected_gradients",
         "gradient_layer_subset",
         "gradient_param_filter",
+        "effective_gradient_param_filter",
         "partial_filter_active",
         "partial_attack_variant",
         "visible_grad_count",
@@ -517,6 +520,46 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "dager_visible_param_names",
         "selected_block_ids",
         "unsupported_reason",
+        "grad_type",
+        "attack_layer",
+        "ptg_parity_mode",
+        "ptg_dpsgd_mode",
+        "noise_multiplier",
+        "clipping_bound",
+        "ptg_steps",
+        "ptg_lr",
+        "ptg_restarts",
+        "ptg_match_loss",
+        "ptg_optimizer",
+        "ptg_lr_decay_type",
+        "ptg_lr_decay",
+        "ptg_lr_max_it",
+        "ptg_tag_factor",
+        "ptg_grad_clip",
+        "ptg_label_mode",
+        "ptg_decode_metric",
+        "ptg_tv_weight",
+        "ptg_embed_norm_weight",
+        "ptg_entropy_weight",
+        "ptg_fix_special_tokens",
+        "ptg_know_padding",
+        "ptg_init",
+        "ptg_init_candidates",
+        "ptg_init_size",
+        "ptg_init_permutation_trials",
+        "ptg_lm_prior_weight",
+        "ptg_lm_model_path",
+        "ptg_swap_steps",
+        "ptg_use_swaps",
+        "ptg_swap_burnin",
+        "ptg_swap_every",
+        "ptg_use_swaps_at_end",
+        "ptg_batch_match",
+        "ptg_print_every",
+        "selected_gradient_count",
+        "selected_gradient_names",
+        "fixed_token_count",
+        "sequence_length",
         "output_dir",
         "steps_completed",
         "n_inputs_requested",
@@ -528,6 +571,10 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "n_privacy_valid_runs",
         "failed_or_incomplete_privacy_runs",
         "last_rec_status",
+        "ptg_initial_loss",
+        "ptg_final_loss",
+        "ptg_loss_reduction",
+        "ptg_lm_loss",
         "rec_l1_mean",
         "rec_l1_maxb_mean",
         "rec_l2_mean",
@@ -908,6 +955,8 @@ def _partial_attack_variant(row: dict) -> str:
     value = _row_value(row, "partial_attack_variant")
     if not _is_missing_value(value):
         return value
+    if _row_value(row, "attack") == "partial_transformer_gradients":
+        return "ptg_gradient_matching"
     layer_subset = _gradient_layer_subset(row)
     param_filter = _gradient_param_filter(row)
     if param_filter == "lora_only":
@@ -922,6 +971,8 @@ def _partial_attack_variant(row: dict) -> str:
 
 
 def _partial_filter_active(row: dict) -> bool:
+    if _row_value(row, "attack") == "partial_transformer_gradients":
+        return True
     value = _row_value(row, "partial_filter_active")
     if str(value).strip().lower() in {"true", "1", "yes"}:
         return True
@@ -933,6 +984,8 @@ def _attack_surface(row: dict) -> str:
     peft_scope = _peft_eval_scope(row)
     variant = _partial_attack_variant(row)
     param_filter = _gradient_param_filter(row)
+    if _row_value(row, "attack") == "partial_transformer_gradients":
+        return "partial_gradient"
     if train_method in {"lora", "peft"}:
         if peft_scope in {"training_only", "v2_planned"}:
             return peft_scope
@@ -1125,6 +1178,57 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             mean, std = _stats(clean_values)
             row[field] = mean
             row[f"{field}_std"] = std
+        for field in ("ptg_initial_loss", "ptg_final_loss", "ptg_loss_reduction", "ptg_lm_loss", "fixed_token_count"):
+            values = [_to_float(item.get(field)) for item in valid_items]
+            clean_values = [value for value in values if value is not None]
+            mean, std = _stats(clean_values)
+            row[field] = mean
+            row[f"{field}_std"] = std
+        for field in (
+            "attack",
+            "grad_type",
+            "attack_layer",
+            "ptg_parity_mode",
+            "ptg_dpsgd_mode",
+            "noise_multiplier",
+            "clipping_bound",
+            "ptg_steps",
+            "ptg_lr",
+            "ptg_restarts",
+            "ptg_match_loss",
+            "ptg_optimizer",
+            "ptg_lr_decay_type",
+            "ptg_lr_decay",
+            "ptg_lr_max_it",
+            "ptg_tag_factor",
+            "ptg_grad_clip",
+            "ptg_label_mode",
+            "ptg_decode_metric",
+            "ptg_tv_weight",
+            "ptg_embed_norm_weight",
+            "ptg_entropy_weight",
+            "ptg_fix_special_tokens",
+            "ptg_know_padding",
+            "ptg_init",
+            "ptg_init_candidates",
+            "ptg_init_size",
+            "ptg_init_permutation_trials",
+            "ptg_lm_prior_weight",
+            "ptg_lm_model_path",
+            "ptg_swap_steps",
+            "ptg_use_swaps",
+            "ptg_swap_burnin",
+            "ptg_swap_every",
+            "ptg_use_swaps_at_end",
+            "ptg_batch_match",
+            "ptg_print_every",
+            "selected_gradient_count",
+            "selected_gradient_names",
+            "sequence_length",
+        ):
+            values = [item.get(field, "") for item in items if not _is_missing_value(item.get(field, ""))]
+            if values:
+                row[field] = values[0]
         out.append(row)
     return out
 
@@ -1216,6 +1320,37 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row["agg_rouge1_fm"] = attack.get("agg_rouge1_fm", "")
             row["agg_rouge2_fm"] = attack.get("agg_rouge2_fm", "")
             row["agg_r1fm_r2fm"] = attack.get("agg_r1fm_r2fm", "")
+            row["ptg_initial_loss"] = attack.get("ptg_initial_loss", "")
+            row["ptg_final_loss"] = attack.get("ptg_final_loss", "")
+            row["ptg_loss_reduction"] = attack.get("ptg_loss_reduction", "")
+            row["ptg_lm_loss"] = attack.get("ptg_lm_loss", "")
+            row["selected_gradient_count"] = attack.get("selected_gradient_count", "")
+            row["selected_gradient_names"] = attack.get("selected_gradient_names", "")
+            row["fixed_token_count"] = attack.get("fixed_token_count", "")
+            for field in (
+                "grad_type",
+                "attack_layer",
+                "ptg_parity_mode",
+                "ptg_dpsgd_mode",
+                "noise_multiplier",
+                "clipping_bound",
+                "ptg_optimizer",
+                "ptg_lr_decay_type",
+                "ptg_tag_factor",
+                "ptg_grad_clip",
+                "ptg_know_padding",
+                "ptg_init",
+                "ptg_init_candidates",
+                "ptg_init_size",
+                "ptg_init_permutation_trials",
+                "ptg_lm_model_path",
+                "ptg_use_swaps",
+                "ptg_swap_burnin",
+                "ptg_swap_every",
+                "ptg_use_swaps_at_end",
+                "ptg_batch_match",
+            ):
+                row[field] = attack.get(field, row.get(field, ""))
             row["adaptive_attack"] = attack.get("adaptive_attack", row.get("adaptive_attack", "none"))
             row["adaptive_attack_profile"] = attack.get("adaptive_attack_profile", row.get("adaptive_attack_profile", "none"))
             row["privacy_eval_status"] = attack.get("result_status", "")

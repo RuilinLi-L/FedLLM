@@ -16,6 +16,7 @@ from utils.partial_gradient import (
     PARTIAL_ATTACK_UNSUPPORTED_FEATURE_DIM,
     PARTIAL_ATTACK_UNSUPPORTED_INSUFFICIENT,
     PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX,
+    PARTIAL_ATTACK_UNSUPPORTED_PTG_ONLY,
     UnsupportedPartialGradientExposureError,
     dager_block_ids,
     infer_partial_attack_variant,
@@ -966,6 +967,19 @@ class ModelWrapper():
         if partial_gradient_active(self.args):
             setattr(self.args, 'partial_nonprefix_layer_indices', None)
             requested_variant = infer_partial_attack_variant(self.args)
+            if requested_variant == PARTIAL_ATTACK_UNSUPPORTED_PTG_ONLY:
+                reason = partial_gradient_unsupported_reason(self.args)
+                self._raise_span_unsupported(
+                    variant=PARTIAL_ATTACK_UNSUPPORTED_PTG_ONLY,
+                    reason=reason,
+                    selected_names=(),
+                    message=(
+                        'This gradient_param_filter is a PTG optimization-only selector. '
+                        'Use attack_partial_gradient.py for query/key/value/attention-output/FFN '
+                        'partial Transformer gradient matching instead of DAGER span decoding. '
+                        f'gradient_param_filter={getattr(self.args, "gradient_param_filter", "all")!r}.'
+                    ),
+                )
             if requested_variant == PARTIAL_ATTACK_UNSUPPORTED_NONPREFIX:
                 reason = partial_gradient_unsupported_reason(self.args)
                 self._raise_span_unsupported(

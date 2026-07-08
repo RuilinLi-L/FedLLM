@@ -215,6 +215,67 @@ def test_partial_attack_surfaces_do_not_mix_in_privacy_aggregation():
     )
 
 
+def test_ptg_attack_surface_and_losses_are_preserved():
+    rows = [
+        {
+            "log_kind": "attack_dager",
+            "attack": "partial_transformer_gradients",
+            "dataset": "sst2",
+            "batch_size": "1",
+            "train_method": "full",
+            "defense": "none",
+            "defense_param_value": "n/a",
+            "result_status": "ok",
+            "n_inputs_requested": "1",
+            "n_inputs_completed": "1",
+            "gradient_layer_subset": "all",
+            "gradient_param_filter": "query_only",
+            "partial_attack_variant": "ptg_gradient_matching",
+            "rec_token_mean": "0.25",
+            "ptg_initial_loss": "0.9",
+            "ptg_final_loss": "0.3",
+            "ptg_loss_reduction": "0.6",
+            "ptg_embed_norm_weight": "0.01",
+            "ptg_fix_special_tokens": "true",
+            "ptg_parity_mode": "source",
+            "ptg_dpsgd_mode": "source_opacus",
+            "grad_type": "attn_qkv",
+            "attack_layer": "0",
+            "ptg_optimizer": "bert-adam",
+            "ptg_init": "random",
+            "ptg_init_candidates": "500",
+            "ptg_know_padding": "true",
+            "ptg_lm_loss": "1.2",
+            "fixed_token_count": "1",
+            "selected_gradient_count": "2",
+            "selected_gradient_names": "encoder.layer.0.attention.self.query.weight;encoder.layer.0.attention.self.query.bias",
+        }
+    ]
+
+    anchors = build_attack_anchor_results(rows)
+    assert_true(len(anchors) == 1, f"one PTG anchor should be built: {anchors}")
+    anchor = anchors[0]
+    assert_true(anchor["attack_surface"] == "partial_gradient", "PTG should be grouped as a partial-gradient surface")
+    assert_true(
+        anchor["partial_attack_variant"] == "ptg_gradient_matching",
+        "PTG variant should remain distinct from DAGER visible-gradient variants",
+    )
+    assert_true(anchor["ptg_final_loss"] == "0.300000", "PTG final loss should be aggregated")
+    assert_true(anchor["ptg_loss_reduction"] == "0.600000", "PTG loss reduction should be aggregated")
+    assert_true(anchor["ptg_lm_loss"] == "1.200000", "PTG LM prior loss should be aggregated")
+    assert_true(anchor["fixed_token_count"] == "1.000000", "fixed token count should be aggregated")
+    assert_true(anchor["ptg_embed_norm_weight"] == "0.01", "PTG embed norm weight should be retained")
+    assert_true(anchor["ptg_parity_mode"] == "source", "PTG source parity mode should be retained")
+    assert_true(anchor["ptg_dpsgd_mode"] == "source_opacus", "source DP-SGD mode should be retained")
+    assert_true(anchor["grad_type"] == "attn_qkv", "source grad_type should be retained")
+    assert_true(anchor["attack_layer"] == "0", "source attack_layer should be retained")
+    assert_true(anchor["ptg_optimizer"] == "bert-adam", "PTG optimizer should be retained")
+    assert_true(anchor["ptg_init"] == "random", "PTG init strategy should be retained")
+    assert_true(anchor["ptg_init_candidates"] == "500", "PTG init candidates should be retained")
+    assert_true(anchor["ptg_know_padding"] == "true", "PTG padding-knowledge flag should be retained")
+    assert_true(anchor["selected_gradient_count"] == "2", "selected gradient count should be retained")
+
+
 def test_unsupported_partial_attack_status_is_preserved():
     rows = [
         {
@@ -356,6 +417,7 @@ def main():
         test_prefix_scope_ignores_na_placeholders_when_metadata_is_available,
         test_adapter_scope_is_supported_and_keeps_reduction_factor,
         test_partial_attack_surfaces_do_not_mix_in_privacy_aggregation,
+        test_ptg_attack_surface_and_losses_are_preserved,
         test_unsupported_partial_attack_status_is_preserved,
         test_adaptive_fallback_summary_stays_in_adaptive_group,
         test_full_variant_log_with_per_input_stats_parses_once,
