@@ -15,6 +15,7 @@
 #   --baseline_defense <none|noise|dpsgd|dpsgd_opacus|topk|compression|soteria|mixup|lrb|lrbprojonly|signed_bottleneck>
 #   --baseline_param <value>
 #   --adaptive_attack_check
+#   --skip_anchor_none
 #
 # Seed behavior:
 # - If --rng_seed is passed in the extra attack args, run only that seed.
@@ -43,6 +44,7 @@ fi
 BASELINE_DEFENSE=""
 BASELINE_PARAM=""
 ADAPTIVE_ATTACK_CHECK=0
+SKIP_ANCHOR_NONE=0
 EXTRA=()
 SEEDS=()
 
@@ -79,6 +81,10 @@ parse_script_args() {
         ;;
       --adaptive_attack_check)
         ADAPTIVE_ATTACK_CHECK=1
+        idx=$((idx + 1))
+        ;;
+      --skip_anchor_none)
+        SKIP_ANCHOR_NONE=1
         idx=$((idx + 1))
         ;;
       *)
@@ -374,6 +380,8 @@ selected_defenses=()
 if [ -n "$BASELINE_DEFENSE" ]; then
   if [ "$BASELINE_DEFENSE" = "none" ]; then
     selected_defenses=( none )
+  elif [ "$SKIP_ANCHOR_NONE" -eq 1 ]; then
+    selected_defenses=( "$BASELINE_DEFENSE" )
   else
     selected_defenses=( none "$BASELINE_DEFENSE" )
   fi
