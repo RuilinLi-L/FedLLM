@@ -49,6 +49,13 @@ def get_args(argv=None):
         default='auto',
         help="Gradient computation device. 'auto' follows the resolved --device; use 'cpu' to reproduce the legacy path.",
     )
+    parser.add_argument(
+        '--dager_decomp_device',
+        type=str,
+        default='auto',
+        choices=['auto', 'cpu', 'cuda'],
+        help="Device for DAGER rank/SVD decomposition. 'auto' uses CUDA when the resolved attack device is CUDA.",
+    )
     parser.add_argument('--attn_implementation', type=str, default='sdpa', choices=['sdpa', 'eager'])
 
     parser.add_argument('--precision', type=str, default='full', choices=['8bit', 'half', 'full', 'double'])

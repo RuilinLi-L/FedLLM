@@ -6,7 +6,7 @@ from utils.models import ModelWrapper
 from utils.data import TextDataset
 from utils.filtering_encoder import filter_encoder
 from utils.filtering_decoder import filter_decoder
-from utils.functional import remove_padding, filter_outliers
+from utils.functional import filter_outliers, remove_padding, resolve_dager_decomp_device
 from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
 from utils.dpsgd_opacus import (
     DPSGD_OPACUS_DEFENSE,
@@ -50,7 +50,12 @@ from scipy.optimize import linear_sum_assignment
 args = get_args()
 args.device = resolve_cuda_device(args.device)
 args.device_grad = resolve_gradient_device(args.device_grad, args.device)
-print(f"[dager] Using device: {args.device} | gradient device: {args.device_grad}", flush=True)
+args.dager_decomp_resolved_device = str(resolve_dager_decomp_device(args.dager_decomp_device, args.device))
+print(
+    f"[dager] Using device: {args.device} | gradient device: {args.device_grad} "
+    f"| decomp device: {args.dager_decomp_resolved_device}",
+    flush=True,
+)
 np.random.seed(args.rng_seed)
 torch.manual_seed(args.rng_seed)
 

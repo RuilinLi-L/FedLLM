@@ -5,7 +5,6 @@ from contextlib import contextmanager
 from pathlib import Path
 import torch
 import torch.nn.functional as F
-import numpy as np
 import warnings
 from utils.ext import update_causal_mask
 from utils.partial_models import add_partial_forward_gpt2, add_partial_forward_bert, add_partial_forward_llama
@@ -31,7 +30,7 @@ from utils.peft_utils import PEFT_METADATA_FILE, apply_peft_adapter, normalize_p
 from utils.representation_bottleneck import apply_representation_bottleneck, rep_bottleneck_active
 from constants import config
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
-from utils.functional import get_layer_decomp
+from utils.functional import get_layer_decomp, resolve_dager_decomp_device, torch_matrix_rank
 
 def _append_unique(items, value):
     if value is None:
@@ -1105,27 +1104,6 @@ class ModelWrapper():
         if rank_cap is None or rank_cap <= 0:
             raise ValueError('No matrix-like gradients available for DAGER span decomposition.')
 
-        if B is None:
-            max_rank = 0
-            for i in grad_indices[:10]:
-                grad = self._span_oriented_grad(true_grads[i])
-                if self.args.precision == 'half':
-                    B = np.linalg.matrix_rank( grad.float().cpu() , tol=tol)
-                else:
-                    B = np.linalg.matrix_rank( grad.cpu() , tol=tol)
-                if max_rank < B:
-                    max_rank = B
-            B = max_rank
-        if self.args.algo == 'fedavg':
-            B += 60
-        B = min(B, self.emb_size - self.args.rank_cutoff, rank_cap)
-        if B <= 0:
-            raise ValueError(
-                f'DAGER span rank must be positive after clipping; got B={B}, '
-                f'rank_cap={rank_cap}, emb_size={self.emb_size}, rank_cutoff={self.args.rank_cutoff}.'
-            )
-        
-        R_Qs = []
         if partial_gradient_active(self.args):
             selected_block_ids = dager_block_ids(grad_names, self.args.n_layers)
             if all(block_id is not None for block_id in selected_block_ids):
@@ -1134,13 +1112,59 @@ class ModelWrapper():
             setattr(self.args, 'dager_selected_block_ids', list(range(self.args.n_layers)))
         setattr(self.args, 'dager_selected_gradient_indices', list(grad_indices[:self.args.n_layers]))
         setattr(self.args, 'dager_selected_gradient_names', list(grad_names[:self.args.n_layers]))
-        
-        for i in range(self.args.n_layers):
-            grad_Q = self._span_oriented_grad(true_grads[grad_indices[i]])
-            _, R_Q = get_layer_decomp(grad_Q, B=B, tol=tol, upcast=(self.args.precision=='half'))
-            R_Q = R_Q.to(self.args.device)
-            R_Qs.append(R_Q)
-        return B, R_Qs
+
+        requested_B = B
+        decomp_request = getattr(self.args, 'dager_decomp_device', 'auto')
+        if getattr(self.args, '_dager_decomp_force_cpu', False):
+            decomp_device = torch.device('cpu')
+        else:
+            decomp_device = resolve_dager_decomp_device(decomp_request, self.args.device)
+        setattr(self.args, 'dager_decomp_resolved_device', str(decomp_device))
+
+        def build_on_device(device):
+            B_local = requested_B
+            upcast = self.args.precision == 'half'
+            if B_local is None:
+                max_rank = 0
+                for i in grad_indices[:10]:
+                    grad = self._span_oriented_grad(true_grads[i])
+                    rank = torch_matrix_rank(grad, tol=tol, device=device, upcast=upcast)
+                    if max_rank < rank:
+                        max_rank = rank
+                B_local = max_rank
+            if self.args.algo == 'fedavg':
+                B_local += 60
+            B_local = min(int(B_local), self.emb_size - self.args.rank_cutoff, rank_cap)
+            if B_local <= 0:
+                raise ValueError(
+                    f'DAGER span rank must be positive after clipping; got B={B_local}, '
+                    f'rank_cap={rank_cap}, emb_size={self.emb_size}, rank_cutoff={self.args.rank_cutoff}.'
+                )
+
+            R_Qs = []
+            for i in range(self.args.n_layers):
+                grad_Q = self._span_oriented_grad(true_grads[grad_indices[i]])
+                _, R_Q = get_layer_decomp(grad_Q, B=B_local, tol=tol, upcast=upcast, device=device)
+                R_Q = R_Q.to(self.args.device)
+                R_Qs.append(R_Q)
+            return B_local, R_Qs
+
+        try:
+            return build_on_device(decomp_device)
+        except RuntimeError as exc:
+            if decomp_request == 'auto' and decomp_device.type == 'cuda':
+                if not getattr(self.args, '_dager_decomp_fallback_warned', False):
+                    print(
+                        f"[dager] Warning: CUDA DAGER decomposition failed "
+                        f"({type(exc).__name__}: {exc}); falling back to CPU.",
+                        flush=True,
+                    )
+                    setattr(self.args, '_dager_decomp_fallback_warned', True)
+                setattr(self.args, '_dager_decomp_force_cpu', True)
+                decomp_device = torch.device('cpu')
+                setattr(self.args, 'dager_decomp_resolved_device', str(decomp_device))
+                return build_on_device(decomp_device)
+            raise
             
     def get_embeddings(self, pos = None):
         if self.args.model_path in ['bert-base-uncased']:

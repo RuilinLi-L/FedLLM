@@ -51,22 +51,54 @@ def get_closest_tokens(inputs_embeds, unused_tokens, embeddings_weight, metric='
     return d, d.min(dim=2)[1]
 
 
-def get_layer_decomp(grad, B=None, tol=None, upcast=False):
-    grad = grad.detach().cpu().numpy()
-    if upcast:
-        grad = grad.astype(np.float32)
-    if B == None:
-        if upcast:
-            B = np.linalg.matrix_rank( grad.astype(np.float32) , tol=tol)
-            grad = grad.float()
-        else:
-            B = np.linalg.matrix_rank( grad , tol=tol)
-    U,S,Vh = torch.svd_lowrank(torch.tensor(grad),q=B,niter=10)
-    if upcast:
-        R = Vh.T.half()
+def resolve_dager_decomp_device(requested='auto', attack_device=None):
+    requested = (requested or 'auto').lower()
+    attack_device = str(attack_device or '')
+    if requested == 'cpu':
+        return torch.device('cpu')
+    if requested == 'cuda':
+        return torch.device(attack_device if attack_device.startswith('cuda') else 'cuda')
+    if requested != 'auto':
+        raise ValueError(f"Unsupported DAGER decomposition device: {requested}")
+    if attack_device.startswith('cuda') and torch.cuda.is_available():
+        return torch.device(attack_device)
+    return torch.device('cpu')
+
+
+def _decomp_compute_dtype(grad, upcast=False):
+    if upcast or grad.dtype in (torch.float16, torch.bfloat16):
+        return torch.float32
+    if grad.dtype == torch.float64:
+        return torch.float64
+    return torch.float32
+
+
+def _decomp_tensor(grad, device=None, upcast=False):
+    grad = grad.detach()
+    device = torch.device(device) if device is not None else grad.device
+    return grad.to(device=device, dtype=_decomp_compute_dtype(grad, upcast=upcast))
+
+
+def torch_matrix_rank(grad, tol=None, device=None, upcast=False):
+    grad = _decomp_tensor(grad, device=device, upcast=upcast)
+    if tol is None:
+        rank = torch.linalg.matrix_rank(grad)
     else:
-        R = Vh.T
-    return  B, torch.Tensor(R).detach()
+        rank = torch.linalg.matrix_rank(grad, atol=float(tol), rtol=0.0)
+    return int(rank.item())
+
+
+def get_layer_decomp(grad, B=None, tol=None, upcast=False, device=None):
+    original_dtype = grad.dtype if grad.is_floating_point() else None
+    grad = _decomp_tensor(grad, device=device, upcast=upcast)
+    if B is None:
+        B = torch_matrix_rank(grad, tol=tol, device=grad.device, upcast=False)
+    B = int(B)
+    _U, _S, Vh = torch.svd_lowrank(grad, q=B, niter=10)
+    R = Vh.T
+    if original_dtype is not None:
+        R = R.to(dtype=original_dtype)
+    return B, R.detach()
 
 def get_perplexity(gpt2, x_embeds, bert_embeddings_weight, gpt2_embeddings_weight, c=0.1):
     gpt2_embeddings_weight = gpt2_embeddings_weight.repeat(x_embeds.shape[0], 1, 1)
