@@ -4,7 +4,7 @@
 
 - 三个数据集：`sst2`、`cola`、`rotten_tomatoes`
 - 三个随机种子：`101 202 303`
-- GPU 执行：`CUDA_VISIBLE_DEVICES=0` 且 wrapper 内部调用 `attack.py --device cuda`
+- GPU 执行：默认不主动设置 `CUDA_VISIBLE_DEVICES`，由 `attack.py --device cuda` 经 `utils.gpu.resolve_cuda_device()` 自动选择空闲可见 GPU
 
 本 runbook 是 privacy-only；utility 后续只对 Pareto 候选点补跑。
 
@@ -59,7 +59,7 @@ bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh
 默认行为：
 
 - 固定 `DAGER_SEEDS="101 202 303"`。
-- 固定 `CUDA_VISIBLE_DEVICES=0`。
+- 默认 `--gpu auto`：保留当前 `CUDA_VISIBLE_DEVICES`，由 `attack.py` 自动选择空闲可见 GPU。
 - 创建日志根目录 `log/runs/dager_privacy_sst2_cola_rt_3seed_<timestamp>`。
 - 依次运行 smoke、主 sweep、额外边界点、adaptive check、最终汇总。
 
@@ -67,10 +67,18 @@ bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh
 
 ```bash
 bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh --gpu 1
+bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh --gpu all
+bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh --gpu 2
 bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh --dry-run
 bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh --log-dir log/runs/my_run
 bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh --skip-adaptive
 ```
+
+GPU 参数含义：
+
+- `--gpu auto`：默认值，不改当前 `CUDA_VISIBLE_DEVICES`，在当前可见 GPU 中自动选空闲卡。
+- `--gpu all`：先 `unset CUDA_VISIBLE_DEVICES`，再从所有物理 GPU 中自动选空闲卡。
+- `--gpu 2` 或 `--gpu 0,1`：手动限制可见 GPU 范围，再在该范围内自动选择。
 
 `--dry-run` 只打印命令，不真正执行，适合先检查调度范围。
 
@@ -87,8 +95,11 @@ set -euo pipefail
 # 三种子：不要在后续命令里再传 --rng_seed。
 export DAGER_SEEDS="101 202 303"
 
-# GPU：defense_baselines.sh 内部固定传 attack.py --device cuda。
-export CUDA_VISIBLE_DEVICES=0
+# GPU：默认不要设置 CUDA_VISIBLE_DEVICES，让 attack.py 自动选择空闲可见 GPU。
+# 如果要无视调度器已有可见范围、从所有物理 GPU 中选，使用：
+# unset CUDA_VISIBLE_DEVICES
+# 如果要手动限制范围，例如只允许 2 号卡，使用：
+# export CUDA_VISIBLE_DEVICES=2
 
 python3 -c "import torch; print('cuda_available=', torch.cuda.is_available())"
 python3 -c "import opacus; print('opacus ok')" || echo "opacus unavailable; dpsgd_opacus rows may fail and be logged"
@@ -193,5 +204,5 @@ python3 scripts/collect_experiment_logs.py "$DAGER_LOG_DIR" \
 ## 明确确认
 
 - 是三种子：runner 会设置 `export DAGER_SEEDS="101 202 303"`，并且不会给 wrapper 传 `--rng_seed`。
-- 是 GPU：`scripts/defense_baselines.sh` 内部调用 `attack.py --device cuda`，runner 额外用 `CUDA_VISIBLE_DEVICES=<gpu>` 固定 GPU。
+- 是 GPU：`scripts/defense_baselines.sh` 内部调用 `attack.py --device cuda`；runner 默认 `--gpu auto`，由 `utils.gpu.resolve_cuda_device()` 自动选择空闲可见 GPU。需要手动限制时再传 `--gpu 2` 或 `--gpu 0,1`。
 - 不要把 `DAGER=0` 写成形式化隐私保证；它只表示当前 DAGER budget 和实现下未恢复。

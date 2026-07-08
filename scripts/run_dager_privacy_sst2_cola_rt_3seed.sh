@@ -10,7 +10,7 @@ usage() {
     "  bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh [options]" \
     "" \
     "Options:" \
-    "  --gpu ID              CUDA_VISIBLE_DEVICES value. Default: 0." \
+    "  --gpu auto|all|ID     GPU visibility mode. Default: auto." \
     "  --log-dir PATH        Output log root. Default: log/runs/dager_privacy_sst2_cola_rt_3seed_<timestamp>." \
     "  --n-inputs N          Formal DAGER n_inputs. Default: 100." \
     "  --smoke-inputs N      Smoke-test n_inputs. Default: 2." \
@@ -24,10 +24,16 @@ usage() {
     "" \
     "This script intentionally fixes DAGER_SEEDS=\"101 202 303\" and never passes" \
     "--rng_seed to defense_baselines.sh. defense_baselines.sh calls attack.py with" \
-    "--device cuda; this script also fixes CUDA_VISIBLE_DEVICES."
+    "--device cuda; bare cuda is resolved by utils.gpu.resolve_cuda_device()." \
+    "" \
+    "GPU modes:" \
+    "  auto                 Preserve the current CUDA_VISIBLE_DEVICES and let attack.py choose an idle visible GPU." \
+    "  all                  Unset CUDA_VISIBLE_DEVICES, then let attack.py choose from all GPUs." \
+    "  0 / 1 / 0,1          Restrict CUDA_VISIBLE_DEVICES manually, then let attack.py choose within that range."
 }
 
-GPU_ID="0"
+GPU_REQUEST="auto"
+GPU_MODE="auto"
 LOG_DIR=""
 N_INPUTS="100"
 SMOKE_INPUTS="2"
@@ -41,9 +47,9 @@ NO_COLLECT=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --gpu)
-      GPU_ID="$2"; shift 2 ;;
+      GPU_REQUEST="$2"; shift 2 ;;
     --gpu=*)
-      GPU_ID="${1#*=}"; shift ;;
+      GPU_REQUEST="${1#*=}"; shift ;;
     --log-dir)
       LOG_DIR="$2"; shift 2 ;;
     --log-dir=*)
@@ -87,7 +93,36 @@ DAGER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$DAGER_ROOT" || exit 1
 
 export DAGER_SEEDS="101 202 303"
-export CUDA_VISIBLE_DEVICES="$GPU_ID"
+
+cuda_visible_devices_label() {
+  if [ "${CUDA_VISIBLE_DEVICES+x}" = "x" ]; then
+    if [ -n "${CUDA_VISIBLE_DEVICES}" ]; then
+      printf '%s' "$CUDA_VISIBLE_DEVICES"
+    else
+      printf 'empty'
+    fi
+  else
+    printf 'unset'
+  fi
+}
+
+configure_gpu_visibility() {
+  case "$GPU_REQUEST" in
+    ""|auto|AUTO)
+      GPU_MODE="auto"
+      ;;
+    all|ALL)
+      GPU_MODE="all"
+      unset CUDA_VISIBLE_DEVICES
+      ;;
+    *)
+      GPU_MODE="manual"
+      export CUDA_VISIBLE_DEVICES="$GPU_REQUEST"
+      ;;
+  esac
+}
+
+configure_gpu_visibility
 
 if [ -z "$LOG_DIR" ]; then
   printf -v STAMP '%(%Y%m%d_%H%M%S)T' -1
@@ -119,7 +154,9 @@ write_manifest() {
     printf 'n_inputs=%s\n' "$N_INPUTS"
     printf 'smoke_inputs=%s\n' "$SMOKE_INPUTS"
     printf 'seeds=%s\n' "$DAGER_SEEDS"
-    printf 'cuda_visible_devices=%s\n' "$CUDA_VISIBLE_DEVICES"
+    printf 'gpu_request=%s\n' "$GPU_REQUEST"
+    printf 'gpu_mode=%s\n' "$GPU_MODE"
+    printf 'cuda_visible_devices=%s\n' "$(cuda_visible_devices_label)"
     printf 'device=%s\n' 'attack.py --device cuda via scripts/defense_baselines.sh'
     printf 'threat_surface=%s\n' 'full_gradient_dager'
     printf 'dpsgd_opacus=%s\n' 'included'
@@ -134,6 +171,7 @@ check_environment() {
   fi
 
   python3 -c "import torch; print('cuda_available=', torch.cuda.is_available()); raise SystemExit(0 if torch.cuda.is_available() else 1)"
+  python3 -c "from utils.gpu import resolve_cuda_device; print('resolved_cuda_device=', resolve_cuda_device('cuda'))"
 
   if python3 -c "import opacus; print('opacus ok')" ; then
     :
@@ -169,7 +207,8 @@ declare -A ADAPTIVE=(
 echo "[dager-privacy] root: ${DAGER_ROOT}" >&2
 echo "[dager-privacy] log dir: ${DAGER_LOG_DIR}" >&2
 echo "[dager-privacy] seeds: ${DAGER_SEEDS}" >&2
-echo "[dager-privacy] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}" >&2
+echo "[dager-privacy] gpu mode: ${GPU_MODE} (request=${GPU_REQUEST})" >&2
+echo "[dager-privacy] CUDA_VISIBLE_DEVICES=$(cuda_visible_devices_label)" >&2
 
 write_manifest
 check_environment
