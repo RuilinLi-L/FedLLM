@@ -7,7 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DAGER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$DAGER_ROOT" || exit 1
 
-python attack_peftleak_image.py \
+PYTHON_BIN="${PYTHON:-python}"
+
+"$PYTHON_BIN" attack_peftleak_image.py \
   --mode official_vit_adapter \
   --peftleak_profile official_cifar32 \
   --dataset "${DATASET:-synthetic}" \
@@ -17,4 +19,7 @@ python attack_peftleak_image.py \
   --adapter_layers "${ADAPTER_LAYERS:-first_n}" \
   --attack_rounds "${ATTACK_ROUNDS:-1}" \
   --defense "${DEFENSE:-none}" \
+  --rng_seed "${RNG_SEED:-101}" \
+  --sample_strategy first_n \
+  --split_seed "${SPLIT_SEED:-${RNG_SEED:-101}}" \
   "$@"

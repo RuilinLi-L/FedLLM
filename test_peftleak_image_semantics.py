@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import os
@@ -38,12 +39,16 @@ from attacks.peftleak_image.core import (
 from attack_peftleak_image import (
     SUMMARY_END,
     SUMMARY_START,
+    SampleSelectionError,
     SyntheticFallbackError,
     _defend_gradient_tuple,
+    _indices_hash,
+    _load_indices_file,
     _make_raw_gradient_tuple,
     _recover_from_gradient_tuple,
     _run_synthetic_ratio,
     _run_vit_adapter,
+    _select_dataset_indices,
     build_parser,
     main as image_main,
 )
@@ -116,6 +121,91 @@ def tiny_cli_args(batch_size: int) -> list[str]:
         "--device",
         "cpu",
     ]
+
+
+def sampling_args(strategy: str, *, split_seed: int = 101, attack_indices_path=None, public_indices_path=None):
+    return argparse.Namespace(
+        sample_strategy=strategy,
+        split_seed=split_seed,
+        rng_seed=split_seed,
+        attack_indices_path=attack_indices_path,
+        public_indices_path=public_indices_path,
+    )
+
+
+def test_sampling_first_n_and_hash_are_stable():
+    args = sampling_args("first_n")
+
+    selected = _select_dataset_indices(args, public=False, dataset_len=10, requested_count=4)
+
+    assert_true(selected == [0, 1, 2, 3], "first_n should preserve legacy leading-index behavior")
+    assert_true(_indices_hash(selected) == _indices_hash([0, 1, 2, 3]), "index hash should be deterministic")
+
+
+def test_seeded_shuffle_sampling_uses_split_seed():
+    args_101 = sampling_args("seeded_shuffle", split_seed=101)
+    args_202 = sampling_args("seeded_shuffle", split_seed=202)
+
+    selected_101 = _select_dataset_indices(args_101, public=False, dataset_len=50, requested_count=8)
+    selected_101_repeat = _select_dataset_indices(args_101, public=False, dataset_len=50, requested_count=8)
+    selected_202 = _select_dataset_indices(args_202, public=False, dataset_len=50, requested_count=8)
+    public_101 = _select_dataset_indices(args_101, public=True, dataset_len=50, requested_count=8)
+
+    assert_true(selected_101 == selected_101_repeat, "seeded_shuffle should be reproducible for one split_seed")
+    assert_true(selected_101 != selected_202, "different split_seed values should produce different victim indices")
+    assert_true(selected_101 != public_101, "public selection should use an offset split seed")
+
+
+def test_indices_file_sampling_reads_text_and_npy():
+    try:
+        import numpy as np
+    except Exception as exc:  # noqa: BLE001
+        raise AssertionError("numpy is required for .npy index-file sampling tests") from exc
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        text_path = os.path.join(tmpdir, "public_indices.txt")
+        npy_path = os.path.join(tmpdir, "attack_indices.npy")
+        with open(text_path, "w", encoding="utf-8") as handle:
+            handle.write("3, 1\n0\n")
+        np.save(npy_path, np.array([7, 5, 2, 1], dtype=np.int64))
+        args = sampling_args("indices_file", attack_indices_path=npy_path, public_indices_path=text_path)
+
+        assert_true(_load_indices_file(text_path) == [3, 1, 0], "text index files should support commas and whitespace")
+        attack_selected = _select_dataset_indices(args, public=False, dataset_len=10, requested_count=3)
+        public_selected = _select_dataset_indices(args, public=True, dataset_len=10, requested_count=2)
+
+    assert_true(attack_selected == [7, 5, 2], "indices_file should preserve .npy ordering")
+    assert_true(public_selected == [3, 1], "indices_file should preserve text-file ordering")
+
+
+def test_indices_file_sampling_reports_clear_errors():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        short_path = os.path.join(tmpdir, "short.txt")
+        empty_path = os.path.join(tmpdir, "empty.txt")
+        bad_path = os.path.join(tmpdir, "bad.txt")
+        with open(short_path, "w", encoding="utf-8") as handle:
+            handle.write("2 4\n")
+        open(empty_path, "w", encoding="utf-8").close()
+        with open(bad_path, "w", encoding="utf-8") as handle:
+            handle.write("99\n")
+
+        missing_args = sampling_args("indices_file")
+        short_args = sampling_args("indices_file", attack_indices_path=short_path)
+        empty_args = sampling_args("indices_file", attack_indices_path=empty_path)
+        bad_args = sampling_args("indices_file", attack_indices_path=bad_path)
+
+        for args, requested_count, expected in [
+            (missing_args, 3, "--attack_indices_path is required"),
+            (short_args, 3, "contains 2 indices"),
+            (empty_args, 3, "Index file is empty"),
+            (bad_args, 1, "outside dataset range"),
+        ]:
+            try:
+                _select_dataset_indices(args, public=False, dataset_len=10, requested_count=requested_count)
+            except SampleSelectionError as exc:
+                assert_true(expected in str(exc), f"sampling error should mention {expected!r}")
+            else:
+                raise AssertionError(f"Expected SampleSelectionError containing {expected!r}")
 
 
 def manual_probe(mean, std, position, *, num_bins=1, embed_scale=0.5, gap=0, device=None):
@@ -406,6 +496,19 @@ def test_cli_batch1_reports_direct_primary_metric_and_shared_metadata():
     assert_true(summary["nonzero_slot_count"] != "n/a", "shared-bin nonzero slot metadata should be reported")
     assert_true(summary["ambiguous_position_count"] != "n/a", "shared-bin ambiguity metadata should be reported")
     assert_true(summary["empty_position_count"] != "n/a", "shared-bin empty-position metadata should be reported")
+
+
+def test_cli_summary_reports_sampling_protocol_fields():
+    code, _exc, summary, _output = run_image_main(tiny_cli_args(1))
+
+    assert_true(code == 0, "sampling summary CLI smoke should succeed")
+    assert_true(summary["sample_strategy"] == "first_n", "default sample strategy should preserve legacy first_n behavior")
+    assert_true(summary["peftleak_protocol"] == "legacy_first_n", "first_n runs should be labeled as legacy protocol")
+    assert_true(summary["split_seed"] == summary["rng_seed"], "split_seed should default to rng_seed")
+    assert_true(summary["attack_index_count"] == "1", "attack index count should reflect synthetic n_images")
+    assert_true(summary["public_index_count"] == "4", "public index count should reflect public_n_images")
+    assert_true(summary["attack_indices_hash"] != "n/a", "attack index hash should be reported")
+    assert_true(summary["public_indices_hash"] != "n/a", "public index hash should be reported")
 
 
 def test_cli_batch2_keeps_direct_metrics_non_oracle():
@@ -1002,6 +1105,10 @@ def test_optimization_patch_baseline_loss_decreases():
 
 def main():
     tests = [
+        test_sampling_first_n_and_hash_are_stable,
+        test_seeded_shuffle_sampling_uses_split_seed,
+        test_indices_file_sampling_reads_text_and_npy,
+        test_indices_file_sampling_reports_clear_errors,
         test_gradient_ratio_formula_recovers_known_patch,
         test_batch_recovery_applies_position_and_public_stats,
         test_shared_adjacent_difference_recovery_inverts_probe_transform,
@@ -1014,6 +1121,7 @@ def main():
         test_shared_vit_adapter_autograd_gradients_recover_patches,
         test_vit_adapter_run_reports_loss_acc_and_device_local_outputs,
         test_cli_batch1_reports_direct_primary_metric_and_shared_metadata,
+        test_cli_summary_reports_sampling_protocol_fields,
         test_cli_batch2_keeps_direct_metrics_non_oracle,
         test_cli_official_batch2_reports_non_oracle_primary_metrics,
         test_cli_official_cluster_grouping_does_not_report_direct_metrics,

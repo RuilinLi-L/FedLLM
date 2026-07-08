@@ -22,10 +22,13 @@ ADAPTER_BOTTLENECK_DIM="${ADAPTER_BOTTLENECK_DIM:-64}"
 ATTACK_ROUNDS="${ATTACK_ROUNDS:-1}"
 OFFICIAL_GROUPING="${OFFICIAL_GROUPING:-tag}"
 METRICS="${METRICS:-mse,psnr,ssim,lpips,patch_recovery}"
+SAMPLE_STRATEGY="${SAMPLE_STRATEGY:-seeded_shuffle}"
+ATTACK_INDICES_PATH="${ATTACK_INDICES_PATH:-}"
+PUBLIC_INDICES_PATH="${PUBLIC_INDICES_PATH:-}"
 RUN_SMOKE="${RUN_SMOKE:-1}"
 RUN_ABLATIONS="${RUN_ABLATIONS:-0}"
 
-read -r -a SEED_LIST <<< "${SEEDS:-101 202 303}"
+read -r -a SEED_LIST <<< "${SEEDS:-101 202 303 404 505}"
 
 mkdir -p "$CACHE" "$OUT/privacy" "$OUT/proxy_utility" "$OUT/tables"
 
@@ -51,6 +54,13 @@ run_img_privacy() {
   local tag="$1"
   local seed="$2"
   shift 2
+  local sample_args=(--sample_strategy "$SAMPLE_STRATEGY" --split_seed "$seed")
+  if [[ -n "$ATTACK_INDICES_PATH" ]]; then
+    sample_args+=(--attack_indices_path "$ATTACK_INDICES_PATH")
+  fi
+  if [[ -n "$PUBLIC_INDICES_PATH" ]]; then
+    sample_args+=(--public_indices_path "$PUBLIC_INDICES_PATH")
+  fi
   echo "========== ${tag} seed=${seed} =========="
   "$PYTHON_BIN" attack_peftleak_image.py \
     --mode official_vit_adapter \
@@ -70,6 +80,7 @@ run_img_privacy() {
     --metrics "$METRICS" \
     --device "$DEVICE" \
     --rng_seed "$seed" \
+    "${sample_args[@]}" \
     --fail_on_synthetic_fallback \
     "$@" \
     | tee "$OUT/privacy/${tag}_seed${seed}.log"
@@ -95,6 +106,8 @@ if [[ "$RUN_SMOKE" == "1" ]]; then
     --defense none \
     --device "$DEVICE" \
     --rng_seed 101 \
+    --sample_strategy first_n \
+    --split_seed 101 \
     --fail_on_synthetic_fallback \
     | tee "$OUT/privacy/smoke_none_seed101.log"
 fi

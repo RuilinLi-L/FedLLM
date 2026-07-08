@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
+from pathlib import Path
 import sys
 import time
 import torch
@@ -71,6 +73,10 @@ class SyntheticFallbackError(RuntimeError):
         self.reason = str(reason)
 
 
+class SampleSelectionError(ValueError):
+    """Raised when an explicit image sampling protocol cannot be satisfied."""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="PEFTLeak-style image-adapter shared-bin mechanism with synthetic ratio and torchvision ViT-adapter modes")
     parser.add_argument("--mode", choices=["vit_adapter", "official_vit_adapter", "synthetic_ratio"], default="vit_adapter")
@@ -93,6 +99,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--finetuned_path", type=str, default=None)
     parser.add_argument("--public_stats_path", type=str, default=None)
     parser.add_argument("--save_public_stats_path", type=str, default=None)
+    parser.add_argument(
+        "--sample_strategy",
+        type=str,
+        default="first_n",
+        choices=["first_n", "seeded_shuffle", "indices_file"],
+        help="Image sampling protocol for attack/public splits. first_n preserves legacy behavior.",
+    )
+    parser.add_argument("--split_seed", type=int, default=None, help="Seed for victim/public sample splits; defaults to --rng_seed.")
+    parser.add_argument("--attack_indices_path", type=str, default=None, help="Indices file for attacked images when --sample_strategy indices_file.")
+    parser.add_argument("--public_indices_path", type=str, default=None, help="Indices file for public-stat images when --sample_strategy indices_file.")
     parser.add_argument("--public_n_images", type=int, default=64)
     parser.add_argument("--n_images", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=4)
@@ -166,6 +182,122 @@ def _synthetic_images(n_images: int, channels: int, image_size: int, seed: int) 
     return images, labels
 
 
+def _finalize_sampling_args(args):
+    if getattr(args, "split_seed", None) is None:
+        args.split_seed = int(getattr(args, "rng_seed", 0))
+    for prefix in ("attack", "public"):
+        if not hasattr(args, f"_{prefix}_indices_hash"):
+            setattr(args, f"_{prefix}_indices_hash", None)
+        if not hasattr(args, f"_{prefix}_index_count"):
+            setattr(args, f"_{prefix}_index_count", None)
+    return args
+
+
+def _peftleak_protocol(args) -> str:
+    strategy = str(getattr(args, "sample_strategy", "first_n"))
+    if strategy == "indices_file":
+        return "official_fixed_batch"
+    if strategy == "seeded_shuffle":
+        return "seeded_defense_matrix"
+    return "legacy_first_n"
+
+
+def _indices_hash(indices) -> str | None:
+    if indices is None:
+        return None
+    values = [int(idx) for idx in indices]
+    if not values:
+        return None
+    digest = hashlib.sha256()
+    for idx in values:
+        digest.update(f"{idx}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _load_indices_file(path: str | Path) -> list[int]:
+    index_path = Path(path)
+    if not index_path.is_file():
+        raise FileNotFoundError(f"Index file does not exist: {index_path}")
+    if index_path.suffix.lower() == ".npy":
+        try:
+            import numpy as np
+        except Exception as exc:  # noqa: BLE001 - report dependency clearly for CLI users
+            raise RuntimeError("Loading .npy index files requires numpy.") from exc
+        raw = np.load(str(index_path), allow_pickle=False)
+        if raw.ndim != 1:
+            raise ValueError(f"Index file must be one-dimensional: {index_path}")
+        values = raw.tolist()
+    else:
+        text = index_path.read_text(encoding="utf-8")
+        values = text.replace(",", " ").split()
+    indices: list[int] = []
+    for value in values:
+        try:
+            idx = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Index file contains a non-integer value: {value!r}") from exc
+        indices.append(idx)
+    if not indices:
+        raise ValueError(f"Index file is empty: {index_path}")
+    return indices
+
+
+def _select_dataset_indices(args, *, public: bool, dataset_len: int, requested_count: int) -> list[int]:
+    requested_count = int(requested_count)
+    dataset_len = int(dataset_len)
+    if requested_count <= 0:
+        return []
+    strategy = str(getattr(args, "sample_strategy", "first_n"))
+    if strategy == "first_n":
+        selected = list(range(max(0, min(requested_count, dataset_len))))
+    elif strategy == "seeded_shuffle":
+        if requested_count > dataset_len:
+            raise SampleSelectionError(
+                f"Requested {requested_count} {'public' if public else 'attack'} images "
+                f"but dataset only has {dataset_len}."
+            )
+        split_seed = int(getattr(args, "split_seed", getattr(args, "rng_seed", 0)))
+        if public:
+            split_seed += 10000
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(split_seed)
+        selected = torch.randperm(dataset_len, generator=gen)[:requested_count].tolist()
+    elif strategy == "indices_file":
+        path = getattr(args, "public_indices_path", None) if public else getattr(args, "attack_indices_path", None)
+        if not path:
+            raise SampleSelectionError(
+                f"--{'public' if public else 'attack'}_indices_path is required "
+                "when --sample_strategy indices_file."
+            )
+        try:
+            file_indices = _load_indices_file(path)
+        except Exception as exc:  # noqa: BLE001 - preserve a single CLI-facing error type
+            raise SampleSelectionError(str(exc)) from exc
+        if len(file_indices) < requested_count:
+            raise SampleSelectionError(
+                f"Index file {path} contains {len(file_indices)} indices but "
+                f"{requested_count} {'public' if public else 'attack'} images were requested."
+            )
+        selected = [int(idx) for idx in file_indices[:requested_count]]
+    else:
+        raise SampleSelectionError(f"Unsupported sample_strategy: {strategy!r}")
+
+    out_of_range = [idx for idx in selected if idx < 0 or idx >= dataset_len]
+    if out_of_range:
+        first = out_of_range[0]
+        raise SampleSelectionError(
+            f"Selected {'public' if public else 'attack'} index {first} is outside "
+            f"dataset range [0, {dataset_len})."
+        )
+    return [int(idx) for idx in selected]
+
+
+def _record_sample_indices(args, *, public: bool, indices: list[int]):
+    prefix = "public" if public else "attack"
+    setattr(args, f"_{prefix}_indices_hash", _indices_hash(indices))
+    setattr(args, f"_{prefix}_index_count", int(len(indices)))
+
+
 def _load_images(args, *, public: bool = False) -> tuple[torch.Tensor, torch.Tensor, str, str | None]:
     public_count = args.public_split_size if getattr(args, "public_split_size", None) is not None else args.public_n_images
     n_images = int(public_count if public else args.n_images)
@@ -188,17 +320,25 @@ def _load_images(args, *, public: bool = False) -> tuple[torch.Tensor, torch.Ten
                     ]
                 ),
             )
-            max_count = max(0, min(n_images, len(ds)))
+            selected_indices = _select_dataset_indices(
+                args,
+                public=public,
+                dataset_len=len(ds),
+                requested_count=n_images,
+            )
             imgs = []
             labels = []
-            for idx in range(max_count):
+            for idx in selected_indices:
                 img, label = ds[idx]
                 imgs.append(img)
                 labels.append(int(label))
             if imgs:
+                _record_sample_indices(args, public=public, indices=selected_indices)
                 source = f"{args.dataset}_public" if public else f"{args.dataset}_train"
                 return torch.stack(imgs, dim=0), torch.tensor(labels, dtype=torch.long), source, None
             fallback_reason = f"{args.dataset} split is empty at {data_root}."
+        except SampleSelectionError:
+            raise
         except Exception as exc:
             fallback_reason = str(exc)
     elif args.dataset in {"tinyimagenet", "imagenet"}:
@@ -239,18 +379,25 @@ def _load_images(args, *, public: bool = False) -> tuple[torch.Tensor, torch.Ten
                     ]
                 ),
             )
-            max_count = max(0, min(n_images, len(ds)))
+            selected_indices = _select_dataset_indices(
+                args,
+                public=public,
+                dataset_len=len(ds),
+                requested_count=n_images,
+            )
             imgs = []
             labels = []
-            for local_idx in range(max_count):
-                idx = local_idx
+            for idx in selected_indices:
                 img, label = ds[idx]
                 imgs.append(img)
                 labels.append(int(label))
             if imgs:
+                _record_sample_indices(args, public=public, indices=selected_indices)
                 source = f"{args.dataset}_public" if public else f"{args.dataset}_train"
                 return torch.stack(imgs, dim=0), torch.tensor(labels, dtype=torch.long), source, None
             fallback_reason = f"{args.dataset} split is empty at {split_path}."
+        except SampleSelectionError:
+            raise
         except Exception as exc:
             fallback_reason = str(exc)
 
@@ -263,6 +410,7 @@ def _load_images(args, *, public: bool = False) -> tuple[torch.Tensor, torch.Ten
             raise SyntheticFallbackError(fallback_reason or f"{args.dataset} unavailable.")
 
     images, labels = _synthetic_images(n_images, args.channels, args.image_size, seed)
+    _record_sample_indices(args, public=public, indices=list(range(int(n_images))))
     return images, labels % int(args.n_classes), "synthetic_public" if public else "synthetic_attack", fallback_reason
 
 
@@ -879,6 +1027,13 @@ def _emit_summary(args, fields: dict):
         ("non_oracle_primary_only", fields.get("non_oracle_primary_only", True)),
         ("dataset", args.dataset),
         ("rng_seed", getattr(args, "rng_seed", None)),
+        ("sample_strategy", getattr(args, "sample_strategy", None)),
+        ("split_seed", getattr(args, "split_seed", None)),
+        ("peftleak_protocol", fields.get("peftleak_protocol", _peftleak_protocol(args))),
+        ("attack_indices_hash", fields.get("attack_indices_hash", getattr(args, "_attack_indices_hash", None))),
+        ("public_indices_hash", fields.get("public_indices_hash", getattr(args, "_public_indices_hash", None))),
+        ("attack_index_count", fields.get("attack_index_count", getattr(args, "_attack_index_count", None))),
+        ("public_index_count", fields.get("public_index_count", getattr(args, "_public_index_count", None))),
         ("device", fields.get("device")),
         ("data_source", fields.get("data_source")),
         ("public_stats_source", fields.get("public_stats_source")),
@@ -956,6 +1111,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     explicit_fields = _explicit_cli_fields(argv)
     _apply_peftleak_profile(args, explicit_fields)
+    _finalize_sampling_args(args)
     apply_lrb_preset(args)
     device = _resolve_runtime_device(args.device)
     args.device = str(device)
@@ -1173,6 +1329,7 @@ def main(argv=None):
                 "attack_runtime": str(datetime.timedelta(seconds=time.time() - start)).split(".")[0],
                 "public_stats_source": stats_source if args.public_stats_path else f"{stats_source}:{public_data_source}",
                 "data_source": data_source,
+                "peftleak_protocol": _peftleak_protocol(args),
                 "synthetic_fallback": synthetic_fallback,
                 "fallback_reason": fallback_reason,
                 "config_warning": getattr(args, "config_warning", None),

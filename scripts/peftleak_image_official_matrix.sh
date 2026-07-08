@@ -12,6 +12,16 @@ BATCHES=( ${BATCHES:-1 2} )
 LAYERS=( ${LAYERS:-all msa mlp} )
 BOTTLENECKS=( ${BOTTLENECKS:-64} )
 ROUNDS=( ${ROUNDS:-1} )
+PYTHON_BIN="${PYTHON:-python}"
+SAMPLE_STRATEGY="${SAMPLE_STRATEGY:-first_n}"
+SPLIT_SEED="${SPLIT_SEED:-${RNG_SEED:-101}}"
+sample_args=(--sample_strategy "$SAMPLE_STRATEGY" --split_seed "$SPLIT_SEED")
+if [[ -n "${ATTACK_INDICES_PATH:-}" ]]; then
+  sample_args+=(--attack_indices_path "$ATTACK_INDICES_PATH")
+fi
+if [[ -n "${PUBLIC_INDICES_PATH:-}" ]]; then
+  sample_args+=(--public_indices_path "$PUBLIC_INDICES_PATH")
+fi
 
 for dataset in "${DATASETS[@]}"; do
   for batch in "${BATCHES[@]}"; do
@@ -19,7 +29,7 @@ for dataset in "${DATASETS[@]}"; do
       for bottleneck in "${BOTTLENECKS[@]}"; do
         for rounds in "${ROUNDS[@]}"; do
           echo "========== official_vit_adapter dataset=${dataset} batch=${batch} layers=${layers} bottleneck=${bottleneck} rounds=${rounds} =========="
-          python attack_peftleak_image.py \
+          "$PYTHON_BIN" attack_peftleak_image.py \
             --mode official_vit_adapter \
             --peftleak_profile official_cifar32 \
             --dataset "$dataset" \
@@ -35,6 +45,8 @@ for dataset in "${DATASETS[@]}"; do
             --attack_rounds "$rounds" \
             --official_grouping "${OFFICIAL_GROUPING:-tag}" \
             --metrics "${METRICS:-mse,psnr,ssim,lpips,patch_recovery}" \
+            --rng_seed "${RNG_SEED:-101}" \
+            "${sample_args[@]}" \
             --fail_on_synthetic_fallback \
             "$@"
         done

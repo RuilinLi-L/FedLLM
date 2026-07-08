@@ -7,7 +7,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DAGER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$DAGER_ROOT" || exit 1
 
-python attack_peftleak_image.py \
+PYTHON_BIN="${PYTHON:-python}"
+SPLIT_SEED="${SPLIT_SEED:-${RNG_SEED:-101}}"
+SAMPLE_STRATEGY="${SAMPLE_STRATEGY:-first_n}"
+sample_args=(--sample_strategy "$SAMPLE_STRATEGY" --split_seed "$SPLIT_SEED")
+if [[ -n "${ATTACK_INDICES_PATH:-}" ]]; then
+  sample_args+=(--attack_indices_path "$ATTACK_INDICES_PATH")
+fi
+if [[ -n "${PUBLIC_INDICES_PATH:-}" ]]; then
+  sample_args+=(--public_indices_path "$PUBLIC_INDICES_PATH")
+fi
+
+"$PYTHON_BIN" attack_peftleak_image.py \
   --mode official_vit_adapter \
   --peftleak_profile official_cifar32 \
   --dataset "${DATASET:-cifar100}" \
@@ -23,5 +34,7 @@ python attack_peftleak_image.py \
   --adapter_bottleneck_dim "${ADAPTER_BOTTLENECK_DIM:-64}" \
   --official_grouping "${OFFICIAL_GROUPING:-tag}" \
   --metrics "${METRICS:-mse,psnr,ssim,lpips,patch_recovery}" \
+  --rng_seed "${RNG_SEED:-101}" \
+  "${sample_args[@]}" \
   --fail_on_synthetic_fallback \
   "$@"

@@ -42,7 +42,8 @@ export N_CLASSES=10
 export N_IMAGES=32          # pilot 可改成 8；最终可加到 100
 export BATCH_SIZE=2
 export PUBLIC_SPLIT_SIZE=64
-export SEEDS="101 202 303"
+export SEEDS="101 202 303 404 505"
+export SAMPLE_STRATEGY=seeded_shuffle
 
 mkdir -p "$CACHE" "$OUT/privacy" "$OUT/proxy_utility" "$OUT/tables"
 ```
@@ -101,6 +102,8 @@ python attack_peftleak_image.py \
   --defense none \
   --device "$DEVICE" \
   --rng_seed 101 \
+  --sample_strategy first_n \
+  --split_seed 101 \
   --fail_on_synthetic_fallback \
   | tee "$OUT/privacy/smoke_none_seed101.log"
 ```
@@ -117,9 +120,37 @@ primary_metric_source=direct 或 clustered
 mse=...
 psnr=...
 patch_recovery_rate=...
+sample_strategy=first_n
+peftleak_protocol=legacy_first_n
 ```
 
 如果 smoke 失败，不要继续跑正式矩阵。
+
+### PEFTLeak-aligned fixed-batch reproduction
+
+Use this only to align with the PEFTLeak image-side fixed victim batch protocol.
+It is not a multi-seed defense table and should not be reported as mean/std.
+
+```bash
+bash scripts/peftleak_image_official_fixed_batch.sh
+```
+
+Defaults:
+
+```text
+DATASET=cifar100
+N_CLASSES=100
+N_IMAGES=32
+BATCH_SIZE=32
+PUBLIC_SPLIT_SIZE=$N_IMAGES
+SAMPLE_STRATEGY=indices_file
+ATTACK_INDICES_PATH=./PEFTLeak-main/PEFTLeak-main/img_list.npy
+```
+
+If `PUBLIC_INDICES_PATH` is not set, the fixed-batch script reuses the same
+numeric indices on the public split and defaults `PUBLIC_SPLIT_SIZE` to
+`N_IMAGES` so the official victim index file is sufficient. For paper runs,
+prefer an explicit non-overlapping public index file or a saved public-stat file.
 
 ## 4. 一键运行 CIFAR10 Privacy 矩阵
 
@@ -137,8 +168,13 @@ N_CLASSES=10
 N_IMAGES=32
 BATCH_SIZE=2
 PUBLIC_SPLIT_SIZE=64
-SEEDS="101 202 303"
+SEEDS="101 202 303 404 505"
+SAMPLE_STRATEGY=seeded_shuffle
 ```
+
+Reportable multi-seed defense matrices must use `sample_strategy=seeded_shuffle`
+or explicit index files. Re-running `first_n` with different `rng_seed` values
+is only a fixed-split sanity check.
 
 常见覆盖方式：
 
@@ -181,6 +217,8 @@ run_img_privacy () {
     --metrics mse,psnr,ssim,lpips,patch_recovery \
     --device "$DEVICE" \
     --rng_seed "$seed" \
+    --sample_strategy "${SAMPLE_STRATEGY:-seeded_shuffle}" \
+    --split_seed "$seed" \
     --fail_on_synthetic_fallback \
     "$@" \
     | tee "$OUT/privacy/${tag}_seed${seed}.log"
@@ -425,4 +463,16 @@ LRB ablations
 7. DP-SGD-style 只写 clipping + Gaussian noise baseline，不声明 formal DP。
 8. 图像侧整体写作定位为 supplementary cross-modal evidence。
 ```
+### Updated sampling/protocol acceptance criteria
 
+```text
+1. Fixed-batch reproduction uses peftleak_protocol=official_fixed_batch and is not reported as mean/std.
+2. Multi-seed defense tables use sample_strategy=seeded_shuffle or explicit index files.
+3. Every reportable defense point has seeds 101/202/303/404/505, synthetic_fallback=0, and result_status=ok.
+4. Same-seed defense comparisons share attack_indices_hash and public_indices_hash.
+5. oracle_* fields stay out of primary tables.
+6. topk/compression/Projection-LRB use the same batch_size/n_images/public_split_size/sample protocol.
+7. soteria/mixup are labeled approximate coverage baselines.
+8. DP-SGD-style is reported as clipping + Gaussian noise only, with no formal DP claim.
+9. Image-side results are framed as supplementary cross-modal evidence.
+```
