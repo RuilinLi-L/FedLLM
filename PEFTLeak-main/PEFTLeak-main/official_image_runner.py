@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """CLI runner for the official PEFTLeak CIFAR100 image-adapter notebook path.
 
-This script intentionally mirrors Adapter_attack.ipynb for the clean baseline.
-Defense hooks are present but only ``none`` is enabled in this first phase.
+This script intentionally mirrors Adapter_attack.ipynb for the clean baseline,
+with optional post-gradient defense baselines applied before patch recovery.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import datetime as _datetime
 import os
 from pathlib import Path
 import random
+import sys
 import time
 
 import numpy as np  # noqa: E402
@@ -19,6 +20,14 @@ import torch  # noqa: E402
 from torch import nn  # noqa: E402
 import torchvision  # noqa: E402
 from torchvision import transforms  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from utils.defenses import gradient_compression, topk_sparsification  # noqa: E402
+from utils.lrb_defense import apply_lrb_defense  # noqa: E402
+from utils.lrb_presets import LRB_PRESET_CHOICES, apply_lrb_preset  # noqa: E402
 
 
 SUMMARY_START = "===== RESULT SUMMARY START ====="
@@ -54,9 +63,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:3")
     parser.add_argument(
         "--defense",
-        choices=["none", "topk", "compression", "proj_only", "full_lrb"],
+        choices=["none", "topk", "compression", "lrb", "proj_only", "full_lrb"],
         default="none",
     )
+    parser.add_argument("--defense_topk_ratio", type=float, default=0.1)
+    parser.add_argument("--defense_n_bits", type=int, default=8)
+    parser.add_argument("--defense_lrb_preset", choices=LRB_PRESET_CHOICES, default="custom")
+    parser.add_argument("--defense_lrb_sensitive_n_layers", type=int, default=2)
+    parser.add_argument("--defense_lrb_keep_ratio_sensitive", type=float, default=0.5)
+    parser.add_argument("--defense_lrb_keep_ratio_other", type=float, default=0.75)
+    parser.add_argument("--defense_lrb_clip_scale_sensitive", type=float, default=0.5)
+    parser.add_argument("--defense_lrb_clip_scale_other", type=float, default=1.0)
+    parser.add_argument("--defense_lrb_noise_sensitive", type=float, default=0.03)
+    parser.add_argument("--defense_lrb_noise_other", type=float, default=0.005)
+    parser.add_argument("--defense_lrb_empirical_weight", type=float, default=0.6)
+    parser.add_argument("--defense_lrb_calibration_samples", type=int, default=4096)
+    parser.add_argument("--defense_lrb_projection", choices=["signed_pool", "pool"], default="signed_pool")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", default="outputs/peftleak_official_image")
     parser.add_argument("--download", action="store_true")
@@ -93,6 +115,12 @@ def emit_summary(fields: dict):
         "batch_size",
         "attack_index_count",
         "defense",
+        "defense_param_name",
+        "defense_param_value",
+        "defense_applied_to",
+        "defense_lrb_preset",
+        "defense_lrb_keep_ratio_sensitive",
+        "defended_gradient_count",
         "patch_count",
         "peftleak_recovered_patch_metric",
         "peftleak_target_patch_count",
@@ -440,13 +468,66 @@ def collect_adapter_gradients(model: ViT):
     return weight_grad, bias_grad, weight_names, bias_names
 
 
-def apply_official_image_defense(weight_grad, bias_grad, args):
-    if args.defense != "none":
-        raise NotImplementedError(
-            "official_image_runner phase 1 only supports --defense none. "
-            "Add topk/compression/proj_only/full_lrb after the official clean baseline passes."
-        )
-    return weight_grad, bias_grad
+def _effective_lrb_preset(args) -> str:
+    if args.defense == "proj_only":
+        return "proj_only"
+    if args.defense == "full_lrb":
+        return "full_lrb"
+    return str(args.defense_lrb_preset)
+
+
+def _apply_lrb_preset_for_official_image(args):
+    original_defense = args.defense
+    if original_defense in {"proj_only", "full_lrb"}:
+        args.defense_lrb_preset = original_defense
+        args.defense = "lrb"
+    try:
+        apply_lrb_preset(args)
+    finally:
+        args.defense = original_defense
+
+
+def _official_image_defense_param(args):
+    if args.defense == "topk":
+        return "defense_topk_ratio", float(args.defense_topk_ratio)
+    if args.defense == "compression":
+        return "defense_n_bits", int(args.defense_n_bits)
+    if args.defense in {"lrb", "proj_only", "full_lrb"}:
+        return "defense_lrb_keep_ratio_sensitive", float(args.defense_lrb_keep_ratio_sensitive)
+    return None, None
+
+
+def apply_official_image_defense(weight_grad, bias_grad, weight_names, bias_names, args):
+    raw_grads = tuple(weight_grad) + tuple(bias_grad)
+    names = list(weight_names) + list(bias_names)
+    n_weight = len(weight_grad)
+
+    if args.defense == "none":
+        defended = raw_grads
+    elif args.defense == "topk":
+        defended = topk_sparsification(raw_grads, float(args.defense_topk_ratio))
+    elif args.defense == "compression":
+        defended = gradient_compression(raw_grads, int(args.defense_n_bits), seed=int(args.seed))
+    elif args.defense in {"lrb", "proj_only", "full_lrb"}:
+        _apply_lrb_preset_for_official_image(args)
+        defended = apply_lrb_defense(raw_grads, args, layer_names=names)
+    else:
+        raise NotImplementedError(f"Unsupported official image defense: {args.defense!r}")
+
+    param_name, param_value = _official_image_defense_param(args)
+    fields = {
+        "defense_param_name": param_name,
+        "defense_param_value": param_value,
+        "defense_applied_to": "adapter_weight_bias_gradients",
+        "defense_lrb_preset": (
+            _effective_lrb_preset(args) if args.defense in {"lrb", "proj_only", "full_lrb"} else None
+        ),
+        "defense_lrb_keep_ratio_sensitive": (
+            float(args.defense_lrb_keep_ratio_sensitive) if args.defense in {"lrb", "proj_only", "full_lrb"} else None
+        ),
+        "defended_gradient_count": len(raw_grads),
+    }
+    return list(defended[:n_weight]), list(defended[n_weight:]), fields
 
 
 def reconstruct_patch_candidates(weight_grad, bias_grad, patch_id: int, w_pos: torch.Tensor, scale: float):
@@ -897,7 +978,13 @@ def run(args) -> dict:
     loss.backward()
 
     weight_grad, bias_grad, weight_names, bias_names = collect_adapter_gradients(model)
-    weight_grad, bias_grad = apply_official_image_defense(weight_grad, bias_grad, args)
+    weight_grad, bias_grad, defense_fields = apply_official_image_defense(
+        weight_grad,
+        bias_grad,
+        weight_names,
+        bias_names,
+        args,
+    )
     candidate_by_position = recover_candidate_patches(weight_grad, bias_grad, w_glob, mean_inv, std_inv)
     official_candidate_by_position = recover_official_formula_candidates(weight_grad, bias_grad, w_glob)
     parity_status, parity_max_abs_diff = compare_reconstruction_parity(
@@ -965,6 +1052,7 @@ def run(args) -> dict:
         "lpips_status": "unavailable",
         "loss": float(loss.detach().cpu().item()),
     }
+    fields.update(defense_fields)
     fields.update(denorm_recovery["summary"])
     if args.debug_patch_diagnostics:
         diagnostics = build_patch_diagnostics(candidate_by_position, refs, mean_inv, std_inv)
