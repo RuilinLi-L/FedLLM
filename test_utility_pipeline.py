@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import collect_experiment_logs as cel  # noqa: E402
 if torch is not None:
     from utils.defense_common import defense_param_spec, grad_similarity_metrics  # noqa: E402
+    from utils import dpsgd_opacus as dop  # noqa: E402
     from utils.dpsgd_opacus import dpsgd_opacus_summary_fields, record_dpsgd_opacus_summary  # noqa: E402
 
 
@@ -66,6 +67,42 @@ def test_dpsgd_opacus_summary_fields_include_accounting_terms():
     assert_true(fields["dpsgd_delta"] == 1e-5, "summary should include DP delta")
     assert_true(fields["dpsgd_accountant"] == "opacus_rdp", "summary should name the accountant")
     assert_true(abs(fields["dpsgd_epsilon"] - 3.25001) < 1e-9, "summary should include epsilon from privacy engine")
+
+
+def test_make_private_with_opacus_sets_module_to_train_mode():
+    original_import = dop.import_privacy_engine
+    observed = {}
+
+    class FakePrivacyEngine:
+        def __init__(self, accountant):
+            observed["accountant"] = accountant
+
+        def make_private(self, *, module, optimizer, data_loader, noise_multiplier, max_grad_norm):
+            observed["module_training"] = module.training
+            observed["noise_multiplier"] = noise_multiplier
+            observed["max_grad_norm"] = max_grad_norm
+            return module, optimizer, data_loader
+
+    args = SimpleNamespace(
+        defense="dpsgd_opacus",
+        defense_noise=0.01,
+        defense_clip_norm=1.0,
+        defense_dp_delta=1e-5,
+    )
+    module = torch.nn.Linear(2, 1)
+    module.eval()
+    optimizer = torch.optim.SGD(module.parameters(), lr=0.1)
+    data_loader = [(torch.zeros(1, 2), torch.zeros(1))]
+
+    try:
+        dop.import_privacy_engine = lambda: FakePrivacyEngine
+        dop.make_private_with_opacus(module, optimizer, data_loader, args)
+    finally:
+        dop.import_privacy_engine = original_import
+
+    assert_true(observed["accountant"] == "rdp", "Opacus helper should keep the RDP accountant")
+    assert_true(observed["module_training"], "Opacus helper must pass a training-mode module to make_private")
+    assert_true(module.training, "module should remain in training mode after Opacus preparation")
 
 
 def test_grad_similarity_metrics_returns_cosine_and_norm_retention():
@@ -453,6 +490,7 @@ def main():
             [
                 test_defense_param_spec_tracks_shared_cli_mapping,
                 test_dpsgd_opacus_summary_fields_include_accounting_terms,
+                test_make_private_with_opacus_sets_module_to_train_mode,
                 test_grad_similarity_metrics_returns_cosine_and_norm_retention,
             ]
         )

@@ -76,6 +76,7 @@ def make_private_with_opacus(module, optimizer, data_loader, args):
     cfg = dpsgd_opacus_config(args)
     PrivacyEngine = import_privacy_engine()
     privacy_engine = PrivacyEngine(accountant="rdp")
+    module.train()
     private_module, private_optimizer, private_loader = privacy_engine.make_private(
         module=module,
         optimizer=optimizer,
