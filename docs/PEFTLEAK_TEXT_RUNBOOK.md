@@ -28,7 +28,16 @@ tmux new -s peftleak_text
 通用变量：
 
 ```bash
-c
+export DEVICE=cuda
+export CACHE=./models_cache
+export OUT=./outputs/peftleak_text_sst2
+
+export EPOCHS=3
+export N_PRIV=100
+export B_PRIV=1
+export PEFTLEAK_LOG_DIR="$OUT/privacy"
+
+mkdir -p "$CACHE" "$OUT/models" "$OUT/privacy" "$OUT/utility" "$OUT/tables"
 ```
 
 如果只想先做 pilot，把 `N_PRIV` 改小：
@@ -42,7 +51,7 @@ export N_PRIV=10
 | 项目 | 设置 |
 |---|---|
 | 数据集 | `sst2` |
-| 主 backbone | `bert-base-uncased`, `gpt2` |
+| 主 backbone | `gpt2` 默认；`bert-base-uncased` 可作为补充 |
 | PEFT 方法 | `adapter`, `lora`, `ia3` |
 | Adapter privacy attack | `--peftleak_attack_mode ratio` |
 | LoRA/IA3 privacy attack | `--peftleak_attack_mode opt` |
@@ -73,13 +82,13 @@ We fully reproduce the original PEFTLeak attack on text.
 本文档默认会训练以下 clean checkpoints：
 
 ```text
-BERT_ADAPTER=$OUT/models/bert_adapter_clean/final_adapter
-BERT_LORA=$OUT/models/bert_lora_r16_clean/final_adapter
-BERT_IA3=$OUT/models/bert_ia3_clean/final_adapter
-
 GPT2_ADAPTER=$OUT/models/gpt2_adapter_clean/final_adapter
 GPT2_LORA=$OUT/models/gpt2_lora_r16_clean/final_adapter
 GPT2_IA3=$OUT/models/gpt2_ia3_clean/final_adapter
+
+BERT_ADAPTER=$OUT/models/bert_adapter_clean/final_adapter  # optional
+BERT_LORA=$OUT/models/bert_lora_r16_clean/final_adapter    # optional
+BERT_IA3=$OUT/models/bert_ia3_clean/final_adapter          # optional
 ```
 
 如果已经有训练好的 PEFT checkpoint，可以直接替换这些路径，跳过 clean checkpoint 训练。
@@ -93,7 +102,7 @@ python test_peftleak_text_semantics.py
 python test_peft_eval_semantics.py
 ```
 
-再训练一个最小 BERT Adapter checkpoint：
+再训练一个最小 GPT2 Adapter checkpoint：
 
 ```bash
 python train.py \
@@ -101,28 +110,22 @@ python train.py \
   --task seq_class \
   --batch_size 8 \
   --num_epochs 1 \
-  --model_path bert-base-uncased \
+  --model_path gpt2 \
   --train_method peft \
   --peft_method adapter \
   --adapter_reduction_factor 16 \
   --defense none \
   --rng_seed 101 \
   --models_cache "$CACHE" \
-  --output_dir "$OUT/models/bert_adapter_clean_smoke" \
-  --log_file "$OUT/utility/bert_adapter_clean_smoke.txt"
+  --output_dir "$OUT/models/gpt2_adapter_clean_smoke" \
+  --log_file "$OUT/utility/gpt2_adapter_clean_smoke.txt"
 ```
 
 Adapter ratio attack 冒烟：
 
 ```bash
-python attack_peftleak.py \
-  --dataset sst2 \
-  --split val \
-  --n_inputs 2 \
-  --batch_size 1 \
-  --model_path bert-base-uncased \
-  --finetuned_path "$OUT/models/bert_adapter_clean_smoke/final_adapter" \
-  --train_method peft \
+PEFTLEAK_LOG_DIR="$OUT/privacy/smoke" bash scripts/peftleak_eval.sh sst2 1 gpt2 2 \
+  --finetuned_path "$OUT/models/gpt2_adapter_clean_smoke/final_adapter" \
   --peft_method adapter \
   --peftleak_attack_mode ratio \
   --peftleak_ratio_route public_bins \
@@ -130,8 +133,7 @@ python attack_peftleak.py \
   --peftleak_ratio_public_n_inputs 16 \
   --defense none \
   --device "$DEVICE" \
-  --cache_dir "$CACHE" \
-  > "$OUT/privacy/bert_adapter_ratio_smoke.txt" 2>&1
+  --cache_dir "$CACHE"
 ```
 
 检查 summary，至少应该看到：
@@ -150,7 +152,7 @@ ratio_rec_token_mean=...
 
 ## 训练 Clean PEFT Checkpoints
 
-### BERT Adapter
+### GPT2 Adapter
 
 ```bash
 python train.py \
@@ -158,18 +160,18 @@ python train.py \
   --task seq_class \
   --batch_size 8 \
   --num_epochs "$EPOCHS" \
-  --model_path bert-base-uncased \
+  --model_path gpt2 \
   --train_method peft \
   --peft_method adapter \
   --adapter_reduction_factor 16 \
   --defense none \
   --rng_seed 101 \
   --models_cache "$CACHE" \
-  --output_dir "$OUT/models/bert_adapter_clean" \
-  --log_file "$OUT/utility/bert_adapter_clean.txt"
+  --output_dir "$OUT/models/gpt2_adapter_clean" \
+  --log_file "$OUT/utility/gpt2_adapter_clean.txt"
 ```
 
-### BERT LoRA
+### GPT2 LoRA
 
 ```bash
 python train.py \
@@ -177,18 +179,18 @@ python train.py \
   --task seq_class \
   --batch_size 8 \
   --num_epochs "$EPOCHS" \
-  --model_path bert-base-uncased \
+  --model_path gpt2 \
   --train_method peft \
   --peft_method lora \
   --lora_r 16 \
   --defense none \
   --rng_seed 101 \
   --models_cache "$CACHE" \
-  --output_dir "$OUT/models/bert_lora_r16_clean" \
-  --log_file "$OUT/utility/bert_lora_r16_clean.txt"
+  --output_dir "$OUT/models/gpt2_lora_r16_clean" \
+  --log_file "$OUT/utility/gpt2_lora_r16_clean.txt"
 ```
 
-### BERT IA3
+### GPT2 IA3
 
 ```bash
 python train.py \
@@ -196,30 +198,30 @@ python train.py \
   --task seq_class \
   --batch_size 8 \
   --num_epochs "$EPOCHS" \
-  --model_path bert-base-uncased \
+  --model_path gpt2 \
   --train_method peft \
   --peft_method ia3 \
   --defense none \
   --rng_seed 101 \
   --models_cache "$CACHE" \
-  --output_dir "$OUT/models/bert_ia3_clean" \
-  --log_file "$OUT/utility/bert_ia3_clean.txt"
+  --output_dir "$OUT/models/gpt2_ia3_clean" \
+  --log_file "$OUT/utility/gpt2_ia3_clean.txt"
 ```
 
-### GPT2 Adapter / LoRA / IA3
+### BERT Adapter / LoRA / IA3
 
-GPT2 命令和 BERT 一样，只需要替换：
+BERT optional commands mirror the GPT2 defaults; replace:
 
 ```text
---model_path gpt2
+--model_path bert-base-uncased
 ```
 
 并把输出目录改成：
 
 ```text
-$OUT/models/gpt2_adapter_clean
-$OUT/models/gpt2_lora_r16_clean
-$OUT/models/gpt2_ia3_clean
+$OUT/models/bert_adapter_clean
+$OUT/models/bert_lora_r16_clean
+$OUT/models/bert_ia3_clean
 ```
 
 如果 GPT2 显存不够，先把训练 `--batch_size` 降到 `2` 或 `4`。
@@ -252,14 +254,8 @@ Adapter 的主攻击是 ratio：
 ### Clean / None
 
 ```bash
-python attack_peftleak.py \
-  --dataset sst2 \
-  --split val \
-  --n_inputs "$N_PRIV" \
-  --batch_size "$B_PRIV" \
-  --model_path bert-base-uncased \
-  --finetuned_path "$OUT/models/bert_adapter_clean/final_adapter" \
-  --train_method peft \
+bash scripts/peftleak_eval.sh sst2 "$B_PRIV" gpt2 "$N_PRIV" \
+  --finetuned_path "$OUT/models/gpt2_adapter_clean/final_adapter" \
   --peft_method adapter \
   --peftleak_attack_mode ratio \
   --peftleak_ratio_route public_bins \
@@ -267,22 +263,15 @@ python attack_peftleak.py \
   --peftleak_ratio_public_n_inputs 64 \
   --defense none \
   --device "$DEVICE" \
-  --cache_dir "$CACHE" \
-  > "$OUT/privacy/bert_adapter_ratio_none.txt" 2>&1
+  --cache_dir "$CACHE"
 ```
 
 ### Top-k Sweep
 
 ```bash
 for p in 0.01 0.05 0.1 0.3 0.5; do
-python attack_peftleak.py \
-  --dataset sst2 \
-  --split val \
-  --n_inputs "$N_PRIV" \
-  --batch_size "$B_PRIV" \
-  --model_path bert-base-uncased \
-  --finetuned_path "$OUT/models/bert_adapter_clean/final_adapter" \
-  --train_method peft \
+bash scripts/peftleak_eval.sh sst2 "$B_PRIV" gpt2 "$N_PRIV" \
+  --finetuned_path "$OUT/models/gpt2_adapter_clean/final_adapter" \
   --peft_method adapter \
   --peftleak_attack_mode ratio \
   --peftleak_ratio_route public_bins \
@@ -290,8 +279,7 @@ python attack_peftleak.py \
   --defense topk \
   --defense_topk_ratio "$p" \
   --device "$DEVICE" \
-  --cache_dir "$CACHE" \
-  > "$OUT/privacy/bert_adapter_ratio_topk_${p}.txt" 2>&1
+  --cache_dir "$CACHE"
 done
 ```
 
@@ -299,14 +287,8 @@ done
 
 ```bash
 for b in 2 4 8 16; do
-python attack_peftleak.py \
-  --dataset sst2 \
-  --split val \
-  --n_inputs "$N_PRIV" \
-  --batch_size "$B_PRIV" \
-  --model_path bert-base-uncased \
-  --finetuned_path "$OUT/models/bert_adapter_clean/final_adapter" \
-  --train_method peft \
+bash scripts/peftleak_eval.sh sst2 "$B_PRIV" gpt2 "$N_PRIV" \
+  --finetuned_path "$OUT/models/gpt2_adapter_clean/final_adapter" \
   --peft_method adapter \
   --peftleak_attack_mode ratio \
   --peftleak_ratio_route public_bins \
@@ -314,8 +296,7 @@ python attack_peftleak.py \
   --defense compression \
   --defense_n_bits "$b" \
   --device "$DEVICE" \
-  --cache_dir "$CACHE" \
-  > "$OUT/privacy/bert_adapter_ratio_compression_${b}.txt" 2>&1
+  --cache_dir "$CACHE"
 done
 ```
 
@@ -323,14 +304,8 @@ done
 
 ```bash
 for k in 0.5 0.65 0.75 0.9; do
-python attack_peftleak.py \
-  --dataset sst2 \
-  --split val \
-  --n_inputs "$N_PRIV" \
-  --batch_size "$B_PRIV" \
-  --model_path bert-base-uncased \
-  --finetuned_path "$OUT/models/bert_adapter_clean/final_adapter" \
-  --train_method peft \
+bash scripts/peftleak_eval.sh sst2 "$B_PRIV" gpt2 "$N_PRIV" \
+  --finetuned_path "$OUT/models/gpt2_adapter_clean/final_adapter" \
   --peft_method adapter \
   --peftleak_attack_mode ratio \
   --peftleak_ratio_route public_bins \
@@ -339,8 +314,7 @@ python attack_peftleak.py \
   --defense_lrb_preset proj_only \
   --defense_lrb_keep_ratio_sensitive "$k" \
   --device "$DEVICE" \
-  --cache_dir "$CACHE" \
-  > "$OUT/privacy/bert_adapter_ratio_proj_only_${k}.txt" 2>&1
+  --cache_dir "$CACHE"
 done
 ```
 
@@ -349,14 +323,8 @@ done
 ```bash
 for preset in proj_clip full_lrb; do
   for k in 0.5 0.65; do
-  python attack_peftleak.py \
-    --dataset sst2 \
-    --split val \
-    --n_inputs "$N_PRIV" \
-    --batch_size "$B_PRIV" \
-    --model_path bert-base-uncased \
-    --finetuned_path "$OUT/models/bert_adapter_clean/final_adapter" \
-    --train_method peft \
+  bash scripts/peftleak_eval.sh sst2 "$B_PRIV" gpt2 "$N_PRIV" \
+    --finetuned_path "$OUT/models/gpt2_adapter_clean/final_adapter" \
     --peft_method adapter \
     --peftleak_attack_mode ratio \
     --peftleak_ratio_route public_bins \
@@ -365,8 +333,7 @@ for preset in proj_clip full_lrb; do
     --defense_lrb_preset "$preset" \
     --defense_lrb_keep_ratio_sensitive "$k" \
     --device "$DEVICE" \
-    --cache_dir "$CACHE" \
-    > "$OUT/privacy/bert_adapter_ratio_${preset}_${k}.txt" 2>&1
+    --cache_dir "$CACHE"
   done
 done
 ```
@@ -375,14 +342,8 @@ done
 
 ```bash
 for sigma in 1e-5 1e-4 5e-4 1e-3; do
-python attack_peftleak.py \
-  --dataset sst2 \
-  --split val \
-  --n_inputs "$N_PRIV" \
-  --batch_size "$B_PRIV" \
-  --model_path bert-base-uncased \
-  --finetuned_path "$OUT/models/bert_adapter_clean/final_adapter" \
-  --train_method peft \
+bash scripts/peftleak_eval.sh sst2 "$B_PRIV" gpt2 "$N_PRIV" \
+  --finetuned_path "$OUT/models/gpt2_adapter_clean/final_adapter" \
   --peft_method adapter \
   --peftleak_attack_mode ratio \
   --peftleak_ratio_route public_bins \
@@ -390,17 +351,10 @@ python attack_peftleak.py \
   --defense noise \
   --defense_noise "$sigma" \
   --device "$DEVICE" \
-  --cache_dir "$CACHE" \
-  > "$OUT/privacy/bert_adapter_ratio_noise_${sigma}.txt" 2>&1
+  --cache_dir "$CACHE"
 
-python attack_peftleak.py \
-  --dataset sst2 \
-  --split val \
-  --n_inputs "$N_PRIV" \
-  --batch_size "$B_PRIV" \
-  --model_path bert-base-uncased \
-  --finetuned_path "$OUT/models/bert_adapter_clean/final_adapter" \
-  --train_method peft \
+bash scripts/peftleak_eval.sh sst2 "$B_PRIV" gpt2 "$N_PRIV" \
+  --finetuned_path "$OUT/models/gpt2_adapter_clean/final_adapter" \
   --peft_method adapter \
   --peftleak_attack_mode ratio \
   --peftleak_ratio_route public_bins \
@@ -409,8 +363,7 @@ python attack_peftleak.py \
   --defense_noise "$sigma" \
   --defense_clip_norm 1.0 \
   --device "$DEVICE" \
-  --cache_dir "$CACHE" \
-  > "$OUT/privacy/bert_adapter_ratio_dpsgd_${sigma}.txt" 2>&1
+  --cache_dir "$CACHE"
 done
 ```
 
@@ -428,14 +381,8 @@ LoRA 和 IA3 不报告 ratio 结构化攻击，正式结果使用 opt attack：
 ### LoRA Clean / None
 
 ```bash
-python attack_peftleak.py \
-  --dataset sst2 \
-  --split val \
-  --n_inputs "$N_PRIV" \
-  --batch_size 1 \
-  --model_path bert-base-uncased \
-  --finetuned_path "$OUT/models/bert_lora_r16_clean/final_adapter" \
-  --train_method peft \
+bash scripts/peftleak_eval.sh sst2 1 gpt2 "$N_PRIV" \
+  --finetuned_path "$OUT/models/gpt2_lora_r16_clean/final_adapter" \
   --peft_method lora \
   --peftleak_attack_mode opt \
   --peftleak_steps 100 \
@@ -443,21 +390,14 @@ python attack_peftleak.py \
   --peftleak_match_loss normalized_mse \
   --defense none \
   --device "$DEVICE" \
-  --cache_dir "$CACHE" \
-  > "$OUT/privacy/bert_lora_opt_none.txt" 2>&1
+  --cache_dir "$CACHE"
 ```
 
 ### IA3 Clean / None
 
 ```bash
-python attack_peftleak.py \
-  --dataset sst2 \
-  --split val \
-  --n_inputs "$N_PRIV" \
-  --batch_size 1 \
-  --model_path bert-base-uncased \
-  --finetuned_path "$OUT/models/bert_ia3_clean/final_adapter" \
-  --train_method peft \
+bash scripts/peftleak_eval.sh sst2 1 gpt2 "$N_PRIV" \
+  --finetuned_path "$OUT/models/gpt2_ia3_clean/final_adapter" \
   --peft_method ia3 \
   --peftleak_attack_mode opt \
   --peftleak_steps 100 \
@@ -465,22 +405,21 @@ python attack_peftleak.py \
   --peftleak_match_loss normalized_mse \
   --defense none \
   --device "$DEVICE" \
-  --cache_dir "$CACHE" \
-  > "$OUT/privacy/bert_ia3_opt_none.txt" 2>&1
+  --cache_dir "$CACHE"
 ```
 
 LoRA/IA3 的其他 defense 点复用 Adapter 的 sweep 参数，只需要替换：
 
 ```text
 --peft_method lora
---finetuned_path "$OUT/models/bert_lora_r16_clean/final_adapter"
+--finetuned_path "$OUT/models/gpt2_lora_r16_clean/final_adapter"
 ```
 
 或：
 
 ```text
 --peft_method ia3
---finetuned_path "$OUT/models/bert_ia3_clean/final_adapter"
+--finetuned_path "$OUT/models/gpt2_ia3_clean/final_adapter"
 ```
 
 ## Utility 实验命令
@@ -508,15 +447,15 @@ python train.py \
   --task seq_class \
   --batch_size 8 \
   --num_epochs "$EPOCHS" \
-  --model_path bert-base-uncased \
+  --model_path gpt2 \
   --train_method peft \
   --peft_method adapter \
   --adapter_reduction_factor 16 \
   --defense none \
   --rng_seed "$seed" \
   --models_cache "$CACHE" \
-  --output_dir "$OUT/models/utility_bert_adapter_none_seed${seed}" \
-  --log_file "$OUT/utility/bert_adapter_none_seed${seed}.txt"
+  --output_dir "$OUT/models/utility_gpt2_adapter_none_seed${seed}" \
+  --log_file "$OUT/utility/gpt2_adapter_none_seed${seed}.txt"
 done
 ```
 
@@ -530,7 +469,7 @@ python train.py \
   --task seq_class \
   --batch_size 8 \
   --num_epochs "$EPOCHS" \
-  --model_path bert-base-uncased \
+  --model_path gpt2 \
   --train_method peft \
   --peft_method adapter \
   --adapter_reduction_factor 16 \
@@ -538,8 +477,8 @@ python train.py \
   --defense_topk_ratio "$p" \
   --rng_seed "$seed" \
   --models_cache "$CACHE" \
-  --output_dir "$OUT/models/utility_bert_adapter_topk_${p}_seed${seed}" \
-  --log_file "$OUT/utility/bert_adapter_topk_${p}_seed${seed}.txt"
+  --output_dir "$OUT/models/utility_gpt2_adapter_topk_${p}_seed${seed}" \
+  --log_file "$OUT/utility/gpt2_adapter_topk_${p}_seed${seed}.txt"
 done
 done
 ```
@@ -554,7 +493,7 @@ python train.py \
   --task seq_class \
   --batch_size 8 \
   --num_epochs "$EPOCHS" \
-  --model_path bert-base-uncased \
+  --model_path gpt2 \
   --train_method peft \
   --peft_method adapter \
   --adapter_reduction_factor 16 \
@@ -562,8 +501,8 @@ python train.py \
   --defense_n_bits "$b" \
   --rng_seed "$seed" \
   --models_cache "$CACHE" \
-  --output_dir "$OUT/models/utility_bert_adapter_compression_${b}_seed${seed}" \
-  --log_file "$OUT/utility/bert_adapter_compression_${b}_seed${seed}.txt"
+  --output_dir "$OUT/models/utility_gpt2_adapter_compression_${b}_seed${seed}" \
+  --log_file "$OUT/utility/gpt2_adapter_compression_${b}_seed${seed}.txt"
 done
 done
 ```
@@ -578,7 +517,7 @@ python train.py \
   --task seq_class \
   --batch_size 8 \
   --num_epochs "$EPOCHS" \
-  --model_path bert-base-uncased \
+  --model_path gpt2 \
   --train_method peft \
   --peft_method adapter \
   --adapter_reduction_factor 16 \
@@ -587,8 +526,8 @@ python train.py \
   --defense_lrb_keep_ratio_sensitive "$k" \
   --rng_seed "$seed" \
   --models_cache "$CACHE" \
-  --output_dir "$OUT/models/utility_bert_adapter_proj_only_${k}_seed${seed}" \
-  --log_file "$OUT/utility/bert_adapter_proj_only_${k}_seed${seed}.txt"
+  --output_dir "$OUT/models/utility_gpt2_adapter_proj_only_${k}_seed${seed}" \
+  --log_file "$OUT/utility/gpt2_adapter_proj_only_${k}_seed${seed}.txt"
 done
 done
 ```
@@ -607,16 +546,16 @@ IA3 utility 替换成：
 --peft_method ia3
 ```
 
-GPT2 utility 把：
+BERT utility 把：
 
 ```text
---model_path bert-base-uncased
+--model_path gpt2
 ```
 
 替换成：
 
 ```text
---model_path gpt2
+--model_path bert-base-uncased
 ```
 
 如果显存不够，降低 `--batch_size`。
@@ -641,14 +580,8 @@ Adapter ratio privacy 消融：
 
 ```bash
 for preset in identity_lrb clip_only proj_only proj_clip full_lrb proj_rule_only proj_empirical_only proj_uniform proj_no_empirical; do
-python attack_peftleak.py \
-  --dataset sst2 \
-  --split val \
-  --n_inputs "$N_PRIV" \
-  --batch_size "$B_PRIV" \
-  --model_path bert-base-uncased \
-  --finetuned_path "$OUT/models/bert_adapter_clean/final_adapter" \
-  --train_method peft \
+bash scripts/peftleak_eval.sh sst2 "$B_PRIV" gpt2 "$N_PRIV" \
+  --finetuned_path "$OUT/models/gpt2_adapter_clean/final_adapter" \
   --peft_method adapter \
   --peftleak_attack_mode ratio \
   --peftleak_ratio_route public_bins \
@@ -657,8 +590,7 @@ python attack_peftleak.py \
   --defense_lrb_preset "$preset" \
   --defense_lrb_keep_ratio_sensitive 0.5 \
   --device "$DEVICE" \
-  --cache_dir "$CACHE" \
-  > "$OUT/privacy/bert_adapter_ratio_ablation_${preset}.txt" 2>&1
+  --cache_dir "$CACHE"
 done
 ```
 
@@ -731,12 +663,12 @@ proj_no_empirical
 ## 推荐运行顺序
 
 1. 先跑 `test_peftleak_text_semantics.py` 和 Adapter ratio smoke。
-2. 训练 BERT Adapter clean checkpoint。
+2. 训练 GPT2 Adapter clean checkpoint。
 3. 跑 Adapter ratio privacy：`none`、`proj_only`、`topk`、`compression` 优先。
 4. 看 `rec_token_mean`、`ratio_collision_rate`、`ratio_recovered_hidden_count`，确认 attack 不是空跑。
 5. 补 Adapter utility：`none`、`proj_only@0.5/0.65/0.75/0.9`、`topk@0.1/0.3`、`compression@8/16`。
-6. 跑 BERT LoRA/IA3 opt privacy 和 utility。
-7. 如果 BERT 结果稳定，再扩到 GPT2。
+6. 跑 GPT2 LoRA/IA3 opt privacy 和 utility。
+7. 如果 GPT2 结果稳定，再扩到 BERT。
 8. 最后补消融和弱 baseline：`noise`、`dpsgd`、`soteria`、`mixup`。
 
 ## 最低验收标准
@@ -745,8 +677,8 @@ proj_no_empirical
 
 ```text
 1. test_peftleak_text_semantics.py 在服务器 torch 环境通过。
-2. BERT Adapter ratio smoke 通过。
-3. GPT2 Adapter ratio smoke 通过。
+2. GPT2 Adapter ratio smoke 通过。
+3. BERT Adapter ratio smoke 作为补充通过。
 4. clean/none 在 reportable attack 下有非零恢复。
 5. 每个 privacy 点都有匹配 utility 点。
 6. 主表所有 ratio 行都有 ratio_reportable=true。

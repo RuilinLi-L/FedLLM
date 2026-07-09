@@ -313,7 +313,7 @@ PTG 结果进入论文表的最低门槛：
 ### 2.3 PTG clean
 
 ```bash
-./scripts/ptg_baselines.sh sst2 1 gpt2 10 \
+./scripts/ptg_baselines.sh sst2 1 gpt2 100 \
   --exposure first2,qkv_only \
   --baseline_defense none \
   --finetuned_path ./models/gpt2_sst2_clean_num_epochs_2/final \
