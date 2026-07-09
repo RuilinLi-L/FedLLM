@@ -61,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_dir", default="outputs/peftleak_official_image")
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--patch_recovery_mse_threshold", type=float, default=1e-6)
+    parser.add_argument("--debug_patch_diagnostics", action="store_true")
+    parser.add_argument("--debug_dump_dir", default=None)
     return parser
 
 
@@ -92,9 +94,24 @@ def emit_summary(fields: dict):
         "defense",
         "patch_count",
         "candidate_patch_count",
+        "candidate_count_pos1",
+        "candidate_count_pos2",
+        "candidate_count_pos3",
+        "candidate_count_pos4",
         "clustered_image_count",
         "patch_recovery_count",
         "patch_recovery_rate",
+        "debug_patch_diagnostics",
+        "weight_grad_names",
+        "bias_grad_names",
+        "reconstruct_parity_status",
+        "reconstruct_parity_max_abs_diff",
+        "debug_min_same_position_mse",
+        "debug_min_any_position_mse",
+        "debug_min_same_position_denorm_mse",
+        "debug_min_any_position_denorm_mse",
+        "debug_best_candidate",
+        "debug_dump_path",
         "image_metric_scope",
         "mse",
         "ssim",
@@ -366,22 +383,31 @@ def set_adapter_grads_only(model: ViT):
         param.requires_grad = "adapt1" in _name or "adapt2" in _name
 
 
-def collect_adapter_gradients(model: ViT):
+def official_adapter_gradient_names() -> tuple[list[str], list[str]]:
     weight_names = ["encoder1.mlp.adapt1.weight"]
     bias_names = ["encoder1.mlp.adapt1.bias"]
     for idx in range(2, 12):
         weight_names.extend([f"encoder{idx}.attn.adapt1.weight", f"encoder{idx}.mlp.adapt1.weight"])
         bias_names.extend([f"encoder{idx}.attn.adapt1.bias", f"encoder{idx}.mlp.adapt1.bias"])
-    weight_name_set = set(weight_names)
-    bias_name_set = set(bias_names)
+    return weight_names, bias_names
 
+
+def collect_adapter_gradients(model: ViT):
+    weight_names, bias_names = official_adapter_gradient_names()
+    named_params = dict(model.named_parameters())
     weight_grad = []
     bias_grad = []
-    for name, param in model.named_parameters():
-        if name in weight_name_set:
-            weight_grad.append(param.grad.detach().cpu() if param.grad is not None else None)
-        if name in bias_name_set:
-            bias_grad.append(param.grad.detach().cpu() if param.grad is not None else None)
+    missing_params = [name for name in weight_names + bias_names if name not in named_params]
+    if missing_params:
+        raise RuntimeError(f"Missing official adapter parameters: {missing_params[:5]}")
+
+    for name in weight_names:
+        param = named_params[name]
+        weight_grad.append(param.grad.detach().cpu() if param.grad is not None else None)
+    for name in bias_names:
+        param = named_params[name]
+        bias_grad.append(param.grad.detach().cpu() if param.grad is not None else None)
+
     if any(grad is None for grad in weight_grad + bias_grad):
         missing = [
             name
@@ -417,6 +443,21 @@ def reconstruct_patch_candidates(weight_grad, bias_grad, patch_id: int, w_pos: t
     return candidates
 
 
+def official_formula_patch_candidates(weight_grad, bias_grad, patch_id: int, w_pos: torch.Tensor, scale: float):
+    candidates = []
+    with torch.no_grad():
+        for block_idx in range(len(weight_grad)):
+            for row_idx in range(GAP, len(weight_grad[block_idx]) - 1):
+                rec = (
+                    weight_grad[block_idx][row_idx] - weight_grad[block_idx][row_idx + 1]
+                ) / (bias_grad[block_idx][row_idx] - bias_grad[block_idx][row_idx + 1])
+                if bias_grad[block_idx][row_idx] - bias_grad[block_idx][row_idx + 1]:
+                    rec = rec - w_pos[patch_id]
+                    rec = torch.div(rec, scale)
+                    candidates.append(rec.reshape(3, PATCH_SIZE, PATCH_SIZE).clone().detach())
+    return candidates
+
+
 def recover_candidate_patches(weight_grad, bias_grad, w_glob, mean_inv, std_inv):
     del mean_inv, std_inv
     w_pos = w_glob["patch.position_embeddings"][0]
@@ -426,6 +467,29 @@ def recover_candidate_patches(weight_grad, bias_grad, w_glob, mean_inv, std_inv)
         reconstruct_patch_candidates(weight_grad[10:15], bias_grad[10:15], 3, w_pos, COEFF),
         reconstruct_patch_candidates(weight_grad[15:20], bias_grad[15:20], 4, w_pos, COEFF),
     ]
+
+
+def recover_official_formula_candidates(weight_grad, bias_grad, w_glob):
+    w_pos = w_glob["patch.position_embeddings"][0]
+    return [
+        official_formula_patch_candidates(weight_grad[0:5], bias_grad[0:5], 1, w_pos, COEFF),
+        official_formula_patch_candidates(weight_grad[5:10], bias_grad[5:10], 2, w_pos, COEFF),
+        official_formula_patch_candidates(weight_grad[10:15], bias_grad[10:15], 3, w_pos, COEFF),
+        official_formula_patch_candidates(weight_grad[15:20], bias_grad[15:20], 4, w_pos, COEFF),
+    ]
+
+
+def compare_reconstruction_parity(candidate_by_position, official_candidate_by_position) -> tuple[str, float | None]:
+    max_abs_diff = 0.0
+    for pos_idx, (current, official) in enumerate(zip(candidate_by_position, official_candidate_by_position), start=1):
+        if len(current) != len(official):
+            return f"mismatch_count_pos{pos_idx}:{len(current)}!={len(official)}", None
+        for cand_idx, (left, right) in enumerate(zip(current, official)):
+            diff = float((left.detach().cpu().float() - right.detach().cpu().float()).abs().max().item())
+            if not np.isfinite(diff):
+                return f"mismatch_nonfinite_pos{pos_idx}_cand{cand_idx}", diff
+            max_abs_diff = max(max_abs_diff, diff)
+    return "ok", float(max_abs_diff)
 
 
 def reference_patches(images: torch.Tensor) -> torch.Tensor:
@@ -460,6 +524,122 @@ def count_patch_recovery(candidate_by_position, refs: torch.Tensor, threshold: f
                     exact += 1
                 break
     return int(exact)
+
+
+def flatten_candidate_patches(candidate_by_position) -> tuple[torch.Tensor, torch.Tensor]:
+    patches = []
+    positions = []
+    for position_idx, candidates in enumerate(candidate_by_position):
+        for candidate in candidates:
+            patches.append(candidate.detach().cpu().float())
+            positions.append(position_idx)
+    if not patches:
+        return torch.empty(0, 3, PATCH_SIZE, PATCH_SIZE), torch.empty(0, dtype=torch.long)
+    return torch.stack(patches, dim=0), torch.tensor(positions, dtype=torch.long)
+
+
+def _mse_matrix(candidates: torch.Tensor, refs: torch.Tensor) -> torch.Tensor:
+    flat_candidates = candidates.reshape(candidates.shape[0], -1)
+    flat_refs = refs.reshape(refs.shape[0] * refs.shape[1], -1)
+    return (flat_candidates[:, None, :] - flat_refs[None, :, :]).pow(2).mean(dim=-1).view(
+        candidates.shape[0],
+        refs.shape[0],
+        refs.shape[1],
+    )
+
+
+def _format_best_candidate(mse_matrix: torch.Tensor, positions: torch.Tensor) -> str | None:
+    if mse_matrix.numel() == 0:
+        return None
+    flat_idx = int(torch.argmin(mse_matrix.reshape(-1)).item())
+    sample_count = int(mse_matrix.shape[1])
+    position_count = int(mse_matrix.shape[2])
+    candidate_idx = flat_idx // (sample_count * position_count)
+    rem = flat_idx % (sample_count * position_count)
+    sample_idx = rem // position_count
+    position_idx = rem % position_count
+    candidate_position = int(positions[candidate_idx].item()) if len(positions) else -1
+    mse = float(mse_matrix[candidate_idx, sample_idx, position_idx].item())
+    return (
+        f"candidate={candidate_idx},candidate_pos={candidate_position + 1},"
+        f"best_sample={sample_idx},best_pos={position_idx + 1},mse={mse:.8f}"
+    )
+
+
+def build_patch_diagnostics(candidate_by_position, refs: torch.Tensor, mean_inv: torch.Tensor, std_inv: torch.Tensor):
+    candidates, positions = flatten_candidate_patches(candidate_by_position)
+    if candidates.numel() == 0:
+        empty = torch.empty(0)
+        return {
+            "candidate_patches": candidates,
+            "candidate_positions": positions,
+            "normalized_mse_matrix": torch.empty(0, refs.shape[0], refs.shape[1]),
+            "denorm_mse_matrix": torch.empty(0, refs.shape[0], refs.shape[1]),
+            "same_position_mse": empty,
+            "same_position_denorm_mse": empty,
+            "summary": {
+                "debug_min_same_position_mse": None,
+                "debug_min_any_position_mse": None,
+                "debug_min_same_position_denorm_mse": None,
+                "debug_min_any_position_denorm_mse": None,
+                "debug_best_candidate": None,
+            },
+        }
+
+    refs = refs.detach().cpu().float()
+    normalized_mse = _mse_matrix(candidates, refs)
+    same_position_mse = normalized_mse[torch.arange(candidates.shape[0]), :, positions].min(dim=1).values
+
+    mean = mean_inv.detach().cpu().float()
+    std = std_inv.detach().cpu().float()
+    candidates_denorm = (candidates * std + mean).clamp(0, 1)
+    refs_denorm = (refs * std + mean).clamp(0, 1)
+    denorm_mse = _mse_matrix(candidates_denorm, refs_denorm)
+    same_position_denorm_mse = denorm_mse[torch.arange(candidates.shape[0]), :, positions].min(dim=1).values
+
+    summary = {
+        "debug_min_same_position_mse": float(same_position_mse.min().item()),
+        "debug_min_any_position_mse": float(normalized_mse.min().item()),
+        "debug_min_same_position_denorm_mse": float(same_position_denorm_mse.min().item()),
+        "debug_min_any_position_denorm_mse": float(denorm_mse.min().item()),
+        "debug_best_candidate": _format_best_candidate(normalized_mse, positions),
+    }
+    return {
+        "candidate_patches": candidates,
+        "candidate_positions": positions,
+        "normalized_mse_matrix": normalized_mse,
+        "denorm_mse_matrix": denorm_mse,
+        "same_position_mse": same_position_mse,
+        "same_position_denorm_mse": same_position_denorm_mse,
+        "summary": summary,
+    }
+
+
+def save_patch_diagnostics(
+    debug_dump_dir: str | os.PathLike,
+    diagnostics: dict,
+    images: torch.Tensor,
+    refs: torch.Tensor,
+    weight_names: list[str],
+    bias_names: list[str],
+) -> str:
+    dump_dir = Path(debug_dump_dir)
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    dump_path = dump_dir / "official_image_patch_diagnostics.npz"
+    np.savez_compressed(
+        dump_path,
+        images=images.detach().cpu().float().numpy(),
+        ref_patches=refs.detach().cpu().float().numpy(),
+        candidate_patches=diagnostics["candidate_patches"].detach().cpu().float().numpy(),
+        candidate_positions=diagnostics["candidate_positions"].detach().cpu().numpy(),
+        normalized_mse_matrix=diagnostics["normalized_mse_matrix"].detach().cpu().float().numpy(),
+        denorm_mse_matrix=diagnostics["denorm_mse_matrix"].detach().cpu().float().numpy(),
+        same_position_mse=diagnostics["same_position_mse"].detach().cpu().float().numpy(),
+        same_position_denorm_mse=diagnostics["same_position_denorm_mse"].detach().cpu().float().numpy(),
+        weight_grad_names=np.asarray(weight_names),
+        bias_grad_names=np.asarray(bias_names),
+    )
+    return str(dump_path)
 
 
 def fold_candidate_image(patches: list[torch.Tensor]) -> torch.Tensor:
@@ -580,11 +760,17 @@ def run(args) -> dict:
     loss = criterion(output, y)
     loss.backward()
 
-    weight_grad, bias_grad, _weight_names, _bias_names = collect_adapter_gradients(model)
+    weight_grad, bias_grad, weight_names, bias_names = collect_adapter_gradients(model)
     weight_grad, bias_grad = apply_official_image_defense(weight_grad, bias_grad, args)
     candidate_by_position = recover_candidate_patches(weight_grad, bias_grad, w_glob, mean_inv, std_inv)
+    official_candidate_by_position = recover_official_formula_candidates(weight_grad, bias_grad, w_glob)
+    parity_status, parity_max_abs_diff = compare_reconstruction_parity(
+        candidate_by_position,
+        official_candidate_by_position,
+    )
     refs = reference_patches(images)
-    candidate_patch_count = sum(len(candidates) for candidates in candidate_by_position)
+    candidate_counts = [len(candidates) for candidates in candidate_by_position]
+    candidate_patch_count = sum(candidate_counts)
     patch_count = int(args.batch_size) * NUM_PATCHES
     patch_recovery_count = count_patch_recovery(candidate_by_position, refs, float(args.patch_recovery_mse_threshold))
     diagnostic_mse, diagnostic_ssim, clustered_image_count, image_metric_status = cluster_and_score_images(
@@ -594,7 +780,7 @@ def run(args) -> dict:
         std_inv,
     )
 
-    return {
+    fields = {
         "result_status": "ok",
         "attack": "peftleak_official_image",
         "dataset": args.dataset,
@@ -609,9 +795,16 @@ def run(args) -> dict:
         "defense": args.defense,
         "patch_count": patch_count,
         "candidate_patch_count": candidate_patch_count,
+        "candidate_count_pos1": candidate_counts[0],
+        "candidate_count_pos2": candidate_counts[1],
+        "candidate_count_pos3": candidate_counts[2],
+        "candidate_count_pos4": candidate_counts[3],
         "clustered_image_count": clustered_image_count,
         "patch_recovery_count": patch_recovery_count,
         "patch_recovery_rate": patch_recovery_count / max(1, patch_count),
+        "debug_patch_diagnostics": bool(args.debug_patch_diagnostics),
+        "reconstruct_parity_status": parity_status,
+        "reconstruct_parity_max_abs_diff": parity_max_abs_diff,
         "image_metric_scope": "patch_recovery_primary",
         "mse": None,
         "ssim": None,
@@ -621,6 +814,22 @@ def run(args) -> dict:
         "lpips_status": "unavailable",
         "loss": float(loss.detach().cpu().item()),
     }
+    if args.debug_patch_diagnostics:
+        diagnostics = build_patch_diagnostics(candidate_by_position, refs, mean_inv, std_inv)
+        fields.update(diagnostics["summary"])
+        fields["weight_grad_names"] = ";".join(weight_names)
+        fields["bias_grad_names"] = ";".join(bias_names)
+        fields["debug_dump_path"] = None
+        if args.debug_dump_dir:
+            fields["debug_dump_path"] = save_patch_diagnostics(
+                args.debug_dump_dir,
+                diagnostics,
+                images,
+                refs,
+                weight_names,
+                bias_names,
+            )
+    return fields
 
 
 def main(argv=None) -> int:
