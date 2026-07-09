@@ -74,6 +74,29 @@ bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh --log-dir log/runs/my_run
 bash scripts/run_dager_privacy_sst2_cola_rt_3seed.sh --skip-adaptive
 ```
 
+如果只想跑选定 baseline，使用 selected-baselines runner。它仍然固定三个数据集和三个随机种子，并且每个数据集使用自己的 `finetuned_path`：
+
+```bash
+# 只跑 topk：sst2/cola/rotten_tomatoes x seeds 101/202/303，不跑 none
+bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines topk
+
+# 跑多个 baseline，逗号或空格分隔都可以
+bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines topk,compression
+bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines noise dpsgd mixup soteria
+
+# 只跑 clean anchor；如果要 clean anchor + topk，需要显式写 none,topk
+bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines none
+bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines none,topk
+
+# 默认只跑主参数网格；需要 adaptive check 时显式打开
+bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines topk --run-adaptive
+
+# 手动限制 GPU 可见范围；不传时默认自动选择空闲可见 GPU
+bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines dpsgd_opacus --gpu 2
+```
+
+selected-baselines runner 的主参数网格与 `scripts/run_dager_privacy_one_dataset_baselines.sh` 对齐；非 `none` baseline 会逐参数传 `--baseline_param` 和 `--skip_anchor_none`，所以“选了哪个就只跑哪个”。`--baselines topk` 不会补跑 clean `none`；只有显式选择 `none` 或 `all` 时才会生成 clean anchor row。
+
 GPU 参数含义：
 
 - `--gpu auto`：默认值，不改当前 `CUDA_VISIBLE_DEVICES`，在当前可见 GPU 中自动选空闲卡。
