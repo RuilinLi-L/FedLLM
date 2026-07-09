@@ -61,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_dir", default="outputs/peftleak_official_image")
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--patch_recovery_mse_threshold", type=float, default=1e-6)
+    parser.add_argument("--patch_recovery_denorm_thresholds", default="0.001,0.005,0.010")
     parser.add_argument("--debug_patch_diagnostics", action="store_true")
     parser.add_argument("--debug_dump_dir", default=None)
     return parser
@@ -99,8 +100,18 @@ def emit_summary(fields: dict):
         "candidate_count_pos3",
         "candidate_count_pos4",
         "clustered_image_count",
+        "patch_recovery_metric",
         "patch_recovery_count",
         "patch_recovery_rate",
+        "denorm_recovered_patch_count_0.001",
+        "denorm_recovered_patch_rate_0.001",
+        "denorm_recovered_patch_count_0.005",
+        "denorm_recovered_patch_rate_0.005",
+        "denorm_recovered_patch_count_0.010",
+        "denorm_recovered_patch_rate_0.010",
+        "denorm_recovered_patch_mse_mean",
+        "denorm_recovered_patch_mse_median",
+        "denorm_recovered_patch_mse_min",
         "debug_patch_diagnostics",
         "weight_grad_names",
         "bias_grad_names",
@@ -125,8 +136,13 @@ def emit_summary(fields: dict):
         "error_message",
     ]
     print(SUMMARY_START, flush=True)
+    printed = set()
     for key in ordered_keys:
         if key in fields:
+            print(f"{key}={fmt_summary_value(fields.get(key))}", flush=True)
+            printed.add(key)
+    for key in fields:
+        if key not in printed:
             print(f"{key}={fmt_summary_value(fields.get(key))}", flush=True)
     print(SUMMARY_END, flush=True)
 
@@ -526,6 +542,109 @@ def count_patch_recovery(candidate_by_position, refs: torch.Tensor, threshold: f
     return int(exact)
 
 
+def parse_denorm_threshold_specs(raw_thresholds: str) -> list[tuple[float, str]]:
+    specs = []
+    for token in str(raw_thresholds).split(","):
+        label = token.strip()
+        if not label:
+            continue
+        threshold = float(label)
+        if threshold <= 0.0:
+            raise ValueError("--patch_recovery_denorm_thresholds values must be positive.")
+        specs.append((threshold, label))
+    if not specs:
+        raise ValueError("--patch_recovery_denorm_thresholds must contain at least one threshold.")
+    return specs
+
+
+def _denorm_patches(patches: torch.Tensor, mean_inv: torch.Tensor, std_inv: torch.Tensor) -> torch.Tensor:
+    mean = mean_inv.detach().cpu().float()
+    std = std_inv.detach().cpu().float()
+    return (patches.detach().cpu().float() * std + mean).clamp(0, 1)
+
+
+def _greedy_one_to_one_matches(mse: torch.Tensor, threshold: float, candidate_offset: int, position_idx: int):
+    if mse.numel() == 0:
+        return []
+    pairs = []
+    for candidate_idx in range(int(mse.shape[0])):
+        for sample_idx in range(int(mse.shape[1])):
+            pairs.append((float(mse[candidate_idx, sample_idx].item()), candidate_idx, sample_idx))
+    pairs.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    used_candidates = set()
+    used_samples = set()
+    matches = []
+    for value, candidate_idx, sample_idx in pairs:
+        if value >= threshold:
+            break
+        if candidate_idx in used_candidates or sample_idx in used_samples:
+            continue
+        used_candidates.add(candidate_idx)
+        used_samples.add(sample_idx)
+        matches.append((candidate_offset + candidate_idx, sample_idx, position_idx + 1, value))
+    return matches
+
+
+def build_denorm_recovery_metrics(
+    candidate_by_position,
+    refs: torch.Tensor,
+    mean_inv: torch.Tensor,
+    std_inv: torch.Tensor,
+    threshold_specs: list[tuple[float, str]],
+):
+    refs = refs.detach().cpu().float()
+    matches_by_label = {label: [] for _threshold, label in threshold_specs}
+    candidate_offset = 0
+
+    for position_idx, candidates in enumerate(candidate_by_position):
+        if not candidates:
+            continue
+        candidate_tensor = torch.stack([candidate.detach().cpu().float() for candidate in candidates], dim=0)
+        candidate_denorm = _denorm_patches(candidate_tensor, mean_inv, std_inv)
+        ref_denorm = _denorm_patches(refs[:, position_idx], mean_inv, std_inv)
+        mse = (
+            candidate_denorm.reshape(candidate_denorm.shape[0], -1)[:, None, :]
+            - ref_denorm.reshape(ref_denorm.shape[0], -1)[None, :, :]
+        ).pow(2).mean(dim=-1)
+
+        for threshold, label in threshold_specs:
+            matches_by_label[label].extend(
+                _greedy_one_to_one_matches(
+                    mse,
+                    threshold,
+                    candidate_offset=candidate_offset,
+                    position_idx=position_idx,
+                )
+            )
+        candidate_offset += len(candidates)
+
+    metrics = {}
+    patch_count = max(1, int(refs.shape[0]) * int(refs.shape[1]))
+    for _threshold, label in threshold_specs:
+        count = len(matches_by_label[label])
+        metrics[f"denorm_recovered_patch_count_{label}"] = int(count)
+        metrics[f"denorm_recovered_patch_rate_{label}"] = float(count / patch_count)
+
+    primary_label = "0.005" if "0.005" in matches_by_label else threshold_specs[len(threshold_specs) // 2][1]
+    primary_mses = [match[3] for match in matches_by_label[primary_label]]
+    if primary_mses:
+        metrics["denorm_recovered_patch_mse_mean"] = float(np.mean(primary_mses))
+        metrics["denorm_recovered_patch_mse_median"] = float(np.median(primary_mses))
+        metrics["denorm_recovered_patch_mse_min"] = float(np.min(primary_mses))
+    else:
+        metrics["denorm_recovered_patch_mse_mean"] = None
+        metrics["denorm_recovered_patch_mse_median"] = None
+        metrics["denorm_recovered_patch_mse_min"] = None
+
+    return {
+        "summary": metrics,
+        "thresholds": threshold_specs,
+        "matches_by_label": matches_by_label,
+        "primary_label": primary_label,
+    }
+
+
 def flatten_candidate_patches(candidate_by_position) -> tuple[torch.Tensor, torch.Tensor]:
     patches = []
     positions = []
@@ -622,23 +741,34 @@ def save_patch_diagnostics(
     refs: torch.Tensor,
     weight_names: list[str],
     bias_names: list[str],
+    denorm_recovery: dict | None = None,
 ) -> str:
     dump_dir = Path(debug_dump_dir)
     dump_dir.mkdir(parents=True, exist_ok=True)
     dump_path = dump_dir / "official_image_patch_diagnostics.npz"
-    np.savez_compressed(
-        dump_path,
-        images=images.detach().cpu().float().numpy(),
-        ref_patches=refs.detach().cpu().float().numpy(),
-        candidate_patches=diagnostics["candidate_patches"].detach().cpu().float().numpy(),
-        candidate_positions=diagnostics["candidate_positions"].detach().cpu().numpy(),
-        normalized_mse_matrix=diagnostics["normalized_mse_matrix"].detach().cpu().float().numpy(),
-        denorm_mse_matrix=diagnostics["denorm_mse_matrix"].detach().cpu().float().numpy(),
-        same_position_mse=diagnostics["same_position_mse"].detach().cpu().float().numpy(),
-        same_position_denorm_mse=diagnostics["same_position_denorm_mse"].detach().cpu().float().numpy(),
-        weight_grad_names=np.asarray(weight_names),
-        bias_grad_names=np.asarray(bias_names),
-    )
+    payload = {
+        "images": images.detach().cpu().float().numpy(),
+        "ref_patches": refs.detach().cpu().float().numpy(),
+        "candidate_patches": diagnostics["candidate_patches"].detach().cpu().float().numpy(),
+        "candidate_positions": diagnostics["candidate_positions"].detach().cpu().numpy(),
+        "normalized_mse_matrix": diagnostics["normalized_mse_matrix"].detach().cpu().float().numpy(),
+        "denorm_mse_matrix": diagnostics["denorm_mse_matrix"].detach().cpu().float().numpy(),
+        "same_position_mse": diagnostics["same_position_mse"].detach().cpu().float().numpy(),
+        "same_position_denorm_mse": diagnostics["same_position_denorm_mse"].detach().cpu().float().numpy(),
+        "weight_grad_names": np.asarray(weight_names),
+        "bias_grad_names": np.asarray(bias_names),
+    }
+    if denorm_recovery is not None:
+        payload["denorm_recovery_thresholds"] = np.asarray(
+            [threshold for threshold, _label in denorm_recovery["thresholds"]],
+            dtype=np.float64,
+        )
+        for _threshold, label in denorm_recovery["thresholds"]:
+            payload[f"denorm_recovery_matches_{label}"] = np.asarray(
+                denorm_recovery["matches_by_label"].get(label, []),
+                dtype=np.float64,
+            )
+    np.savez_compressed(dump_path, **payload)
     return str(dump_path)
 
 
@@ -772,6 +902,14 @@ def run(args) -> dict:
     candidate_counts = [len(candidates) for candidates in candidate_by_position]
     candidate_patch_count = sum(candidate_counts)
     patch_count = int(args.batch_size) * NUM_PATCHES
+    denorm_threshold_specs = parse_denorm_threshold_specs(args.patch_recovery_denorm_thresholds)
+    denorm_recovery = build_denorm_recovery_metrics(
+        candidate_by_position,
+        refs,
+        mean_inv,
+        std_inv,
+        denorm_threshold_specs,
+    )
     patch_recovery_count = count_patch_recovery(candidate_by_position, refs, float(args.patch_recovery_mse_threshold))
     diagnostic_mse, diagnostic_ssim, clustered_image_count, image_metric_status = cluster_and_score_images(
         candidate_by_position,
@@ -800,12 +938,13 @@ def run(args) -> dict:
         "candidate_count_pos3": candidate_counts[2],
         "candidate_count_pos4": candidate_counts[3],
         "clustered_image_count": clustered_image_count,
+        "patch_recovery_metric": "strict_normalized_debug",
         "patch_recovery_count": patch_recovery_count,
         "patch_recovery_rate": patch_recovery_count / max(1, patch_count),
         "debug_patch_diagnostics": bool(args.debug_patch_diagnostics),
         "reconstruct_parity_status": parity_status,
         "reconstruct_parity_max_abs_diff": parity_max_abs_diff,
-        "image_metric_scope": "patch_recovery_primary",
+        "image_metric_scope": "denorm_recovered_patch_primary",
         "mse": None,
         "ssim": None,
         "diagnostic_mse": diagnostic_mse,
@@ -814,6 +953,7 @@ def run(args) -> dict:
         "lpips_status": "unavailable",
         "loss": float(loss.detach().cpu().item()),
     }
+    fields.update(denorm_recovery["summary"])
     if args.debug_patch_diagnostics:
         diagnostics = build_patch_diagnostics(candidate_by_position, refs, mean_inv, std_inv)
         fields.update(diagnostics["summary"])
@@ -828,6 +968,7 @@ def run(args) -> dict:
                 refs,
                 weight_names,
                 bias_names,
+                denorm_recovery=denorm_recovery,
             )
     return fields
 
