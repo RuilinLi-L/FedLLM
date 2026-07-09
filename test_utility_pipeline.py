@@ -105,6 +105,68 @@ def test_make_private_with_opacus_sets_module_to_train_mode():
     assert_true(module.training, "module should remain in training mode after Opacus preparation")
 
 
+def test_make_private_with_opacus_wraps_mapping_dataset_for_empty_batches():
+    original_import = dop.import_privacy_engine
+    observed = {}
+
+    class MappingDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, index):
+            return {
+                "input_ids": torch.tensor([index + 1, index + 2], dtype=torch.long),
+                "labels": torch.tensor(index, dtype=torch.long),
+            }
+
+    def collate(features):
+        return {
+            "input_ids": torch.stack([feature["input_ids"] for feature in features]),
+            "labels": torch.stack([feature["labels"] for feature in features]),
+        }
+
+    class FakePrivacyEngine:
+        def __init__(self, accountant):
+            pass
+
+        def make_private(self, *, module, optimizer, data_loader, noise_multiplier, max_grad_norm):
+            sample = data_loader.dataset[0]
+            batch = next(iter(data_loader))
+            observed["sample_is_tuple"] = isinstance(sample, tuple)
+            observed["sample_dtypes"] = tuple(value.dtype for value in sample)
+            observed["batch_keys"] = tuple(batch.keys())
+            observed["input_shape"] = tuple(batch["input_ids"].shape)
+            return module, optimizer, data_loader
+
+    args = SimpleNamespace(
+        defense="dpsgd_opacus",
+        defense_noise=0.01,
+        defense_clip_norm=1.0,
+        defense_dp_delta=1e-5,
+    )
+    module = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.SGD(module.parameters(), lr=0.1)
+    data_loader = torch.utils.data.DataLoader(
+        MappingDataset(),
+        batch_size=1,
+        collate_fn=collate,
+    )
+
+    try:
+        dop.import_privacy_engine = lambda: FakePrivacyEngine
+        dop.make_private_with_opacus(module, optimizer, data_loader, args)
+    finally:
+        dop.import_privacy_engine = original_import
+
+    assert_true(observed["sample_is_tuple"], "mapping datasets should expose tensor tuples to Opacus")
+    assert_true(
+        observed["sample_dtypes"] == (torch.long, torch.long),
+        "Opacus fallback should see torch dtypes, not Python key types",
+    )
+    assert_true(observed["batch_keys"] == ("input_ids", "labels"), "wrapped collator should restore mapping batches")
+    assert_true(observed["input_shape"] == (1, 2), "wrapped collator should preserve batch tensor shapes")
+
+
 def test_grad_similarity_metrics_returns_cosine_and_norm_retention():
     base = (torch.tensor([1.0, 0.0]), torch.tensor([0.0, 1.0]))
     defended = (torch.tensor([0.5, 0.0]), torch.tensor([0.0, 0.5]))
@@ -491,6 +553,7 @@ def main():
                 test_defense_param_spec_tracks_shared_cli_mapping,
                 test_dpsgd_opacus_summary_fields_include_accounting_terms,
                 test_make_private_with_opacus_sets_module_to_train_mode,
+                test_make_private_with_opacus_wraps_mapping_dataset_for_empty_batches,
                 test_grad_similarity_metrics_returns_cosine_and_norm_retention,
             ]
         )

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 
 DPSGD_OPACUS_DEFENSE = "dpsgd_opacus"
@@ -17,6 +19,32 @@ class DPSGDOpacusConfig:
     max_grad_norm: float
     delta: float
     accountant: str = DPSGD_OPACUS_ACCOUNTANT
+
+
+class _OpacusTensorTupleDataset(Dataset):
+    def __init__(self, dataset, keys):
+        self.dataset = dataset
+        self.keys = tuple(keys)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        item = self.dataset[index]
+        return tuple(item[key] for key in self.keys)
+
+
+class _TupleToMappingCollator:
+    def __init__(self, keys, collate_fn):
+        self.keys = tuple(keys)
+        self.collate_fn = collate_fn
+
+    def __call__(self, features):
+        mapped = [
+            {key: value for key, value in zip(self.keys, feature)}
+            for feature in features
+        ]
+        return self.collate_fn(mapped)
 
 
 def dpsgd_opacus_active(args) -> bool:
@@ -72,11 +100,44 @@ def import_privacy_engine():
     return PrivacyEngine
 
 
+def _wrap_mapping_dataset_for_opacus_empty_batches(data_loader):
+    dataset = getattr(data_loader, "dataset", None)
+    if dataset is None:
+        return data_loader
+    try:
+        if len(dataset) == 0:
+            return data_loader
+        sample = dataset[0]
+    except Exception:
+        return data_loader
+    if not isinstance(sample, Mapping):
+        return data_loader
+
+    wrapped_dataset = _OpacusTensorTupleDataset(dataset, sample.keys())
+    wrapped_collator = _TupleToMappingCollator(sample.keys(), data_loader.collate_fn)
+    return DataLoader(
+        wrapped_dataset,
+        batch_size=data_loader.batch_size,
+        shuffle=False,
+        collate_fn=wrapped_collator,
+        drop_last=data_loader.drop_last,
+        num_workers=data_loader.num_workers,
+        pin_memory=data_loader.pin_memory,
+        timeout=data_loader.timeout,
+        worker_init_fn=data_loader.worker_init_fn,
+        multiprocessing_context=data_loader.multiprocessing_context,
+        generator=data_loader.generator,
+        prefetch_factor=data_loader.prefetch_factor,
+        persistent_workers=data_loader.persistent_workers,
+    )
+
+
 def make_private_with_opacus(module, optimizer, data_loader, args):
     cfg = dpsgd_opacus_config(args)
     PrivacyEngine = import_privacy_engine()
     privacy_engine = PrivacyEngine(accountant="rdp")
     module.train()
+    data_loader = _wrap_mapping_dataset_for_opacus_empty_batches(data_loader)
     private_module, private_optimizer, private_loader = privacy_engine.make_private(
         module=module,
         optimizer=optimizer,
@@ -97,7 +158,7 @@ def freeze_position_embeddings(model) -> int:
 
 
 def is_empty_opacus_batch(batch) -> bool:
-    if isinstance(batch, dict):
+    if isinstance(batch, Mapping):
         tensors = [value for value in batch.values() if torch.is_tensor(value)]
         return bool(tensors) and any(tensor.nelement() == 0 for tensor in tensors)
     if isinstance(batch, (list, tuple)):
