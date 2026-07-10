@@ -25,7 +25,7 @@ from attacks.partial_transformer_gradients import (
     validate_ptg_selector_args,
 )
 from attacks.peftleak_text import get_token_embedding_matrix, summarize_token_predictions
-from attack_peftleak import compute_text_metrics
+from attack_peftleak import compute_text_metrics, validate_text_metric_backend
 from utils.defense_common import add_shared_defense_args, defense_param_spec, fmt_summary_value, safe_mean
 from utils.defenses import apply_defense, requires_gradient_generation_defense
 from utils.dpsgd_opacus import (
@@ -202,6 +202,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ptg_grad_clip", type=float, default=None)
     parser.add_argument("--ptg_print_every", type=int, default=None)
     parser.add_argument("--ptg_batch_match", type=str, default="auto", choices=["auto", "rouge1", "none"])
+    parser.add_argument(
+        "--ptg_rouge_backend",
+        type=str,
+        default="datasets",
+        choices=["datasets", "simple_ngram"],
+        help="ROUGE implementation for PTG summaries. PTG validates this backend before the attack and never falls back automatically.",
+    )
 
     add_shared_defense_args(parser, default_grad_mode="eval")
     return parser
@@ -672,6 +679,7 @@ def _emit_result_summary(args, tracker):
         ("ptg_swap_every", args.ptg_swap_every),
         ("ptg_use_swaps_at_end", args.ptg_use_swaps_at_end),
         ("ptg_batch_match", args.ptg_batch_match),
+        ("ptg_rouge_backend_requested", args.ptg_rouge_backend),
         ("ptg_print_every", args.ptg_print_every),
         ("selected_gradient_count", tracker.get("selected_gradient_count")),
         ("selected_gradient_names", tracker.get("selected_gradient_names")),
@@ -1007,7 +1015,11 @@ def _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=None, lm_tokeni
         optimizer.zero_grad(set_to_none=True)
         recover_idx += 1
 
-    tracker["aggregate_metrics"] = compute_text_metrics(predictions, references)
+    tracker["aggregate_metrics"] = compute_text_metrics(
+        predictions,
+        references,
+        backend=args.ptg_rouge_backend,
+    )
     if tracker["last_total_time"] is None:
         tracker["last_total_time"] = str(datetime.timedelta(seconds=time.time() - start_time)).split(".")[0]
     record_dpsgd_opacus_summary(args, tracker, privacy_engine)
@@ -1029,6 +1041,8 @@ def main(argv=None):
     start_time = time.time()
 
     try:
+        validate_text_metric_backend(args.ptg_rouge_backend)
+        print(f"[ptg] ROUGE backend: {args.ptg_rouge_backend}", flush=True)
         lm_model, lm_tokenizer = _load_ptg_lm(args)
         if args.defense == DPSGD_OPACUS_DEFENSE or (
             args.defense == "dpsgd" and args.ptg_dpsgd_mode == "source_opacus"
@@ -1063,7 +1077,11 @@ def main(argv=None):
                 flush=True,
             )
 
-        tracker["aggregate_metrics"] = compute_text_metrics(predictions, references)
+        tracker["aggregate_metrics"] = compute_text_metrics(
+            predictions,
+            references,
+            backend=args.ptg_rouge_backend,
+        )
         if tracker["last_total_time"] is None:
             tracker["last_total_time"] = str(datetime.timedelta(seconds=time.time() - start_time)).split(".")[0]
         _emit_result_summary(args, tracker)

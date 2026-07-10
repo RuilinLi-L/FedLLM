@@ -215,6 +215,94 @@ def test_partial_attack_surfaces_do_not_mix_in_privacy_aggregation():
     )
 
 
+def test_rouge_backends_do_not_mix_in_privacy_aggregation():
+    base = {
+        "log_kind": "attack_dager",
+        "attack": "partial_transformer_gradients",
+        "dataset": "sst2",
+        "batch_size": "1",
+        "train_method": "full",
+        "defense": "none",
+        "defense_param_name": "n/a",
+        "defense_param_value": "n/a",
+        "result_status": "ok",
+        "n_inputs_requested": "1",
+        "n_inputs_completed": "1",
+        "gradient_layer_subset": "first2",
+        "gradient_param_filter": "all",
+        "partial_attack_variant": "ptg_gradient_matching",
+        "rec_token_mean": "0.1",
+    }
+    rows = [
+        {
+            **base,
+            "rouge_backend": "datasets",
+            "ptg_rouge_backend_requested": "datasets",
+            "agg_r1fm_r2fm": "15",
+        },
+        {
+            **base,
+            "rouge_backend": "simple_ngram",
+            "ptg_rouge_backend_requested": "simple_ngram",
+            "agg_r1fm_r2fm": "30",
+        },
+    ]
+
+    anchors = build_attack_anchor_results(rows)
+    assert_true(len(anchors) == 2, f"ROUGE backends must not aggregate together: {anchors}")
+    by_backend = {row["rouge_backend"]: row for row in anchors}
+    assert_true(by_backend["datasets"]["agg_r1fm_r2fm"] == "15.000000", "datasets ROUGE should remain isolated")
+    assert_true(
+        by_backend["simple_ngram"]["agg_r1fm_r2fm"] == "30.000000",
+        "simple-ngram ROUGE should remain isolated",
+    )
+
+
+def test_rouge_backends_do_not_overwrite_each_other_in_tradeoff_results():
+    utility = {
+        "log_kind": "train",
+        "dataset": "sst2",
+        "batch_size": "1",
+        "train_method": "full",
+        "defense": "none",
+        "defense_param_name": "n/a",
+        "defense_param_value": "n/a",
+        "result_status": "ok",
+        "eval_accuracy": "0.9",
+    }
+    attack = {
+        "log_kind": "attack_dager",
+        "attack": "partial_transformer_gradients",
+        "dataset": "sst2",
+        "batch_size": "1",
+        "train_method": "full",
+        "defense": "none",
+        "defense_param_name": "n/a",
+        "defense_param_value": "n/a",
+        "result_status": "ok",
+        "n_inputs_requested": "1",
+        "n_inputs_completed": "1",
+        "gradient_layer_subset": "first2",
+        "gradient_param_filter": "all",
+        "partial_attack_variant": "ptg_gradient_matching",
+        "rec_token_mean": "0.1",
+    }
+    rows = [
+        utility,
+        {**attack, "rouge_backend": "datasets", "agg_r1fm_r2fm": "15"},
+        {**attack, "rouge_backend": "simple_ngram", "agg_r1fm_r2fm": "30"},
+    ]
+
+    tradeoff = build_privacy_utility_tradeoff(rows)
+    assert_true(len(tradeoff) == 2, f"ROUGE backends must not overwrite each other: {tradeoff}")
+    by_backend = {row["rouge_backend"]: row for row in tradeoff}
+    assert_true(by_backend["datasets"]["agg_r1fm_r2fm"] == "15.000000", "datasets tradeoff should remain isolated")
+    assert_true(
+        by_backend["simple_ngram"]["agg_r1fm_r2fm"] == "30.000000",
+        "simple-ngram tradeoff should remain isolated",
+    )
+
+
 def test_ptg_attack_surface_and_losses_are_preserved():
     rows = [
         {
@@ -417,6 +505,8 @@ def main():
         test_prefix_scope_ignores_na_placeholders_when_metadata_is_available,
         test_adapter_scope_is_supported_and_keeps_reduction_factor,
         test_partial_attack_surfaces_do_not_mix_in_privacy_aggregation,
+        test_rouge_backends_do_not_mix_in_privacy_aggregation,
+        test_rouge_backends_do_not_overwrite_each_other_in_tradeoff_results,
         test_ptg_attack_surface_and_losses_are_preserved,
         test_unsupported_partial_attack_status_is_preserved,
         test_adaptive_fallback_summary_stays_in_adaptive_group,

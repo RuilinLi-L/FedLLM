@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -20,6 +21,7 @@ from attacks.partial_transformer_gradients import (
     selected_partial_gradient_tensors,
 )
 from attack_partial_gradient import _capture_source_opacus_grads, _resolve_ignored_token_ids, _validate_args, build_parser
+from attack_peftleak import compute_text_metrics, validate_text_metric_backend
 
 
 def assert_true(condition, message):
@@ -692,6 +694,45 @@ def test_dpsgd_opacus_defense_selects_source_opacus_mode():
     assert_true(args.defense_dp_delta == 1e-5, "dpsgd_opacus should default delta to 1e-5")
 
 
+def test_ptg_rouge_backend_defaults_to_strict_datasets():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--dataset",
+            "sst2",
+            "--split",
+            "test",
+            "--n_inputs",
+            "2",
+            "--finetuned_path",
+            "dummy",
+        ]
+    )
+    _validate_args(args)
+    assert_true(args.ptg_rouge_backend == "datasets", "PTG should default to strict datasets ROUGE")
+
+
+def test_explicit_simple_ngram_backend_never_loads_datasets_metric():
+    with patch(
+        "attack_peftleak._load_datasets_rouge_metric",
+        side_effect=AssertionError("simple_ngram must not load datasets ROUGE"),
+    ):
+        validate_text_metric_backend("simple_ngram")
+        summary = compute_text_metrics(["one two"], ["one two"], backend="simple_ngram")
+    assert_true(summary["rouge_backend"] == "simple_ngram", "explicit simple backend should be recorded")
+    assert_true(summary["agg_r1fm_r2fm"] == 200.0, "identical text should have perfect simple ROUGE-1/2")
+
+
+def test_strict_datasets_backend_does_not_fallback_on_failure():
+    with patch("attack_peftleak._load_datasets_rouge_metric", side_effect=RuntimeError("metric cache missing")):
+        try:
+            validate_text_metric_backend("datasets")
+        except RuntimeError as exc:
+            assert_true("No automatic metric fallback" in str(exc), "strict failure should explain the no-fallback policy")
+        else:
+            raise AssertionError("strict datasets preflight should fail instead of silently falling back")
+
+
 def main():
     tests = [
         test_selected_partial_gradient_tensors_ignores_hidden_gradients,
@@ -715,6 +756,9 @@ def main():
         test_source_opacus_capture_uses_parameter_grads,
         test_ptg_variant_constant_names_summary_variant,
         test_dpsgd_opacus_defense_selects_source_opacus_mode,
+        test_ptg_rouge_backend_defaults_to_strict_datasets,
+        test_explicit_simple_ngram_backend_never_loads_datasets_metric,
+        test_strict_datasets_backend_does_not_fallback_on_failure,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

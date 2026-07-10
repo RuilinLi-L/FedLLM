@@ -1108,6 +1108,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             row.get("defense", "none"),
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
+            row.get("rouge_backend", row.get("ptg_rouge_backend_requested", "unknown")),
         )
         grouped.setdefault(key, []).append(row)
 
@@ -1133,6 +1134,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             defense,
             param_name,
             param_value,
+            rouge_backend,
         ) = key
         valid_items = [item for item in items if _is_complete_successful_attack(item)]
         incomplete = [item for item in items if not _is_complete_successful_attack(item)]
@@ -1157,6 +1159,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             "defense": defense,
             "defense_param_name": param_name,
             "defense_param_value": param_value,
+            "rouge_backend": rouge_backend,
             "n_privacy_runs": str(len(items)),
             "n_privacy_valid_runs": str(len(valid_items)),
             "failed_or_incomplete_privacy_runs": str(len(incomplete)),
@@ -1221,6 +1224,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             "ptg_swap_every",
             "ptg_use_swaps_at_end",
             "ptg_batch_match",
+            "ptg_rouge_backend_requested",
             "ptg_print_every",
             "selected_gradient_count",
             "selected_gradient_names",
@@ -1279,6 +1283,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("adaptive_attack_profile", "none"),
             row.get("defense", ""),
             row.get("defense_param_value", ""),
+            row.get("rouge_backend", row.get("ptg_rouge_backend_requested", "unknown")),
         ): row
         for row in attack_rows
     }
@@ -1320,6 +1325,8 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row["agg_rouge1_fm"] = attack.get("agg_rouge1_fm", "")
             row["agg_rouge2_fm"] = attack.get("agg_rouge2_fm", "")
             row["agg_r1fm_r2fm"] = attack.get("agg_r1fm_r2fm", "")
+            row["rouge_backend"] = attack.get("rouge_backend", "")
+            row["ptg_rouge_backend_requested"] = attack.get("ptg_rouge_backend_requested", "")
             row["ptg_initial_loss"] = attack.get("ptg_initial_loss", "")
             row["ptg_final_loss"] = attack.get("ptg_final_loss", "")
             row["ptg_loss_reduction"] = attack.get("ptg_loss_reduction", "")
@@ -1467,6 +1474,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
                     attack.get("adaptive_attack_profile", "none"),
                     defense,
                     param_value,
+                    attack.get("rouge_backend", attack.get("ptg_rouge_backend_requested", "unknown")),
                 )
             )
         out.append(make_tradeoff_row(utility, attack))

@@ -10,6 +10,7 @@
 #   --baseline_param <value>
 #   --full_sweep
 #   --lrb_main_k <value>
+#   --rouge_backend <datasets|simple_ngram>
 #   --python <python executable>
 
 set -euo pipefail
@@ -37,6 +38,7 @@ BASELINE_DEFENSE=""
 BASELINE_PARAM=""
 FULL_SWEEP=0
 LRB_MAIN_K="0.5"
+ROUGE_BACKEND="datasets"
 PYTHON_BIN="${PYTHON:-python}"
 EXTRA=()
 
@@ -96,6 +98,14 @@ parse_script_args() {
         ;;
       --lrb_main_k=*)
         LRB_MAIN_K="${arg#*=}"
+        idx=$((idx + 1))
+        ;;
+      --rouge_backend|--ptg_rouge_backend)
+        ROUGE_BACKEND="${RAW_EXTRA[$((idx + 1))]:-}"
+        idx=$((idx + 2))
+        ;;
+      --rouge_backend=*|--ptg_rouge_backend=*)
+        ROUGE_BACKEND="${arg#*=}"
         idx=$((idx + 1))
         ;;
       --python)
@@ -215,6 +225,14 @@ defense_param_label() {
 
 parse_script_args
 
+case "$ROUGE_BACKEND" in
+  datasets|simple_ngram) ;;
+  *)
+    echo "[ptg] unsupported --rouge_backend: ${ROUGE_BACKEND}; use datasets or simple_ngram." >&2
+    exit 2
+    ;;
+esac
+
 if ! has_extra_flag "--finetuned_path"; then
   echo "[ptg] pass --finetuned_path PATH; attack_partial_gradient.py requires a seq_class checkpoint." >&2
   exit 2
@@ -269,6 +287,7 @@ results_md="${run_dir}/results.md"
   echo "exposures=${exposures[*]}"
   echo "defenses=${defenses[*]}"
   echo "lrb_main_k=${LRB_MAIN_K}"
+  echo "rouge_backend_requested=${ROUGE_BACKEND}"
 } >"$summary_path"
 
 echo "[ptg] Run directory: ${run_dir}" >&2
@@ -285,6 +304,7 @@ BASE=(
   --cache_dir ./models_cache
   --device cuda
   --attn_implementation eager
+  --ptg_rouge_backend "$ROUGE_BACKEND"
 )
 
 variant_files=()

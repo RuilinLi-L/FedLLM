@@ -199,41 +199,91 @@ def _rouge_l_f1(predictions, references) -> float:
     return float(np.mean(scores)) * 100.0 if scores else 0.0
 
 
-def compute_text_metrics(predictions, references):
-    try:
-        from datasets import load_metric
+TEXT_METRIC_BACKENDS = {"auto", "datasets", "simple_ngram"}
 
-        metric = load_metric("rouge")
+
+def _normalize_text_metric_backend(backend: str) -> str:
+    normalized = str(backend or "auto").strip().lower()
+    if normalized not in TEXT_METRIC_BACKENDS:
+        raise ValueError(
+            f"Unsupported text metric backend {backend!r}; "
+            f"expected one of {sorted(TEXT_METRIC_BACKENDS)}."
+        )
+    return normalized
+
+
+def _load_datasets_rouge_metric():
+    from datasets import load_metric
+
+    return load_metric("rouge")
+
+
+def _compute_datasets_text_metrics(predictions, references):
+    try:
+        metric = _load_datasets_rouge_metric()
         res = metric.compute(predictions=predictions, references=references)
-        summary = {}
-        for metric_name in ("rouge1", "rouge2", "rougeL", "rougeLsum"):
-            curr = res[metric_name].mid
-            summary[f"agg_{metric_name}_fm"] = curr.fmeasure * 100
-            summary[f"agg_{metric_name}_p"] = curr.precision * 100
-            summary[f"agg_{metric_name}_r"] = curr.recall * 100
-        summary["agg_r1fm_r2fm"] = summary["agg_rouge1_fm"] + summary["agg_rouge2_fm"]
-        summary["rouge_backend"] = "datasets"
-        return summary
+    except Exception as exc:
+        raise RuntimeError(
+            "ROUGE backend 'datasets' failed. Install or cache the datasets rouge metric, "
+            "or explicitly select the project-local 'simple_ngram' backend. "
+            "No automatic metric fallback is used in strict mode."
+        ) from exc
+
+    summary = {}
+    for metric_name in ("rouge1", "rouge2", "rougeL", "rougeLsum"):
+        curr = res[metric_name].mid
+        summary[f"agg_{metric_name}_fm"] = curr.fmeasure * 100
+        summary[f"agg_{metric_name}_p"] = curr.precision * 100
+        summary[f"agg_{metric_name}_r"] = curr.recall * 100
+    summary["agg_r1fm_r2fm"] = summary["agg_rouge1_fm"] + summary["agg_rouge2_fm"]
+    summary["rouge_backend"] = "datasets"
+    return summary
+
+
+def _compute_simple_ngram_text_metrics(predictions, references, *, fallback: bool):
+    r1 = _rouge_ngram_f1(predictions, references, 1)
+    r2 = _rouge_ngram_f1(predictions, references, 2)
+    rl = _rouge_l_f1(predictions, references)
+    return {
+        "agg_rouge1_fm": r1,
+        "agg_rouge1_p": "n/a",
+        "agg_rouge1_r": "n/a",
+        "agg_rouge2_fm": r2,
+        "agg_rouge2_p": "n/a",
+        "agg_rouge2_r": "n/a",
+        "agg_rougeL_fm": rl,
+        "agg_rougeL_p": "n/a",
+        "agg_rougeL_r": "n/a",
+        "agg_rougeLsum_fm": rl,
+        "agg_rougeLsum_p": "n/a",
+        "agg_rougeLsum_r": "n/a",
+        "agg_r1fm_r2fm": r1 + r2,
+        "rouge_backend": "simple_ngram_fallback" if fallback else "simple_ngram",
+    }
+
+
+def validate_text_metric_backend(backend: str) -> str:
+    """Verify an explicitly selected backend before an expensive attack starts."""
+    normalized = _normalize_text_metric_backend(backend)
+    if normalized == "auto":
+        raise ValueError("Metric preflight requires an explicit backend, not 'auto'.")
+    if normalized == "datasets":
+        _compute_datasets_text_metrics(["metric preflight"], ["metric preflight"])
+    return normalized
+
+
+def compute_text_metrics(predictions, references, *, backend: str = "auto"):
+    """Compute text recovery metrics with an explicit or backward-compatible backend."""
+    backend = _normalize_text_metric_backend(backend)
+    if backend == "datasets":
+        return _compute_datasets_text_metrics(predictions, references)
+    if backend == "simple_ngram":
+        return _compute_simple_ngram_text_metrics(predictions, references, fallback=False)
+
+    try:
+        return _compute_datasets_text_metrics(predictions, references)
     except Exception:
-        r1 = _rouge_ngram_f1(predictions, references, 1)
-        r2 = _rouge_ngram_f1(predictions, references, 2)
-        rl = _rouge_l_f1(predictions, references)
-        return {
-            "agg_rouge1_fm": r1,
-            "agg_rouge1_p": "n/a",
-            "agg_rouge1_r": "n/a",
-            "agg_rouge2_fm": r2,
-            "agg_rouge2_p": "n/a",
-            "agg_rouge2_r": "n/a",
-            "agg_rougeL_fm": rl,
-            "agg_rougeL_p": "n/a",
-            "agg_rougeL_r": "n/a",
-            "agg_rougeLsum_fm": rl,
-            "agg_rougeLsum_p": "n/a",
-            "agg_rougeLsum_r": "n/a",
-            "agg_r1fm_r2fm": r1 + r2,
-            "rouge_backend": "simple_ngram_fallback",
-        }
+        return _compute_simple_ngram_text_metrics(predictions, references, fallback=True)
 
 
 def _emit_result_summary(args, tracker):
