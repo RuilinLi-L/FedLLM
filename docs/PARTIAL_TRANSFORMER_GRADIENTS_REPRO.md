@@ -35,14 +35,14 @@ PTG-only filters such as `query_only`, `key_only`, `value_only`, `attn_out_only`
 `attack_partial_gradient.py` now has two modes:
 
 - `--ptg_parity_mode fedllm`: the original FedLLM LAMP-lite adaptation, kept as the default for compatibility.
-- `--ptg_parity_mode source`: source-code parity mode for the official implementation, including raw BERT word-embedding optimization, source selector names, source-style initialization/defaults, source loss names, optimizer/scheduler knobs, optional perplexity logging/evaluation, token swaps, padding-knowledge control, and ROUGE-1 batch matching.
+- `--ptg_parity_mode source`: strict BERT source-code parity mode. It uses raw BERT word-embedding optimization, weight-only source selector names, source-style initialization/defaults, source loss names, optimizer/scheduler knobs, LM-scored token swaps, padding-knowledge control, and ROUGE-1 batch matching.
 
 The source selector aliases are:
 
 - `--grad_type all_layers|encoder|layer_encoder|attn_qkv|attn_query|attn_key|attn_value|attn_output|ffn_fc|ffn_output|word_emb`
 - `--attack_layer all|0,1,2`
 
-For GPT-2, `attn_query`, `attn_key`, and `attn_value` all expose the packed `c_attn` tensor, so they are effectively `attn_qkv`.
+`source` mode requires `--model_path bert-base-uncased`. GPT-2 packed `c_attn` selectors remain available only through the generic `fedllm` mode; they are not source-parity selectors.
 
 Source-style attack knobs include:
 
@@ -56,7 +56,7 @@ Source-style attack knobs include:
 
 The official-source aliases `--loss cos|dlg|tag`, `--n_steps`, `--init_candidates`, `--init`, `--init_size`, `--opt_alg`, `--lr`, `--lr_decay_type`, `--lr_decay`, `--tag_factor`, `--grad_clip`, `--lr_max_it`, and `--print_every` are accepted and mapped to the corresponding PTG knobs.
 
-In `source` mode, unspecified knobs follow the official defaults: `n_steps=2000`, `init_candidates=500`, `init=random`, `use_swaps=True`, `init_size=1.4`, `lr=0.01`, `coeff_perplexity=0.1`, `coeff_reg=0.1`, `lr_decay_type=StepLR`, `print_every=50`, and `attack_layer=0`.
+In `source` mode, unspecified optimization knobs follow the official defaults: `n_steps=2000`, `init_candidates=500`, `init=random`, `use_swaps=True`, `init_size=1.4`, `lr=0.01`, `coeff_perplexity=0.1`, `coeff_reg=0.1`, `lr_decay_type=StepLR`, and `print_every=50`. The PTG entry point defaults to the partial `layer_encoder` selector at `attack_layer=0`; set `--grad_type all_layers` explicitly only for the official full-gradient control. A nonzero source LM prior requires `--ptg_lm_model_path`.
 
 DP-SGD has two explicit modes:
 
@@ -80,14 +80,13 @@ The current reproduction implements:
 
 Language-model perplexity support and token-swap search are implemented for source-parity
 runs. Following the official attack loop, the source main optimization closure uses
-gradient reconstruction plus embedding-norm regularization; perplexity is used for
-source-style logging/evaluation and swap/candidate scoring when an LM is supplied. These
-extras remain disabled by default in `fedllm` mode unless their weights/flags are explicitly
-supplied.
+gradient reconstruction plus embedding-norm regularization, while discrete token swaps use
+reconstruction loss plus weighted perplexity. These extras remain disabled by default in
+`fedllm` mode unless their weights/flags are explicitly supplied.
 
 ## CLI
 
-Minimal BERT parity smoke:
+Minimal FedLLM BERT smoke:
 
 ```bash
 python attack_partial_gradient.py \
@@ -106,6 +105,25 @@ python attack_partial_gradient.py \
   --ptg_match_loss cosine \
   --ptg_label_mode known \
   --ptg_embed_norm_weight 0.01 \
+  --attn_implementation eager
+```
+
+Strict source BERT smoke:
+
+```bash
+python attack_partial_gradient.py \
+  --dataset sst2 \
+  --split val \
+  --task seq_class \
+  --batch_size 1 \
+  --n_inputs 1 \
+  --model_path bert-base-uncased \
+  --finetuned_path ./models/bert-sst2 \
+  --ptg_parity_mode source \
+  --grad_type layer_encoder \
+  --attack_layer 0 \
+  --ptg_lm_model_path <source_lm_path> \
+  --ptg_steps 80 \
   --attn_implementation eager
 ```
 

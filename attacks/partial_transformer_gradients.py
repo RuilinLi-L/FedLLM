@@ -125,7 +125,13 @@ def ptg_filter_active(args) -> bool:
     return (
         getattr(args, "gradient_layer_subset", PTG_DEFAULT_LAYER_SUBSET) != PTG_DEFAULT_LAYER_SUBSET
         or getattr(args, "gradient_param_filter", PTG_DEFAULT_PARAM_FILTER) != PTG_DEFAULT_PARAM_FILTER
+        or _source_selector_is_partial(getattr(args, "grad_type", None))
     )
+
+
+def _source_selector_is_partial(source_grad_type: str | None) -> bool:
+    """The official all_layers setting is a full-gradient control, not PTG."""
+    return source_grad_type is not None and source_grad_type != "all_layers"
 
 
 def filter_partial_transformer_gradients(
@@ -177,7 +183,11 @@ def filter_partial_transformer_gradients(
         "gradient_layer_subset": layer_subset,
         "gradient_param_filter": param_filter,
         "effective_gradient_param_filter": ptg_effective_param_filter(param_filter, model_path),
-        "partial_filter_active": layer_subset != PTG_DEFAULT_LAYER_SUBSET or param_filter != PTG_DEFAULT_PARAM_FILTER,
+        "partial_filter_active": (
+            layer_subset != PTG_DEFAULT_LAYER_SUBSET
+            or param_filter != PTG_DEFAULT_PARAM_FILTER
+            or _source_selector_is_partial(source_grad_type)
+        ),
         "partial_attack_variant": PTG_GRADIENT_MATCHING_VARIANT,
         "visible_grad_count": len(visible_names),
         "visible_matrix_grad_count": matrix_count,
@@ -339,20 +349,37 @@ def _source_grad_type_matches(name: str, grad_type: str, attack_layers: Sequence
 
     if not layer_match:
         return False
+    return _source_module_weight_matches(lower, grad_type)
+
+
+def _source_module_weight_matches(lower_name: str, grad_type: str) -> bool:
+    """Match the official partial-gradient source selectors exactly.
+
+    The source implementation selects named BERT weight tensors, whereas the
+    FedLLM selectors intentionally support broader model families and biases.
+    """
     if grad_type == "attn_query":
-        return _is_qkv_param(lower, "query_only")
+        return "attention.self.query.weight" in lower_name
     if grad_type == "attn_key":
-        return _is_qkv_param(lower, "key_only")
+        return "attention.self.key.weight" in lower_name
     if grad_type == "attn_value":
-        return _is_qkv_param(lower, "value_only")
+        return "attention.self.value.weight" in lower_name
     if grad_type == "attn_qkv":
-        return _is_qkv_param(lower, "qkv_only")
+        return any(
+            part in lower_name
+            for part in (
+                "attention.self.query.weight",
+                "attention.self.key.weight",
+                "attention.self.value.weight",
+            )
+        )
     if grad_type == "attn_output":
-        return _is_attn_output_param(lower)
+        return "attention.output.dense.weight" in lower_name
     if grad_type == "ffn_fc":
-        return _is_ffn_input_param(lower)
+        return "intermediate.dense.weight" in lower_name
     if grad_type == "ffn_output":
-        return _is_ffn_output_param(lower)
+        # Preserve the official selector's literal substring behavior.
+        return "output.dense.weight" in lower_name
     return False
 
 
@@ -547,6 +574,20 @@ def _gradient_match_loss(
     if match_loss in {"cos", "normalized_mse"}:
         return stacked.mean()
     return stacked.sum()
+
+
+def ptg_swap_objective(
+    *,
+    total: torch.Tensor,
+    grad_loss: torch.Tensor,
+    lm_loss: torch.Tensor,
+    source_bert_mode: bool,
+    lm_prior_weight: float,
+) -> torch.Tensor:
+    """Score discrete swap candidates using the objective of the active mode."""
+    if source_bert_mode:
+        return grad_loss + float(lm_prior_weight) * lm_loss
+    return total
 
 
 def _label_candidates(model_wrapper, raw: Sequence[int] | None = None) -> list[int]:
@@ -1225,7 +1266,18 @@ def optimize_partial_text_embeddings(
             candidate_labels,
             create_graph=False,
         )
-        best_objective_local = float(best_total.detach().item())
+        best_model_objective_local = float(best_total.detach().item())
+        best_swap_objective_local = float(
+            ptg_swap_objective(
+                total=best_total,
+                grad_loss=best_grad,
+                lm_loss=best_lm,
+                source_bert_mode=source_bert_mode,
+                lm_prior_weight=lm_prior_weight,
+            )
+            .detach()
+            .item()
+        )
         best_grad_local = float(best_grad.detach().item())
         best_lm_local = float(best_lm.detach().item())
         changed_type = None
@@ -1243,9 +1295,20 @@ def optimize_partial_text_embeddings(
                     candidate_labels,
                     create_graph=False,
                 )
-                current = float(total.detach().item())
-                if current < best_objective_local:
-                    best_objective_local = current
+                current_swap_objective = float(
+                    ptg_swap_objective(
+                        total=total,
+                        grad_loss=grad_loss,
+                        lm_loss=lm_loss,
+                        source_bert_mode=source_bert_mode,
+                        lm_prior_weight=lm_prior_weight,
+                    )
+                    .detach()
+                    .item()
+                )
+                if current_swap_objective < best_swap_objective_local:
+                    best_swap_objective_local = current_swap_objective
+                    best_model_objective_local = float(total.detach().item())
                     best_grad_local = float(grad_loss.detach().item())
                     best_logits = logits.detach()
                     best_lm_local = float(lm_loss.detach().item())
@@ -1258,7 +1321,7 @@ def optimize_partial_text_embeddings(
         if changed_type is not None:
             change = ["Swapped tokens", "Moved token", "Moved sequence", "Put prefix at the end"][changed_type]
             print(f"[ptg] {change}", flush=True)
-        return best_objective_local, best_grad_local, best_logits, best_lm_local
+        return best_model_objective_local, best_grad_local, best_logits, best_lm_local
 
     for assignment_idx, candidate_labels in enumerate(candidate_assignments):
         for restart_idx in range(max(1, int(restarts))):

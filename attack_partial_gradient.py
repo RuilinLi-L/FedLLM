@@ -20,11 +20,12 @@ from attacks.partial_transformer_gradients import (
     is_ptg_word_embedding_param,
     optimize_partial_text_embeddings,
     parse_ptg_attack_layers,
+    ptg_filter_active,
     ptg_selector_summary_fields,
     selected_partial_gradient_tensors,
     validate_ptg_selector_args,
 )
-from attacks.peftleak_text import get_token_embedding_matrix, summarize_token_predictions
+from attacks.peftleak_text import get_token_embedding_matrix, summarize_token_predictions, token_recovery_ratio
 from attack_peftleak import compute_text_metrics, validate_text_metric_backend
 from utils.defense_common import add_shared_defense_args, defense_param_spec, fmt_summary_value, safe_mean
 from utils.defenses import apply_defense, requires_gradient_generation_defense
@@ -47,6 +48,7 @@ from utils.representation_bottleneck import rep_bottleneck_summary_fields, valid
 
 SUMMARY_START = "===== RESULT SUMMARY START ====="
 SUMMARY_END = "===== RESULT SUMMARY END ====="
+SOURCE_PARITY_MODEL_PATH = "bert-base-uncased"
 SUPPORTED_PTG_DEFENSES = {
     "none",
     "noise",
@@ -400,7 +402,7 @@ def _resolve_ignored_token_ids(args, tokenizer, model_wrapper, partial_grads, pa
 
 
 def _source_bert_parity_active(args) -> bool:
-    return args.ptg_parity_mode == "source" and args.model_path == "bert-base-uncased"
+    return args.ptg_parity_mode == "source" and args.model_path == SOURCE_PARITY_MODEL_PATH
 
 
 def _source_decode_bert_ids(tokenizer, ids) -> str:
@@ -459,9 +461,9 @@ def _rouge1_fmeasure(prediction: str, reference: str) -> float:
     return 2.0 * precision * recall / (precision + recall)
 
 
-def _match_predictions_to_references(predictions: list[str], references: list[str], mode: str) -> list[str]:
+def _prediction_match_order(predictions: list[str], references: list[str], mode: str) -> list[int]:
     if mode == "none" or len(predictions) <= 1 or len(predictions) != len(references):
-        return predictions
+        return list(range(len(predictions)))
     n_items = len(predictions)
     cost = [
         [1.0 - _rouge1_fmeasure(predictions[i], references[j]) for j in range(n_items)]
@@ -487,7 +489,11 @@ def _match_predictions_to_references(predictions: list[str], references: list[st
                 row = min(remaining, key=lambda pred_idx: cost[pred_idx][ref_idx])
                 order.append(row)
                 remaining.remove(row)
-    return [predictions[idx] for idx in order]
+    return order
+
+
+def _match_predictions_to_references(predictions: list[str], references: list[str], mode: str) -> list[str]:
+    return [predictions[idx] for idx in _prediction_match_order(predictions, references, mode)]
 
 
 def _label_candidates(raw: str | None):
@@ -541,7 +547,9 @@ def _normalize_ptg_source_args(args):
 
     if args.ptg_parity_mode == "source":
         if args.grad_type is None:
-            args.grad_type = "all_layers"
+            # Keep the PTG entry point partial by default. all_layers remains
+            # available as an explicit full-gradient source control.
+            args.grad_type = "layer_encoder"
         if raw_attack_layer is None:
             args.attack_layer = [0]
         args.ptg_steps = 2000 if args.ptg_steps is None else int(args.ptg_steps)
@@ -640,6 +648,7 @@ def _emit_result_summary(args, tracker):
         *dpsgd_opacus_summary_fields(args, tracker),
         *rep_bottleneck_summary_fields(args),
         *ptg_selector_summary_fields(args),
+        ("ptg_exposure_scope", "partial" if ptg_filter_active(args) else "full_control"),
         ("ptg_steps", args.ptg_steps),
         ("ptg_lr", args.ptg_lr),
         ("ptg_restarts", args.ptg_restarts),
@@ -716,6 +725,17 @@ def _validate_args(args):
     args.ptg_use_embedding_status = "not_evaluated"
     args.ptg_unused_token_count = None
     _normalize_ptg_source_args(args)
+    if args.ptg_parity_mode == "source":
+        if args.model_path != SOURCE_PARITY_MODEL_PATH:
+            raise ValueError(
+                "--ptg_parity_mode source requires --model_path bert-base-uncased; "
+                "use --ptg_parity_mode fedllm for GPT-2, Llama, or other model families."
+            )
+        if float(args.ptg_lm_prior_weight) != 0.0 and args.ptg_lm_model_path is None:
+            raise ValueError(
+                "--ptg_parity_mode source with a nonzero LM prior requires --ptg_lm_model_path "
+                "so source-style swap scoring has an LM objective."
+            )
     if args.defense == "dager":
         raise NotImplementedError("DAGER defense is DAGER-specific and is excluded from PTG reproduction runs.")
     if args.defense not in SUPPORTED_PTG_DEFENSES:
@@ -864,7 +884,18 @@ def reconstruct(args, sample, model_wrapper, *, precomputed_partial=None, lm_mod
     )
     predictions = _decode_prediction_ids(args, tokenizer, attack_result["predicted_ids"])
     match_mode = "rouge1" if args.ptg_batch_match == "auto" and len(predictions) > 1 else args.ptg_batch_match
-    predictions = _match_predictions_to_references(predictions, references, match_mode)
+    match_order = _prediction_match_order(predictions, references, match_mode)
+    if match_order != list(range(len(predictions))):
+        attack_result["predicted_ids"] = [attack_result["predicted_ids"][idx] for idx in match_order]
+        attack_result["predicted_scores"] = [attack_result["predicted_scores"][idx] for idx in match_order]
+    attack_result["rec_token_mean"] = token_recovery_ratio(
+        attack_result["predicted_ids"],
+        batch["input_ids"].detach().cpu().tolist(),
+        ignored_token_ids=ignored_token_ids,
+        reference_mask=reference_mask,
+    )
+    attack_result["batch_match_mode"] = match_mode
+    predictions = [predictions[idx] for idx in match_order]
     return predictions, references, attack_result, selected_names
 
 

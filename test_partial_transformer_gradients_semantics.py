@@ -17,10 +17,18 @@ from attacks.partial_transformer_gradients import (
     filter_partial_transformer_gradients,
     optimize_partial_text_embeddings,
     parse_ptg_attack_layers,
+    ptg_filter_active,
     ptg_selector_summary_fields,
+    ptg_swap_objective,
     selected_partial_gradient_tensors,
 )
-from attack_partial_gradient import _capture_source_opacus_grads, _resolve_ignored_token_ids, _validate_args, build_parser
+from attack_partial_gradient import (
+    _capture_source_opacus_grads,
+    _prediction_match_order,
+    _resolve_ignored_token_ids,
+    _validate_args,
+    build_parser,
+)
 from attack_peftleak import compute_text_metrics, validate_text_metric_backend
 
 
@@ -219,15 +227,21 @@ def test_ptg_selector_does_not_emit_dager_variant_or_reason():
 
 
 def test_source_grad_type_selectors_match_official_names():
-    grads = tuple(torch.ones(2, 2) * idx for idx in range(10))
+    grads = tuple(torch.ones(2, 2) * idx for idx in range(16))
     names = [
         "bert.embeddings.word_embeddings.weight",
         "bert.encoder.layer.0.attention.self.query.weight",
+        "bert.encoder.layer.0.attention.self.query.bias",
         "bert.encoder.layer.0.attention.self.key.weight",
+        "bert.encoder.layer.0.attention.self.key.bias",
         "bert.encoder.layer.0.attention.self.value.weight",
+        "bert.encoder.layer.0.attention.self.value.bias",
         "bert.encoder.layer.0.attention.output.dense.weight",
+        "bert.encoder.layer.0.attention.output.dense.bias",
         "bert.encoder.layer.0.intermediate.dense.weight",
+        "bert.encoder.layer.0.intermediate.dense.bias",
         "bert.encoder.layer.0.output.dense.weight",
+        "bert.encoder.layer.0.output.dense.bias",
         "bert.encoder.layer.1.attention.self.query.weight",
         "classifier.weight",
         "bert.pooler.dense.weight",
@@ -235,13 +249,13 @@ def test_source_grad_type_selectors_match_official_names():
     cases = {
         "word_emb": [0],
         "attn_query": [1],
-        "attn_key": [2],
-        "attn_value": [3],
-        "attn_qkv": [1, 2, 3],
-        "attn_output": [4],
-        "ffn_fc": [5],
-        "ffn_output": [6],
-        "layer_encoder": [1, 2, 3, 4, 5, 6],
+        "attn_key": [3],
+        "attn_value": [5],
+        "attn_qkv": [1, 3, 5],
+        "attn_output": [7],
+        "ffn_fc": [9],
+        "ffn_output": [11],
+        "layer_encoder": list(range(1, 13)),
     }
     for grad_type, expected in cases.items():
         partial, info = filter_partial_transformer_gradients(
@@ -342,7 +356,7 @@ def test_ptg_use_embedding_cli_aliases_set_shared_flag():
         assert_true(args.ptg_use_embedding_status == "not_evaluated", "status should be initialized before attack")
 
 
-def test_source_gpt2_query_key_value_aliases_pack_to_c_attn():
+def test_strict_source_selector_rejects_packed_gpt2_attention():
     grads = (torch.ones(2, 2), torch.ones(2, 2))
     names = [
         "transformer.h.0.attn.c_attn.weight",
@@ -357,7 +371,70 @@ def test_source_gpt2_query_key_value_aliases_pack_to_c_attn():
             source_attack_layers=[0],
         )
         kept = [idx for idx, grad in enumerate(partial) if grad is not None]
-        assert_true(kept == [0], f"GPT-2 {grad_type} should expose packed c_attn, got {kept}")
+        assert_true(kept == [], f"Strict source selectors should reject packed GPT-2 tensors, got {kept}")
+
+
+def test_source_mode_defaults_to_partial_bert_and_requires_lm():
+    parser = build_parser()
+    common = [
+        "--dataset",
+        "sst2",
+        "--split",
+        "test",
+        "--n_inputs",
+        "2",
+        "--finetuned_path",
+        "dummy",
+        "--ptg_parity_mode",
+        "source",
+    ]
+    try:
+        _validate_args(parser.parse_args(common))
+    except ValueError as exc:
+        assert_true("--ptg_lm_model_path" in str(exc), "source mode should require an LM for its nonzero default prior")
+    else:
+        raise AssertionError("source mode should reject a nonzero LM prior without an LM path")
+
+    args = parser.parse_args(common + ["--ptg_lm_model_path", "dummy-lm"])
+    _validate_args(args)
+    assert_true(args.grad_type == "layer_encoder", "source PTG should default to a partial layer selector")
+    assert_true(args.attack_layer == [0], "source PTG should default to layer 0")
+    assert_true(ptg_filter_active(args), "source PTG default should be marked as partial")
+
+    non_bert = parser.parse_args(common + ["--model_path", "gpt2", "--ptg_lm_model_path", "dummy-lm"])
+    try:
+        _validate_args(non_bert)
+    except ValueError as exc:
+        assert_true("bert-base-uncased" in str(exc), "source mode should reject non-BERT model families")
+    else:
+        raise AssertionError("source mode should reject GPT-2")
+
+
+def test_ptg_swap_objective_uses_lm_only_for_source_mode():
+    total = torch.tensor(7.0)
+    grad = torch.tensor(2.0)
+    lm = torch.tensor(3.0)
+    source = ptg_swap_objective(
+        total=total,
+        grad_loss=grad,
+        lm_loss=lm,
+        source_bert_mode=True,
+        lm_prior_weight=0.5,
+    )
+    fedllm = ptg_swap_objective(
+        total=total,
+        grad_loss=grad,
+        lm_loss=lm,
+        source_bert_mode=False,
+        lm_prior_weight=0.5,
+    )
+    assert_true(torch.equal(source, torch.tensor(3.5)), "source swaps should use reconstruction plus weighted LM loss")
+    assert_true(torch.equal(fedllm, total), "FedLLM swaps should preserve the optimization objective")
+
+
+def test_prediction_match_order_aligns_token_and_text_metrics():
+    order = _prediction_match_order(["second sample", "first sample"], ["first sample", "second sample"], "rouge1")
+    assert_true(order == [1, 0], f"batch matching should align predictions to references, got {order}")
 
 
 def test_ptg_source_loss_names_match_formulas():
@@ -743,7 +820,10 @@ def main():
         test_ptg_use_embedding_scans_resized_embedding_rows,
         test_ptg_use_embedding_falls_back_without_visible_embedding_grad,
         test_ptg_use_embedding_cli_aliases_set_shared_flag,
-        test_source_gpt2_query_key_value_aliases_pack_to_c_attn,
+        test_strict_source_selector_rejects_packed_gpt2_attention,
+        test_source_mode_defaults_to_partial_bert_and_requires_lm,
+        test_ptg_swap_objective_uses_lm_only_for_source_mode,
+        test_prediction_match_order_aligns_token_and_text_metrics,
         test_ptg_source_loss_names_match_formulas,
         test_source_bert_parity_uses_raw_word_embeddings,
         test_ptg_gradient_matching_loss_decreases_on_toy_model,
