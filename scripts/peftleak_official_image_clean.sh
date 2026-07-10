@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run the official PEFTLeak CIFAR100 image-adapter clean baseline.
+# Run one source-aligned PEFTLeak CIFAR100 image-adapter attack/defense point.
 
 set -euo pipefail
 

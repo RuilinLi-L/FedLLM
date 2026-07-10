@@ -18,6 +18,7 @@ import time
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from torch import nn  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
 import torchvision  # noqa: E402
 from torchvision import transforms  # noqa: E402
 
@@ -51,6 +52,8 @@ MULTIPLIER = 100
 SCALE = 1
 HIGH = 10000
 GAP = 0
+RECOVERY_LAYERS_PER_POSITION = 5
+RECOVERY_GRADIENT_PAIR_COUNT = NUM_PATCHES * RECOVERY_LAYERS_PER_POSITION
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", default="outputs/peftleak_official_image")
     parser.add_argument("--download", action="store_true")
+    parser.add_argument("--metrics", default="mse,ssim,lpips,patch_recovery")
     parser.add_argument("--patch_recovery_mse_threshold", type=float, default=1e-6)
     parser.add_argument("--patch_recovery_denorm_thresholds", default="0.001,0.005,0.010")
     parser.add_argument("--debug_patch_diagnostics", action="store_true")
@@ -138,6 +142,16 @@ def emit_summary(fields: dict):
         "patch_recovery_rate",
         "proxy_patch_recovery_metric",
         "proxy_patch_recovery_primary_threshold",
+        "matched_patch_count",
+        "matched_patch_rate",
+        "matched_patch_mse_mean",
+        "matched_patch_mse_std",
+        "matched_patch_ssim_mean",
+        "matched_patch_ssim_std",
+        "matched_patch_ssim_status",
+        "matched_patch_lpips_mean",
+        "matched_patch_lpips_std",
+        "matched_patch_lpips_status",
         "denorm_recovered_patch_count_0.001",
         "denorm_recovered_patch_rate_0.001",
         "denorm_recovered_patch_count_0.005",
@@ -160,12 +174,17 @@ def emit_summary(fields: dict):
         "debug_dump_path",
         "image_metric_scope",
         "mse",
+        "mse_std",
         "ssim",
+        "ssim_std",
+        "lpips",
+        "lpips_std",
         "diagnostic_mse",
         "diagnostic_ssim",
         "diagnostic_image_metric_status",
         "lpips_status",
         "loss",
+        "loss_scope",
         "runtime",
         "error_type",
         "error_message",
@@ -444,28 +463,37 @@ def official_adapter_gradient_names() -> tuple[list[str], list[str]]:
 
 
 def collect_adapter_gradients(model: ViT):
-    weight_names, bias_names = official_adapter_gradient_names()
-    named_params = dict(model.named_parameters())
-    weight_grad = []
-    bias_grad = []
-    missing_params = [name for name in weight_names + bias_names if name not in named_params]
-    if missing_params:
-        raise RuntimeError(f"Missing official adapter parameters: {missing_params[:5]}")
+    """Collect the complete trainable Adapter update shared by the client."""
 
-    for name in weight_names:
-        param = named_params[name]
-        weight_grad.append(param.grad.detach().cpu() if param.grad is not None else None)
-    for name in bias_names:
-        param = named_params[name]
-        bias_grad.append(param.grad.detach().cpu() if param.grad is not None else None)
+    grads = []
+    names = []
+    for name, param in model.named_parameters():
+        if "adapt1" not in name and "adapt2" not in name:
+            continue
+        if param.grad is None:
+            raise RuntimeError(f"Missing Adapter gradient: {name}")
+        names.append(name)
+        grads.append(param.grad.detach().cpu())
 
-    if any(grad is None for grad in weight_grad + bias_grad):
-        missing = [
-            name
-            for name, grad in zip(weight_names + bias_names, weight_grad + bias_grad)
-            if grad is None
-        ]
-        raise RuntimeError(f"Missing official adapter gradients: {missing[:5]}")
+    required_weight, required_bias = official_adapter_gradient_names()
+    missing = sorted(set(required_weight + required_bias).difference(names))
+    if missing:
+        raise RuntimeError(f"Missing official attack Adapter gradients: {missing[:5]}")
+    return grads, names
+
+
+def select_official_attack_gradients(grads, names):
+    if len(grads) != len(names):
+        raise ValueError("Adapter gradients and names must have the same length.")
+    by_name = dict(zip(names, grads))
+    all_weight_names, all_bias_names = official_adapter_gradient_names()
+    missing = [name for name in all_weight_names + all_bias_names if name not in by_name]
+    if missing:
+        raise RuntimeError(f"Defended update is missing official attack gradients: {missing[:5]}")
+    weight_names = all_weight_names[:RECOVERY_GRADIENT_PAIR_COUNT]
+    bias_names = all_bias_names[:RECOVERY_GRADIENT_PAIR_COUNT]
+    weight_grad = [by_name[name] for name in weight_names]
+    bias_grad = [by_name[name] for name in bias_names]
     return weight_grad, bias_grad, weight_names, bias_names
 
 
@@ -498,11 +526,9 @@ def _official_image_defense_param(args):
     return None, None
 
 
-def apply_official_image_defense(weight_grad, bias_grad, weight_names, bias_names, args):
-    raw_grads = tuple(weight_grad) + tuple(bias_grad)
-    names = list(weight_names) + list(bias_names)
-    n_weight = len(weight_grad)
-
+def apply_official_image_defense(grads, names, args):
+    raw_grads = tuple(grads)
+    names = list(names)
     if args.defense == "none":
         defended = raw_grads
     elif args.defense == "topk":
@@ -528,7 +554,7 @@ def apply_official_image_defense(weight_grad, bias_grad, weight_names, bias_name
         ),
         "defended_gradient_count": len(raw_grads),
     }
-    return list(defended[:n_weight]), list(defended[n_weight:]), fields
+    return list(defended), fields
 
 
 def reconstruct_patch_candidates(weight_grad, bias_grad, patch_id: int, w_pos: torch.Tensor, scale: float):
@@ -674,6 +700,27 @@ def _greedy_one_to_one_matches(mse: torch.Tensor, threshold: float, candidate_of
     return matches
 
 
+def _one_to_one_matches(mse: torch.Tensor, threshold: float, candidate_offset: int, position_idx: int):
+    if mse.numel() == 0:
+        return []
+    try:
+        from scipy.optimize import linear_sum_assignment
+
+        cost = mse.detach().cpu().double().numpy()
+        invalid_penalty = max(1.0, float(threshold)) * 1e6
+        cost = np.where(cost < float(threshold), cost, invalid_penalty)
+        candidate_indices, sample_indices = linear_sum_assignment(cost)
+        matches = []
+        for candidate_idx, sample_idx in zip(candidate_indices.tolist(), sample_indices.tolist()):
+            value = float(mse[candidate_idx, sample_idx].item())
+            if value < float(threshold):
+                matches.append((candidate_offset + candidate_idx, sample_idx, position_idx + 1, value))
+        matches.sort(key=lambda item: (item[1], item[0]))
+        return matches
+    except ImportError:
+        return _greedy_one_to_one_matches(mse, threshold, candidate_offset, position_idx)
+
+
 def build_denorm_recovery_metrics(
     candidate_by_position,
     refs: torch.Tensor,
@@ -698,7 +745,7 @@ def build_denorm_recovery_metrics(
 
         for threshold, label in threshold_specs:
             matches_by_label[label].extend(
-                _greedy_one_to_one_matches(
+                _one_to_one_matches(
                     mse,
                     threshold,
                     candidate_offset=candidate_offset,
@@ -743,6 +790,102 @@ def flatten_candidate_patches(candidate_by_position) -> tuple[torch.Tensor, torc
     if not patches:
         return torch.empty(0, 3, PATCH_SIZE, PATCH_SIZE), torch.empty(0, dtype=torch.long)
     return torch.stack(patches, dim=0), torch.tensor(positions, dtype=torch.long)
+
+
+def requested_metrics(raw_metrics: str) -> set[str]:
+    aliases = {"patch-recovery": "patch_recovery", "patch_recovery_rate": "patch_recovery"}
+    values = {item.strip().lower() for item in str(raw_metrics).split(",") if item.strip()}
+    return {aliases.get(item, item) for item in values}
+
+
+def build_matched_patch_metrics(
+    candidate_by_position,
+    refs: torch.Tensor,
+    mean_inv: torch.Tensor,
+    std_inv: torch.Tensor,
+    matches,
+    *,
+    metrics: set[str],
+):
+    candidates, _positions = flatten_candidate_patches(candidate_by_position)
+    patch_count = max(1, int(refs.shape[0]) * int(refs.shape[1]))
+    summary = {
+        "matched_patch_count": int(len(matches)),
+        "matched_patch_rate": float(len(matches) / patch_count),
+        "matched_patch_mse_mean": None,
+        "matched_patch_mse_std": None,
+        "matched_patch_ssim_mean": None,
+        "matched_patch_ssim_std": None,
+        "matched_patch_ssim_status": "not_requested" if "ssim" not in metrics else "no_matches",
+        "matched_patch_lpips_mean": None,
+        "matched_patch_lpips_std": None,
+        "matched_patch_lpips_status": "not_requested" if "lpips" not in metrics else "no_matches",
+    }
+    if not matches:
+        return summary
+
+    recovered = []
+    reference = []
+    for candidate_idx, sample_idx, position_idx, _mse in matches:
+        recovered.append(candidates[int(candidate_idx)])
+        reference.append(refs[int(sample_idx), int(position_idx) - 1].detach().cpu().float())
+    recovered = _denorm_patches(torch.stack(recovered), mean_inv, std_inv)
+    reference = _denorm_patches(torch.stack(reference), mean_inv, std_inv)
+
+    mse_scores = (recovered - reference).pow(2).flatten(1).mean(dim=1)
+    summary["matched_patch_mse_mean"] = float(mse_scores.mean().item())
+    summary["matched_patch_mse_std"] = float(mse_scores.std(unbiased=False).item())
+
+    if "ssim" in metrics:
+        try:
+            from skimage.metrics import structural_similarity
+
+            ssim_scores = []
+            for rec_patch, ref_patch in zip(recovered, reference):
+                height, width = int(rec_patch.shape[-2]), int(rec_patch.shape[-1])
+                win_size = min(7, height, width)
+                if win_size % 2 == 0:
+                    win_size -= 1
+                if win_size < 3:
+                    raise ValueError("SSIM requires recovered patches at least 3x3.")
+                score = structural_similarity(
+                    rec_patch.permute(1, 2, 0).numpy(),
+                    ref_patch.permute(1, 2, 0).numpy(),
+                    channel_axis=-1,
+                    data_range=1.0,
+                    win_size=win_size,
+                )
+                ssim_scores.append(float(score))
+            summary["matched_patch_ssim_mean"] = float(np.mean(ssim_scores))
+            summary["matched_patch_ssim_std"] = float(np.std(ssim_scores))
+            summary["matched_patch_ssim_status"] = "ok"
+        except ImportError:
+            summary["matched_patch_ssim_status"] = "unavailable"
+        except Exception as exc:  # noqa: BLE001 - keep recovery metrics reportable
+            summary["matched_patch_ssim_status"] = f"failed:{type(exc).__name__}"
+
+    if "lpips" in metrics:
+        try:
+            import lpips
+
+            try:
+                metric = lpips.LPIPS(net="alex", verbose=False)
+            except TypeError:
+                metric = lpips.LPIPS(net="alex")
+            metric.eval()
+            recovered_lpips = F.interpolate(recovered, size=(64, 64), mode="bilinear", align_corners=False)
+            reference_lpips = F.interpolate(reference, size=(64, 64), mode="bilinear", align_corners=False)
+            with torch.no_grad():
+                lpips_scores = metric(recovered_lpips.mul(2).sub(1), reference_lpips.mul(2).sub(1)).view(-1)
+            summary["matched_patch_lpips_mean"] = float(lpips_scores.mean().item())
+            summary["matched_patch_lpips_std"] = float(lpips_scores.std(unbiased=False).item())
+            summary["matched_patch_lpips_status"] = "ok"
+        except ImportError:
+            summary["matched_patch_lpips_status"] = "unavailable"
+        except Exception as exc:  # noqa: BLE001 - LPIPS is optional at runtime
+            summary["matched_patch_lpips_status"] = f"failed:{type(exc).__name__}"
+
+    return summary
 
 
 def _mse_matrix(candidates: torch.Tensor, refs: torch.Tensor) -> torch.Tensor:
@@ -978,13 +1121,15 @@ def run(args) -> dict:
     loss = criterion(output, y)
     loss.backward()
 
-    weight_grad, bias_grad, weight_names, bias_names = collect_adapter_gradients(model)
-    weight_grad, bias_grad, defense_fields = apply_official_image_defense(
-        weight_grad,
-        bias_grad,
-        weight_names,
-        bias_names,
+    adapter_grads, adapter_names = collect_adapter_gradients(model)
+    defended_adapter_grads, defense_fields = apply_official_image_defense(
+        adapter_grads,
+        adapter_names,
         args,
+    )
+    weight_grad, bias_grad, weight_names, bias_names = select_official_attack_gradients(
+        defended_adapter_grads,
+        adapter_names,
     )
     candidate_by_position = recover_candidate_patches(weight_grad, bias_grad, w_glob, mean_inv, std_inv)
     official_candidate_by_position = recover_official_formula_candidates(weight_grad, bias_grad, w_glob)
@@ -1004,26 +1149,33 @@ def run(args) -> dict:
         std_inv,
         denorm_threshold_specs,
     )
-    patch_recovery_count = count_patch_recovery(candidate_by_position, refs, float(args.patch_recovery_mse_threshold))
+    strict_patch_recovery_count = count_patch_recovery(
+        candidate_by_position,
+        refs,
+        float(args.patch_recovery_mse_threshold),
+    )
+    metric_set = requested_metrics(args.metrics)
+    primary_label = denorm_recovery["primary_label"]
+    primary_matches = denorm_recovery["matches_by_label"][primary_label]
+    matched_metrics = build_matched_patch_metrics(
+        candidate_by_position,
+        refs,
+        mean_inv,
+        std_inv,
+        primary_matches,
+        metrics=metric_set,
+    )
     diagnostic_mse, diagnostic_ssim, clustered_image_count, image_metric_status = cluster_and_score_images(
         candidate_by_position,
         refs,
         mean_inv,
         std_inv,
     )
-    clean_recovery_metric = args.defense == "none"
-    if clean_recovery_metric:
-        peftleak_recovered_patch_metric = "official_formula_nonzero_gradient"
-        peftleak_recovered_patch_status = "ok"
-        peftleak_recovered_patch_count = candidate_patch_count
-        peftleak_recovered_patch_rate = candidate_patch_count / max(1, patch_count)
-        image_metric_scope = "peftleak_recovered_patch_primary"
-    else:
-        peftleak_recovered_patch_metric = "unavailable_for_defended_gradients"
-        peftleak_recovered_patch_status = "defended_gradients_generate_unbounded_candidates"
-        peftleak_recovered_patch_count = None
-        peftleak_recovered_patch_rate = None
-        image_metric_scope = "denorm_recovered_patch_primary"
+    peftleak_recovered_patch_metric = f"denorm_same_position_one_to_one_mse@{primary_label}"
+    peftleak_recovered_patch_status = "ok"
+    peftleak_recovered_patch_count = int(matched_metrics["matched_patch_count"])
+    peftleak_recovered_patch_rate = float(matched_metrics["matched_patch_rate"])
+    image_metric_scope = "matched_recovered_patches_primary"
 
     fields = {
         "result_status": "ok",
@@ -1050,25 +1202,34 @@ def run(args) -> dict:
         "candidate_count_pos3": candidate_counts[2],
         "candidate_count_pos4": candidate_counts[3],
         "clustered_image_count": clustered_image_count,
-        "patch_recovery_metric": "strict_normalized_debug",
-        "patch_recovery_count": patch_recovery_count,
-        "patch_recovery_rate": patch_recovery_count / max(1, patch_count),
+        "patch_recovery_metric": peftleak_recovered_patch_metric,
+        "patch_recovery_count": peftleak_recovered_patch_count,
+        "patch_recovery_rate": peftleak_recovered_patch_rate,
+        "strict_normalized_patch_recovery_count": strict_patch_recovery_count,
+        "strict_normalized_patch_recovery_rate": strict_patch_recovery_count / max(1, patch_count),
         "proxy_patch_recovery_metric": "denorm_same_position_one_to_one_mse",
-        "proxy_patch_recovery_primary_threshold": denorm_recovery["primary_label"],
+        "proxy_patch_recovery_primary_threshold": primary_label,
         "debug_patch_diagnostics": bool(args.debug_patch_diagnostics),
         "reconstruct_parity_status": parity_status,
         "reconstruct_parity_max_abs_diff": parity_max_abs_diff,
         "image_metric_scope": image_metric_scope,
-        "mse": None,
-        "ssim": None,
+        "metrics": args.metrics,
+        "mse": matched_metrics["matched_patch_mse_mean"] if "mse" in metric_set else None,
+        "mse_std": matched_metrics["matched_patch_mse_std"] if "mse" in metric_set else None,
+        "ssim": matched_metrics["matched_patch_ssim_mean"],
+        "ssim_std": matched_metrics["matched_patch_ssim_std"],
+        "lpips": matched_metrics["matched_patch_lpips_mean"],
+        "lpips_std": matched_metrics["matched_patch_lpips_std"],
         "diagnostic_mse": diagnostic_mse,
         "diagnostic_ssim": diagnostic_ssim,
         "diagnostic_image_metric_status": image_metric_status,
-        "lpips_status": "unavailable",
+        "lpips_status": matched_metrics["matched_patch_lpips_status"],
         "loss": float(loss.detach().cpu().item()),
+        "loss_scope": "pre_defense_attack_batch",
     }
     fields.update(defense_fields)
     fields.update(denorm_recovery["summary"])
+    fields.update(matched_metrics)
     if args.debug_patch_diagnostics:
         diagnostics = build_patch_diagnostics(candidate_by_position, refs, mean_inv, std_inv)
         fields.update(diagnostics["summary"])

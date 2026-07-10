@@ -15,6 +15,7 @@ dependencies:
   - pandas=2.2
   - scipy=1.13
   - scikit-learn=1.5
+  - scikit-image=0.24
   - tqdm=4.66
   - pyyaml=6.0
   - requests=2.31
@@ -35,3 +36,4 @@ dependencies:
       - einops==0.8.0
       - neptune-client==0.16.15
       - lpips==0.1.4
+      - k-means-constrained>=0.7,<0.8

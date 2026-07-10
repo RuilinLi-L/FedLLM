@@ -1,11 +1,14 @@
 #!/bin/bash
-# Sweep PEFTLeak official-aligned image attack settings.
+# Sweep PEFTLeak official-aligned v1 proxy settings.
+# This matrix is a mechanism smoke test, not the source-aligned paper path.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DAGER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$DAGER_ROOT" || exit 1
+
+echo "[peftleak-image] running the proxy v1 matrix; do not label it as a PEFTLeak source reproduction." >&2
 
 DATASETS=( ${DATASETS:-cifar10 cifar100} )
 BATCHES=( ${BATCHES:-1 2} )

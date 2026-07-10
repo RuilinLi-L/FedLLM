@@ -1,11 +1,14 @@
 #!/bin/bash
-# Run one PEFTLeak official-aligned image attack experiment.
+# Run one PEFTLeak official-aligned v1 proxy experiment.
+# Paper-facing source-aligned runs use peftleak_official_image_clean.sh.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DAGER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$DAGER_ROOT" || exit 1
+
+echo "[peftleak-image] proxy v1 only; use scripts/peftleak_official_image_clean.sh for paper-facing runs." >&2
 
 PYTHON_BIN="${PYTHON:-python}"
 SPLIT_SEED="${SPLIT_SEED:-${RNG_SEED:-101}}"

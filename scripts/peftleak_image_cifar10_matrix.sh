@@ -1,11 +1,13 @@
 #!/bin/bash
-# Run the PEFTLeak image-side CIFAR10 official-aligned privacy matrix.
+# Run the PEFTLeak image-side CIFAR10 official-aligned v1 proxy matrix.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DAGER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$DAGER_ROOT" || exit 1
+
+echo "[peftleak-image] CIFAR10 uses the proxy v1 path; paper-facing source-aligned evidence uses CIFAR100 official_image_runner.py." >&2
 
 PYTHON_BIN="${PYTHON:-python}"
 DEVICE="${DEVICE:-cuda}"

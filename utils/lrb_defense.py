@@ -143,15 +143,17 @@ def _adaptive_avg_pool2d_manual(matrix: torch.Tensor, output_size: tuple[int, in
 
 def _extract_layer_index(name: str) -> int | None:
     patterns = (
-        r"\.h\.(\d+)\.",
-        r"\.layer\.(\d+)\.",
-        r"\.layers\.(\d+)\.",
-        r"\.block\.(\d+)\.",
+        (r"\.h\.(\d+)\.", 0),
+        (r"\.layer\.(\d+)\.", 0),
+        (r"\.layers\.(\d+)\.", 0),
+        (r"\.block\.(\d+)\.", 0),
+        (r"\.layer_(\d+)\.", 0),
+        (r"(?:^|\.)encoder(\d+)(?:\.|$)", -1),
     )
-    for pattern in patterns:
+    for pattern, offset in patterns:
         match = re.search(pattern, name)
         if match:
-            return int(match.group(1))
+            return max(0, int(match.group(1)) + offset)
     return None
 
 

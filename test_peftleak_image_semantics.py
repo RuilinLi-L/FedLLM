@@ -11,6 +11,12 @@ import tempfile
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+OFFICIAL_IMAGE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "PEFTLeak-main",
+    "PEFTLeak-main",
+)
+sys.path.insert(0, OFFICIAL_IMAGE_DIR)
 
 from attacks.peftleak_image.core import (
     PatchStatistics,
@@ -52,6 +58,26 @@ from attack_peftleak_image import (
     build_parser,
     main as image_main,
 )
+from official_image_runner import (
+    ADAPTER_R,
+    CHANNELS,
+    DROPOUT,
+    EMBED_DIM,
+    HEAD_DIM,
+    NUM_CLASSES,
+    NUM_HEADS,
+    NUM_PATCHES,
+    PATCH_DIM,
+    PATCH_SIZE,
+    build_denorm_recovery_metrics,
+    build_matched_patch_metrics,
+    collect_adapter_gradients,
+    official_adapter_gradient_names,
+    select_official_attack_gradients,
+    set_adapter_grads_only,
+)
+from Transformer_Model_neuron import ViT as OfficialImageViT
+from utils.lrb_defense import _extract_layer_index, _layer_sensitivity, apply_lrb_defense
 
 
 def assert_true(condition, message):
@@ -387,6 +413,116 @@ def test_official_gradient_ratio_recovers_batch1_without_oracle():
     assert_true(torch.isfinite(recovery.recovered_patches).all(), "official recovered patches should stay finite")
 
 
+def test_official_source_gradient_inventory_and_lrb_layer_indices():
+    weight_names, bias_names = official_adapter_gradient_names()
+    assert_true(len(weight_names) == len(bias_names) == 21, "official source inventory should preserve its trailing unused Adapter pair")
+    assert_true(_extract_layer_index("encoder1.attn.adapt1.weight") == 0, "encoder1 should map to zero-based layer 0")
+    assert_true(_extract_layer_index("encoder2.mlp.adapt1.bias") == 1, "encoder2 should map to zero-based layer 1")
+    assert_true(_extract_layer_index("vit.official_adapter.layer_3.shared.weight") == 3, "proxy layer_ names should remain parseable")
+    assert_true(_layer_sensitivity("encoder1.attn.adapt1.weight", 2) == 1.0, "first attention Adapter should be sensitive")
+    assert_true(_layer_sensitivity("encoder3.attn.adapt1.weight", 2) == 0.45, "later attention Adapter should use the non-sensitive prior")
+
+    all_names = [*weight_names, *bias_names, "encoder1.attn.adapt2.weight"]
+    all_grads = [torch.full((1,), float(idx)) for idx in range(len(all_names))]
+    selected_w, selected_b, selected_w_names, selected_b_names = select_official_attack_gradients(all_grads, all_names)
+    assert_true(selected_w_names == weight_names[:20] and selected_b_names == bias_names[:20], "attack gradient selection should preserve the 20 consumed source pairs")
+    assert_true(len(selected_w) == len(selected_b) == 20, "attack selection should use 20 defended weight/bias pairs")
+
+    args = argparse.Namespace(
+        defense_lrb_sensitive_n_layers=2,
+        defense_lrb_keep_ratio_sensitive=0.5,
+        defense_lrb_keep_ratio_other=0.9,
+        defense_lrb_clip_scale_sensitive=1_000_000.0,
+        defense_lrb_clip_scale_other=1_000_000.0,
+        defense_lrb_noise_sensitive=0.0,
+        defense_lrb_noise_other=0.0,
+        defense_lrb_empirical_weight=0.0,
+        defense_lrb_calibration_samples=64,
+        defense_lrb_projection="signed_pool",
+        rng_seed=17,
+    )
+    apply_lrb_defense(
+        (torch.rand(4, 4), torch.rand(4, 4)),
+        args,
+        layer_names=["encoder1.attn.adapt1.weight", "encoder3.attn.adapt1.weight"],
+    )
+    layer_info = args.lrb_defense_layer_info
+    assert_true(layer_info[0]["sensitivity"] == 1.0, "LRB should mark encoder1 attention as sensitive")
+    assert_true(layer_info[1]["sensitivity"] == 0.45, "LRB should preserve the later attention prior")
+    assert_true(layer_info[0]["keep_ratio"] < layer_info[1]["keep_ratio"], "sensitive official layers should receive stronger projection")
+
+
+def test_official_matched_patch_metrics_use_one_to_one_ground_truth_matches():
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(123)
+    refs = torch.rand(2, 4, 3, 16, 16, generator=gen)
+    candidates = []
+    for position_idx in range(4):
+        candidates.append(
+            [
+                refs[1, position_idx].clone(),
+                refs[0, position_idx].clone(),
+                torch.zeros_like(refs[0, position_idx]),
+            ]
+        )
+    mean = torch.zeros(3, 1, 1)
+    std = torch.ones(3, 1, 1)
+    recovery = build_denorm_recovery_metrics(
+        candidates,
+        refs,
+        mean,
+        std,
+        [(1e-8, "1e-08")],
+    )
+    matches = recovery["matches_by_label"]["1e-08"]
+    metrics = build_matched_patch_metrics(
+        candidates,
+        refs,
+        mean,
+        std,
+        matches,
+        metrics={"mse", "ssim"},
+    )
+    assert_true(len(matches) == 8, "one-to-one matching should recover every exact patch once")
+    assert_true(metrics["matched_patch_count"] == 8, "matched metric count should equal the target patch count")
+    assert_true(abs(metrics["matched_patch_rate"] - 1.0) < 1e-12, "exact candidates should have full recovery rate")
+    assert_true(metrics["matched_patch_mse_mean"] < 1e-12, "exact matched patches should have zero MSE")
+    assert_true(
+        metrics["matched_patch_ssim_status"] in {"ok", "unavailable"},
+        "standard SSIM should either run or report its optional dependency clearly",
+    )
+    if metrics["matched_patch_ssim_status"] == "ok":
+        assert_true(abs(metrics["matched_patch_ssim_mean"] - 1.0) < 1e-6, "exact matched patches should have SSIM one")
+
+
+def test_official_source_collects_complete_adapter_update_before_attack_selection():
+    model = OfficialImageViT(
+        ADAPTER_R,
+        EMBED_DIM,
+        PATCH_DIM,
+        PATCH_SIZE,
+        NUM_PATCHES,
+        NUM_HEADS,
+        HEAD_DIM,
+        DROPOUT,
+        CHANNELS,
+        NUM_CLASSES,
+    )
+    set_adapter_grads_only(model)
+    images = torch.rand(1, 1, CHANNELS, 32, 32)
+    model(images).sum().backward()
+
+    adapter_grads, adapter_names = collect_adapter_gradients(model)
+    selected_w, selected_b, selected_w_names, selected_b_names = select_official_attack_gradients(
+        adapter_grads,
+        adapter_names,
+    )
+    assert_true(len(adapter_grads) == len(adapter_names) == 96, "12-layer ViT should share the complete 96-tensor Adapter update")
+    assert_true(all("adapt1" in name or "adapt2" in name for name in adapter_names), "complete update should contain Adapter tensors only")
+    assert_true(len(selected_w) == len(selected_b) == 20, "closed-form attack should consume exactly 20 defended gradient pairs")
+    assert_true(len(selected_w_names) == len(selected_b_names) == 20, "selected attack names should match consumed pairs")
+
+
 def test_simple_ssim_reports_perfect_match():
     images = torch.rand(2, 1, 4, 4)
 
@@ -551,7 +687,10 @@ def test_cli_official_batch2_reports_non_oracle_primary_metrics():
     )
     assert_true(summary["non_oracle_grouping"] == "tag", "official mode should report tag grouping")
     assert_true(summary["oracle_patch_recovery_rate"] == "n/a", "official primary metrics should not use oracle recovery")
-    assert_true(summary["primary_metric_source"] == "direct", "official tag grouping should provide direct primary metrics")
+    assert_true(
+        summary["primary_metric_source"] in {"direct", "clustered"},
+        "official tag grouping should provide a non-oracle primary metric even when collisions require clustering",
+    )
     assert_true(summary["ssim"] != "n/a", "official mode should report SSIM")
 
 
@@ -1117,6 +1256,9 @@ def main():
         test_public_stats_move_preserves_metadata_and_device,
         test_official_public_cdf_probe_is_deterministic,
         test_official_gradient_ratio_recovers_batch1_without_oracle,
+        test_official_source_gradient_inventory_and_lrb_layer_indices,
+        test_official_matched_patch_metrics_use_one_to_one_ground_truth_matches,
+        test_official_source_collects_complete_adapter_update_before_attack_selection,
         test_simple_ssim_reports_perfect_match,
         test_shared_vit_adapter_autograd_gradients_recover_patches,
         test_vit_adapter_run_reports_loss_acc_and_device_local_outputs,
