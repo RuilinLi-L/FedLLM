@@ -123,6 +123,7 @@ def emit_summary(fields: dict):
         "defended_gradient_count",
         "patch_count",
         "peftleak_recovered_patch_metric",
+        "peftleak_recovered_patch_status",
         "peftleak_target_patch_count",
         "peftleak_recovered_patch_count",
         "peftleak_recovered_patch_rate",
@@ -1010,6 +1011,19 @@ def run(args) -> dict:
         mean_inv,
         std_inv,
     )
+    clean_recovery_metric = args.defense == "none"
+    if clean_recovery_metric:
+        peftleak_recovered_patch_metric = "official_formula_nonzero_gradient"
+        peftleak_recovered_patch_status = "ok"
+        peftleak_recovered_patch_count = candidate_patch_count
+        peftleak_recovered_patch_rate = candidate_patch_count / max(1, patch_count)
+        image_metric_scope = "peftleak_recovered_patch_primary"
+    else:
+        peftleak_recovered_patch_metric = "unavailable_for_defended_gradients"
+        peftleak_recovered_patch_status = "defended_gradients_generate_unbounded_candidates"
+        peftleak_recovered_patch_count = None
+        peftleak_recovered_patch_rate = None
+        image_metric_scope = "denorm_recovered_patch_primary"
 
     fields = {
         "result_status": "ok",
@@ -1025,10 +1039,11 @@ def run(args) -> dict:
         "attack_index_count": len(attack_indices),
         "defense": args.defense,
         "patch_count": patch_count,
-        "peftleak_recovered_patch_metric": "official_formula_nonzero_gradient",
+        "peftleak_recovered_patch_metric": peftleak_recovered_patch_metric,
+        "peftleak_recovered_patch_status": peftleak_recovered_patch_status,
         "peftleak_target_patch_count": patch_count,
-        "peftleak_recovered_patch_count": candidate_patch_count,
-        "peftleak_recovered_patch_rate": candidate_patch_count / max(1, patch_count),
+        "peftleak_recovered_patch_count": peftleak_recovered_patch_count,
+        "peftleak_recovered_patch_rate": peftleak_recovered_patch_rate,
         "candidate_patch_count": candidate_patch_count,
         "candidate_count_pos1": candidate_counts[0],
         "candidate_count_pos2": candidate_counts[1],
@@ -1043,7 +1058,7 @@ def run(args) -> dict:
         "debug_patch_diagnostics": bool(args.debug_patch_diagnostics),
         "reconstruct_parity_status": parity_status,
         "reconstruct_parity_max_abs_diff": parity_max_abs_diff,
-        "image_metric_scope": "peftleak_recovered_patch_primary",
+        "image_metric_scope": image_metric_scope,
         "mse": None,
         "ssim": None,
         "diagnostic_mse": diagnostic_mse,
@@ -1076,6 +1091,7 @@ def run(args) -> dict:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.rng_seed = int(args.seed)
     start = time.time()
     try:
         fields = run(args)
