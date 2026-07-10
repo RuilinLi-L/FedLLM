@@ -6,7 +6,7 @@
 #   ./scripts/ptg_baselines.sh sst2 1 bert-base-uncased 1 --exposure query_only --baseline_defense none --finetuned_path PATH
 # Script-only flags:
 #   --exposure <first2|mid2|last2|qkv_only|query_only|key_only|value_only|attn_out_only|attn_only|ffn_in_only|ffn_out_only|ffn_only|classifier_only|all>[,...]
-#   --baseline_defense <none|proj_only|topk|compression|noise|dpsgd|soteria|mixup|lrbprojonly|signed_bottleneck>
+#   --baseline_defense <none|proj_only|full_lrb|topk|compression|noise|dpsgd|soteria|mixup|lrbprojonly|signed_bottleneck>
 #   --baseline_param <value>
 #   --full_sweep
 #   --lrb_main_k <value>
@@ -156,6 +156,10 @@ defense_args() {
       param="${param:-$LRB_MAIN_K}"
       printf '%s\n' --defense lrb --defense_lrb_preset proj_only --defense_lrb_keep_ratio_sensitive "$param"
       ;;
+    full_lrb)
+      param="${param:-$LRB_MAIN_K}"
+      printf '%s\n' --defense lrb --defense_lrb_preset full_lrb --defense_lrb_keep_ratio_sensitive "$param"
+      ;;
     lrbprojonly)
       param="${param:-$LRB_MAIN_K}"
       printf '%s\n' --defense lrbprojonly --defense_lrb_keep_ratio_sensitive "$param"
@@ -197,6 +201,7 @@ defense_param_label() {
   case "$defense" in
     none) printf 'n/a' ;;
     proj_only) printf 'proj_only@k=%s' "${param:-$LRB_MAIN_K}" ;;
+    full_lrb) printf 'full_lrb@k=%s' "${param:-$LRB_MAIN_K}" ;;
     lrbprojonly) printf 'lrbprojonly@k=%s' "${param:-$LRB_MAIN_K}" ;;
     topk) printf 'topk@%s' "${param:-0.1}" ;;
     compression) printf 'compression@%sbit' "${param:-8}" ;;
