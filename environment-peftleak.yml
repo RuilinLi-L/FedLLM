@@ -23,7 +23,7 @@ dependencies:
       # Keep the PEFT/AdapterHub stack pinned so installing adapters does
       # not silently upgrade Transformers into the DAGER-incompatible 4.57+
       # line.
-      - transformers==4.45.1
+      - transformers==4.45.2
       - tokenizers==0.20.0
       - datasets==2.19.0
       - accelerate==0.34.2
