@@ -30,5 +30,6 @@ fi
   --defense none \
   --seed "$SEED" \
   --output_dir "$OUTPUT_DIR" \
+  --require_reportable_metrics \
   "${download_args[@]}" \
   "$@"

@@ -71,8 +71,11 @@ from official_image_runner import (
     PATCH_SIZE,
     build_denorm_recovery_metrics,
     build_matched_patch_metrics,
+    cluster_and_score_images,
     collect_adapter_gradients,
+    exclude_attack_indices_from_publicset,
     official_adapter_gradient_names,
+    requested_metrics,
     select_official_attack_gradients,
     set_adapter_grads_only,
 )
@@ -493,6 +496,108 @@ def test_official_matched_patch_metrics_use_one_to_one_ground_truth_matches():
     )
     if metrics["matched_patch_ssim_status"] == "ok":
         assert_true(abs(metrics["matched_patch_ssim_mean"] - 1.0) < 1e-6, "exact matched patches should have SSIM one")
+
+
+def test_official_patch_recovery_is_bounded_with_spurious_candidates():
+    refs = torch.rand(2, 4, 3, 16, 16)
+    candidates = []
+    for position_idx in range(4):
+        candidates.append(
+            [refs[0, position_idx].clone(), refs[1, position_idx].clone()]
+            + [torch.zeros_like(refs[0, position_idx]) for _ in range(40)]
+        )
+    recovery = build_denorm_recovery_metrics(
+        candidates,
+        refs,
+        torch.zeros(3, 1, 1),
+        torch.ones(3, 1, 1),
+        [(1e-8, "1e-08")],
+    )
+    count = recovery["summary"]["denorm_recovered_patch_count_1e-08"]
+    rate = recovery["summary"]["denorm_recovered_patch_rate_1e-08"]
+    assert_true(count == 8, "one-to-one recovery should count each target patch at most once")
+    assert_true(rate == 1.0, "spurious candidates must never push patch recovery above one")
+
+
+def test_official_full_image_metrics_cover_every_reconstruction_without_patch_filtering():
+    refs = torch.rand(2, 4, 3, 16, 16)
+    candidates = [[refs[0, pos].clone(), refs[1, pos].clone()] for pos in range(4)]
+    original_clustering = sys.modules.get("Clustering")
+    fake_clustering = type(
+        "FakeClustering",
+        (),
+        {"match_cluster": staticmethod(lambda _elements, _clusters, _patches: torch.tensor([0, 1] * 4))},
+    )
+    sys.modules["Clustering"] = fake_clustering
+    try:
+        exact = cluster_and_score_images(
+            candidates,
+            refs,
+            torch.zeros(3, 1, 1),
+            torch.ones(3, 1, 1),
+            metrics={"mse", "psnr"},
+            require_reportable=False,
+            seed=7,
+        )
+        candidates[0][0] = torch.zeros_like(candidates[0][0])
+        degraded = cluster_and_score_images(
+            candidates,
+            refs,
+            torch.zeros(3, 1, 1),
+            torch.ones(3, 1, 1),
+            metrics={"mse"},
+            require_reportable=False,
+            seed=7,
+        )
+    finally:
+        if original_clustering is None:
+            sys.modules.pop("Clustering", None)
+        else:
+            sys.modules["Clustering"] = original_clustering
+
+    assert_true(exact["image_match_count"] == 2, "full-image evaluation should score the entire reconstructed batch")
+    assert_true(exact["reconstructed_patch_coverage_rate"] == 1.0, "exact clusters should contain every patch position")
+    assert_true(exact["mse"] < 1e-12, "exact full-image reconstruction should have zero MSE")
+    assert_true(degraded["mse"] > 0.0, "a degraded patch must affect the full-image MSE instead of being filtered out")
+    assert_true(
+        degraded["image_metric_scope"] == "clustered_full_images_one_to_one_all_reconstructions",
+        "top-level image metrics should declare their full-image scope",
+    )
+
+
+def test_official_no_candidate_images_are_gray_filled_and_scored():
+    refs = torch.ones(2, 4, 3, 16, 16)
+    result = cluster_and_score_images(
+        [[], [], [], []],
+        refs,
+        torch.zeros(3, 1, 1),
+        torch.ones(3, 1, 1),
+        metrics={"mse"},
+        require_reportable=False,
+        seed=3,
+    )
+    assert_true(result["reconstructed_image_count"] == 2, "no-candidate attacks should still emit one gray image per target")
+    assert_true(result["reconstructed_patch_coverage_rate"] == 0.0, "gray-filled images should report zero recovered-patch coverage")
+    assert_true(result["mse"] is not None and result["mse"] > 0.0, "failed attacks should report a finite full-image error")
+
+
+def test_official_public_train_split_excludes_attacked_indices():
+    publicset = list(range(8))
+    filtered, excluded = exclude_attack_indices_from_publicset(publicset, "train", [1, 3, 3])
+    untouched, test_excluded = exclude_attack_indices_from_publicset(publicset, "test", [1, 3])
+    assert_true(list(filtered) == [0, 2, 4, 5, 6, 7], "train public statistics must exclude every victim index")
+    assert_true(excluded == 2, "public exclusion metadata should count unique overlapping victim samples")
+    assert_true(untouched is publicset and test_excluded == 0, "the disjoint CIFAR test split should remain unchanged")
+
+
+def test_official_metric_names_are_validated():
+    assert_true(requested_metrics("mse,patch-recovery") == {"mse", "patch_recovery"}, "metric aliases should resolve")
+    try:
+        requested_metrics("mse,typo_metric")
+    except ValueError as exc:
+        assert_true("typo_metric" in str(exc), "unknown metric errors should name the invalid value")
+    else:
+        raise AssertionError("Unknown official image metrics must not be silently ignored")
 
 
 def test_official_source_collects_complete_adapter_update_before_attack_selection():
@@ -1258,6 +1363,11 @@ def main():
         test_official_gradient_ratio_recovers_batch1_without_oracle,
         test_official_source_gradient_inventory_and_lrb_layer_indices,
         test_official_matched_patch_metrics_use_one_to_one_ground_truth_matches,
+        test_official_patch_recovery_is_bounded_with_spurious_candidates,
+        test_official_full_image_metrics_cover_every_reconstruction_without_patch_filtering,
+        test_official_no_candidate_images_are_gray_filled_and_scored,
+        test_official_public_train_split_excludes_attacked_indices,
+        test_official_metric_names_are_validated,
         test_official_source_collects_complete_adapter_update_before_attack_selection,
         test_simple_ssim_reports_perfect_match,
         test_shared_vit_adapter_autograd_gradients_recover_patches,

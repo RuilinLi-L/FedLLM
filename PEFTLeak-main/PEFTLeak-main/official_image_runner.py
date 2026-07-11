@@ -19,6 +19,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from torch import nn  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
+from torch.utils.data import Subset  # noqa: E402
 import torchvision  # noqa: E402
 from torchvision import transforms  # noqa: E402
 
@@ -86,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_dir", default="outputs/peftleak_official_image")
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--metrics", default="mse,ssim,lpips,patch_recovery")
+    parser.add_argument(
+        "--require_reportable_metrics",
+        action="store_true",
+        help="Fail when a requested image metric or clustering dependency is unavailable.",
+    )
     parser.add_argument("--patch_recovery_mse_threshold", type=float, default=1e-6)
     parser.add_argument("--patch_recovery_denorm_thresholds", default="0.001,0.005,0.010")
     parser.add_argument("--debug_patch_diagnostics", action="store_true")
@@ -116,6 +122,9 @@ def emit_summary(fields: dict):
         "data_root",
         "img_list_path",
         "public_split",
+        "public_sample_count",
+        "public_attack_overlap_count",
+        "public_excluded_attack_count",
         "batch_size",
         "attack_index_count",
         "defense",
@@ -137,6 +146,14 @@ def emit_summary(fields: dict):
         "candidate_count_pos3",
         "candidate_count_pos4",
         "clustered_image_count",
+        "reconstructed_image_count",
+        "complete_reconstructed_image_count",
+        "complete_reconstructed_image_rate",
+        "reconstructed_patch_coverage_count",
+        "reconstructed_patch_coverage_rate",
+        "duplicate_cluster_position_count",
+        "image_match_count",
+        "image_matching_method",
         "patch_recovery_metric",
         "patch_recovery_count",
         "patch_recovery_rate",
@@ -173,10 +190,17 @@ def emit_summary(fields: dict):
         "debug_best_candidate",
         "debug_dump_path",
         "image_metric_scope",
+        "metrics",
+        "require_reportable_metrics",
         "mse",
         "mse_std",
+        "mse_status",
+        "psnr",
+        "psnr_std",
+        "psnr_status",
         "ssim",
         "ssim_std",
+        "ssim_status",
         "lpips",
         "lpips_std",
         "diagnostic_mse",
@@ -262,6 +286,18 @@ def load_attack_images(trainset, img_list_path: Path, batch_size: int):
         images.append(image)
         labels.append(int(label))
     return torch.stack(images), torch.tensor(labels, dtype=torch.long), indices[:batch_size]
+
+
+def exclude_attack_indices_from_publicset(publicset, public_split: str, attack_indices: list[int]):
+    """Keep public statistics disjoint from the attacked training examples."""
+    if public_split != "train":
+        return publicset, 0
+    attacked = {int(idx) for idx in attack_indices}
+    overlap_count = sum(1 for idx in attacked if 0 <= idx < len(publicset))
+    public_indices = [idx for idx in range(len(publicset)) if idx not in attacked]
+    if not public_indices:
+        raise ValueError("No public samples remain after excluding the attacked training indices.")
+    return Subset(publicset, public_indices), int(overlap_count)
 
 
 def configure_position_embeddings(w_glob: dict[str, torch.Tensor]):
@@ -795,7 +831,14 @@ def flatten_candidate_patches(candidate_by_position) -> tuple[torch.Tensor, torc
 def requested_metrics(raw_metrics: str) -> set[str]:
     aliases = {"patch-recovery": "patch_recovery", "patch_recovery_rate": "patch_recovery"}
     values = {item.strip().lower() for item in str(raw_metrics).split(",") if item.strip()}
-    return {aliases.get(item, item) for item in values}
+    resolved = {aliases.get(item, item) for item in values}
+    supported = {"mse", "psnr", "ssim", "lpips", "patch_recovery"}
+    unknown = sorted(resolved.difference(supported))
+    if unknown:
+        raise ValueError(f"Unsupported --metrics values: {', '.join(unknown)}")
+    if not resolved:
+        raise ValueError("--metrics must request at least one metric.")
+    return resolved
 
 
 def build_matched_patch_metrics(
@@ -1025,60 +1068,224 @@ def simple_ssim(image: torch.Tensor, reference: torch.Tensor) -> float:
     return float(((2 * mu_x * mu_y + c1) * (2 * cov + c2) / ((mu_x**2 + mu_y**2 + c1) * (var_x + var_y + c2))).item())
 
 
-def cluster_and_score_images(candidate_by_position, refs: torch.Tensor, mean_inv: torch.Tensor, std_inv: torch.Tensor):
+def _minimum_cost_image_pairs(cost: torch.Tensor, *, require_optimal: bool) -> tuple[list[tuple[int, int]], str]:
     try:
-        from Clustering import match_cluster
-    except Exception as exc:  # noqa: BLE001 - image-level scoring is diagnostic only.
-        return None, None, 0, f"unavailable:{type(exc).__name__}:{exc}"
+        from scipy.optimize import linear_sum_assignment
 
-    cluster_comp = []
-    cluster_positions = []
-    for position_idx, candidates in enumerate(candidate_by_position):
-        for candidate in candidates:
-            cluster_comp.append(candidate.reshape(PATCH_DIM)[0:POSITION_ZERO_DIM])
-            cluster_positions.append(position_idx)
-    if not cluster_comp:
-        return None, None, 0, "unavailable:no_candidates"
+        recovered_indices, reference_indices = linear_sum_assignment(cost.detach().cpu().double().numpy())
+        pairs = list(zip(recovered_indices.tolist(), reference_indices.tolist()))
+        return pairs, "hungarian"
+    except ImportError as exc:
+        if require_optimal:
+            raise RuntimeError("scipy is required for reportable one-to-one image matching.") from exc
 
-    try:
-        labels = match_cluster(torch.stack(cluster_comp), refs.shape[0], NUM_PATCHES)
-    except Exception as exc:  # noqa: BLE001 - keep patch recovery reportable.
-        return None, None, 0, f"unavailable:{type(exc).__name__}:{exc}"
+    candidates = []
+    for recovered_idx in range(int(cost.shape[0])):
+        for reference_idx in range(int(cost.shape[1])):
+            candidates.append((float(cost[recovered_idx, reference_idx].item()), recovered_idx, reference_idx))
+    candidates.sort()
+    used_recovered = set()
+    used_reference = set()
+    pairs = []
+    for _value, recovered_idx, reference_idx in candidates:
+        if recovered_idx in used_recovered or reference_idx in used_reference:
+            continue
+        used_recovered.add(recovered_idx)
+        used_reference.add(reference_idx)
+        pairs.append((recovered_idx, reference_idx))
+    return pairs, "greedy_fallback"
 
+
+def _unavailable_image_metrics(metrics: set[str], status: str) -> dict:
+    return {
+        "clustered_image_count": 0,
+        "reconstructed_image_count": 0,
+        "complete_reconstructed_image_count": 0,
+        "complete_reconstructed_image_rate": 0.0,
+        "reconstructed_patch_coverage_count": 0,
+        "reconstructed_patch_coverage_rate": 0.0,
+        "duplicate_cluster_position_count": 0,
+        "image_match_count": 0,
+        "image_matching_method": None,
+        "image_metric_scope": "clustered_full_images_one_to_one_all_reconstructions",
+        "mse": None,
+        "mse_std": None,
+        "mse_status": status if "mse" in metrics else "not_requested",
+        "psnr": None,
+        "psnr_std": None,
+        "psnr_status": status if "psnr" in metrics else "not_requested",
+        "ssim": None,
+        "ssim_std": None,
+        "ssim_status": status if "ssim" in metrics else "not_requested",
+        "lpips": None,
+        "lpips_std": None,
+        "lpips_status": status if "lpips" in metrics else "not_requested",
+        "diagnostic_mse": None,
+        "diagnostic_ssim": None,
+        "diagnostic_image_metric_status": status,
+    }
+
+
+def cluster_and_score_images(
+    candidate_by_position,
+    refs: torch.Tensor,
+    mean_inv: torch.Tensor,
+    std_inv: torch.Tensor,
+    *,
+    metrics: set[str],
+    require_reportable: bool,
+    seed: int,
+) -> dict:
+    """Cluster without ground truth, gray-fill missing patches, then evaluate full images."""
+    batch_size = int(refs.shape[0])
+    flat_candidates = [candidate.detach().cpu().float() for group in candidate_by_position for candidate in group]
+    cluster_positions = [position_idx for position_idx, group in enumerate(candidate_by_position) for _ in group]
     cluster_patches: dict[int, dict[int, torch.Tensor]] = {}
-    for label, position_idx, candidate in zip(labels.tolist(), cluster_positions, [c for group in candidate_by_position for c in group]):
-        cluster_patches.setdefault(int(label), {})
-        if position_idx not in cluster_patches[int(label)]:
-            cluster_patches[int(label)][position_idx] = candidate.detach().cpu()
+    duplicate_position_count = 0
+    clustering_status = "gray_fill_no_candidates"
 
+    if flat_candidates:
+        elements = torch.stack([candidate.reshape(PATCH_DIM)[:POSITION_ZERO_DIM] for candidate in flat_candidates])
+        active_clusters = min(batch_size, len(flat_candidates))
+        try:
+            if len(flat_candidates) <= active_clusters * NUM_PATCHES:
+                from Clustering import match_cluster
+
+                labels = match_cluster(elements, active_clusters, NUM_PATCHES)
+                clustering_status = "official_constrained_kmeans"
+            else:
+                from k_means_constrained import KMeansConstrained
+
+                size_max = (len(flat_candidates) + active_clusters - 1) // active_clusters
+                clustering = KMeansConstrained(
+                    n_clusters=active_clusters,
+                    size_min=0,
+                    size_max=size_max,
+                    init="k-means++",
+                    n_init=40,
+                    max_iter=900,
+                    tol=1e-6,
+                    random_state=int(seed),
+                )
+                labels = torch.as_tensor(
+                    clustering.fit_predict(elements.double().numpy()),
+                    dtype=torch.long,
+                )
+                clustering_status = "dynamic_constrained_kmeans"
+        except Exception as exc:  # noqa: BLE001 - strict paper mode escalates this below.
+            status = f"unavailable:{type(exc).__name__}:{exc}"
+            if require_reportable:
+                raise RuntimeError(f"Reportable image clustering failed: {status}") from exc
+            return _unavailable_image_metrics(metrics, status)
+
+        for label, position_idx, candidate in zip(labels.tolist(), cluster_positions, flat_candidates):
+            patch_map = cluster_patches.setdefault(int(label), {})
+            if position_idx in patch_map:
+                duplicate_position_count += 1
+                continue
+            patch_map[position_idx] = candidate
+
+    gray_patch = torch.zeros(CHANNELS, PATCH_SIZE, PATCH_SIZE, dtype=torch.float32)
     reconstructed = []
-    for patch_map in cluster_patches.values():
-        if all(idx in patch_map for idx in range(NUM_PATCHES)):
-            reconstructed.append(fold_candidate_image([patch_map[idx] for idx in range(NUM_PATCHES)]))
-    if not reconstructed:
-        return None, None, 0, "unavailable:no_complete_cluster"
-
+    covered_patch_count = 0
+    complete_image_count = 0
+    for cluster_idx in range(batch_size):
+        patch_map = cluster_patches.get(cluster_idx, {})
+        covered_patch_count += len(patch_map)
+        complete_image_count += int(len(patch_map) == NUM_PATCHES)
+        reconstructed.append(
+            fold_candidate_image([patch_map.get(position_idx, gray_patch) for position_idx in range(NUM_PATCHES)])
+        )
     rec = torch.stack(reconstructed).float()
-    ref_images = torch.zeros(refs.shape[0], 3, IMG_SIZE, IMG_SIZE)
-    for idx in range(refs.shape[0]):
-        ref_images[idx] = fold_candidate_image([refs[idx, pos] for pos in range(NUM_PATCHES)])
+    ref_images = torch.stack(
+        [fold_candidate_image([refs[idx, pos] for pos in range(NUM_PATCHES)]) for idx in range(batch_size)]
+    ).float()
 
-    mean = mean_inv.float()
-    std = std_inv.float()
+    mean = mean_inv.detach().cpu().float()
+    std = std_inv.detach().cpu().float()
     rec_denorm = (rec * std + mean).clamp(0, 1)
-    ref_denorm = (ref_images.float() * std + mean).clamp(0, 1)
+    ref_denorm = (ref_images * std + mean).clamp(0, 1)
+    cost = (rec_denorm[:, None] - ref_denorm[None, :]).pow(2).mean(dim=(2, 3, 4))
+    pairs, matching_method = _minimum_cost_image_pairs(cost, require_optimal=require_reportable)
+    recovered = torch.stack([rec_denorm[recovered_idx] for recovered_idx, _reference_idx in pairs])
+    reference = torch.stack([ref_denorm[reference_idx] for _recovered_idx, reference_idx in pairs])
+    mse_scores = (recovered - reference).pow(2).flatten(1).mean(dim=1)
 
-    used = set()
-    mses = []
-    ssims = []
-    for image in rec_denorm:
-        mse_by_ref = (ref_denorm - image.unsqueeze(0)).pow(2).mean(dim=(1, 2, 3))
-        order = torch.argsort(mse_by_ref).tolist()
-        chosen = next((idx for idx in order if idx not in used), order[0])
-        used.add(chosen)
-        mses.append(float(mse_by_ref[chosen].item()))
-        ssims.append(simple_ssim(image, ref_denorm[chosen]))
-    return float(np.mean(mses)), float(np.mean(ssims)), int(len(reconstructed)), "diagnostic_clustered_first_candidate"
+    summary = _unavailable_image_metrics(metrics, "not_computed")
+    summary.update(
+        {
+            "clustered_image_count": int(len(cluster_patches)),
+            "reconstructed_image_count": int(batch_size),
+            "complete_reconstructed_image_count": int(complete_image_count),
+            "complete_reconstructed_image_rate": float(complete_image_count / max(1, batch_size)),
+            "reconstructed_patch_coverage_count": int(covered_patch_count),
+            "reconstructed_patch_coverage_rate": float(covered_patch_count / max(1, batch_size * NUM_PATCHES)),
+            "duplicate_cluster_position_count": int(duplicate_position_count),
+            "image_match_count": int(len(pairs)),
+            "image_matching_method": matching_method,
+            "diagnostic_image_metric_status": f"ok:{clustering_status}",
+        }
+    )
+    if "mse" in metrics:
+        summary["mse"] = float(mse_scores.mean().item())
+        summary["mse_std"] = float(mse_scores.std(unbiased=False).item())
+        summary["mse_status"] = "ok"
+    if "psnr" in metrics:
+        psnr_scores = -10.0 * torch.log10(mse_scores.clamp_min(1e-12))
+        summary["psnr"] = float(psnr_scores.mean().item())
+        summary["psnr_std"] = float(psnr_scores.std(unbiased=False).item())
+        summary["psnr_status"] = "ok"
+
+    if "ssim" in metrics:
+        try:
+            from skimage.metrics import structural_similarity
+
+            scores = [
+                float(
+                    structural_similarity(
+                        rec_image.permute(1, 2, 0).numpy(),
+                        ref_image.permute(1, 2, 0).numpy(),
+                        channel_axis=-1,
+                        data_range=1.0,
+                        win_size=7,
+                    )
+                )
+                for rec_image, ref_image in zip(recovered, reference)
+            ]
+            summary["ssim"] = float(np.mean(scores))
+            summary["ssim_std"] = float(np.std(scores))
+            summary["ssim_status"] = "ok"
+        except Exception as exc:  # noqa: BLE001 - strict paper mode escalates this below.
+            status = f"failed:{type(exc).__name__}"
+            if require_reportable:
+                raise RuntimeError(f"Requested reportable SSIM failed: {exc}") from exc
+            summary["ssim_status"] = status
+
+    if "lpips" in metrics:
+        try:
+            import lpips
+
+            try:
+                metric = lpips.LPIPS(net="alex", verbose=False)
+            except TypeError:
+                metric = lpips.LPIPS(net="alex")
+            metric.eval()
+            recovered_lpips = F.interpolate(recovered, size=(64, 64), mode="bilinear", align_corners=False)
+            reference_lpips = F.interpolate(reference, size=(64, 64), mode="bilinear", align_corners=False)
+            with torch.no_grad():
+                scores = metric(recovered_lpips.mul(2).sub(1), reference_lpips.mul(2).sub(1)).view(-1)
+            summary["lpips"] = float(scores.mean().item())
+            summary["lpips_std"] = float(scores.std(unbiased=False).item())
+            summary["lpips_status"] = "ok"
+        except Exception as exc:  # noqa: BLE001 - strict paper mode escalates this below.
+            status = f"failed:{type(exc).__name__}"
+            if require_reportable:
+                raise RuntimeError(f"Requested reportable LPIPS failed: {exc}") from exc
+            summary["lpips_status"] = status
+
+    summary["diagnostic_mse"] = summary["mse"]
+    summary["diagnostic_ssim"] = summary["ssim"]
+    return summary
 
 
 def run(args) -> dict:
@@ -1090,10 +1297,16 @@ def run(args) -> dict:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError(f"Requested {args.device}, but CUDA is not available.")
     set_reproducible_seed(int(args.seed), device)
+    metric_set = requested_metrics(args.metrics)
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     trainset, publicset, mean_inv, std_inv = load_cifar100(args)
     images, labels, attack_indices = load_attack_images(trainset, img_list_path, int(args.batch_size))
+    publicset, public_excluded_attack_count = exclude_attack_indices_from_publicset(
+        publicset,
+        args.public_split,
+        attack_indices,
+    )
 
     model = ViT(
         ADAPTER_R,
@@ -1137,6 +1350,8 @@ def run(args) -> dict:
         candidate_by_position,
         official_candidate_by_position,
     )
+    if args.require_reportable_metrics and parity_status != "ok":
+        raise RuntimeError(f"Official reconstruction formula parity failed: {parity_status}")
     refs = reference_patches(images)
     candidate_counts = [len(candidates) for candidates in candidate_by_position]
     candidate_patch_count = sum(candidate_counts)
@@ -1154,7 +1369,6 @@ def run(args) -> dict:
         refs,
         float(args.patch_recovery_mse_threshold),
     )
-    metric_set = requested_metrics(args.metrics)
     primary_label = denorm_recovery["primary_label"]
     primary_matches = denorm_recovery["matches_by_label"][primary_label]
     matched_metrics = build_matched_patch_metrics(
@@ -1163,19 +1377,26 @@ def run(args) -> dict:
         mean_inv,
         std_inv,
         primary_matches,
-        metrics=metric_set,
+        metrics=set(),
     )
-    diagnostic_mse, diagnostic_ssim, clustered_image_count, image_metric_status = cluster_and_score_images(
+    image_metrics = cluster_and_score_images(
         candidate_by_position,
         refs,
         mean_inv,
         std_inv,
+        metrics=metric_set,
+        require_reportable=bool(args.require_reportable_metrics),
+        seed=int(args.seed),
     )
     peftleak_recovered_patch_metric = f"denorm_same_position_one_to_one_mse@{primary_label}"
     peftleak_recovered_patch_status = "ok"
     peftleak_recovered_patch_count = int(matched_metrics["matched_patch_count"])
     peftleak_recovered_patch_rate = float(matched_metrics["matched_patch_rate"])
-    image_metric_scope = "matched_recovered_patches_primary"
+    if peftleak_recovered_patch_count > patch_count or peftleak_recovered_patch_rate > 1.0:
+        raise RuntimeError(
+            "One-to-one patch recovery invariant violated: "
+            f"count={peftleak_recovered_patch_count}, targets={patch_count}."
+        )
 
     fields = {
         "result_status": "ok",
@@ -1187,6 +1408,9 @@ def run(args) -> dict:
         "data_root": args.data_root,
         "img_list_path": str(img_list_path),
         "public_split": args.public_split,
+        "public_sample_count": int(len(publicset)),
+        "public_attack_overlap_count": 0,
+        "public_excluded_attack_count": int(public_excluded_attack_count),
         "batch_size": int(args.batch_size),
         "attack_index_count": len(attack_indices),
         "defense": args.defense,
@@ -1201,7 +1425,6 @@ def run(args) -> dict:
         "candidate_count_pos2": candidate_counts[1],
         "candidate_count_pos3": candidate_counts[2],
         "candidate_count_pos4": candidate_counts[3],
-        "clustered_image_count": clustered_image_count,
         "patch_recovery_metric": peftleak_recovered_patch_metric,
         "patch_recovery_count": peftleak_recovered_patch_count,
         "patch_recovery_rate": peftleak_recovered_patch_rate,
@@ -1212,24 +1435,15 @@ def run(args) -> dict:
         "debug_patch_diagnostics": bool(args.debug_patch_diagnostics),
         "reconstruct_parity_status": parity_status,
         "reconstruct_parity_max_abs_diff": parity_max_abs_diff,
-        "image_metric_scope": image_metric_scope,
         "metrics": args.metrics,
-        "mse": matched_metrics["matched_patch_mse_mean"] if "mse" in metric_set else None,
-        "mse_std": matched_metrics["matched_patch_mse_std"] if "mse" in metric_set else None,
-        "ssim": matched_metrics["matched_patch_ssim_mean"],
-        "ssim_std": matched_metrics["matched_patch_ssim_std"],
-        "lpips": matched_metrics["matched_patch_lpips_mean"],
-        "lpips_std": matched_metrics["matched_patch_lpips_std"],
-        "diagnostic_mse": diagnostic_mse,
-        "diagnostic_ssim": diagnostic_ssim,
-        "diagnostic_image_metric_status": image_metric_status,
-        "lpips_status": matched_metrics["matched_patch_lpips_status"],
+        "require_reportable_metrics": bool(args.require_reportable_metrics),
         "loss": float(loss.detach().cpu().item()),
         "loss_scope": "pre_defense_attack_batch",
     }
     fields.update(defense_fields)
     fields.update(denorm_recovery["summary"])
     fields.update(matched_metrics)
+    fields.update(image_metrics)
     if args.debug_patch_diagnostics:
         diagnostics = build_patch_diagnostics(candidate_by_position, refs, mean_inv, std_inv)
         fields.update(diagnostics["summary"])
@@ -1273,6 +1487,8 @@ def main(argv=None) -> int:
                 "public_split": getattr(args, "public_split", None),
                 "batch_size": getattr(args, "batch_size", None),
                 "defense": getattr(args, "defense", None),
+                "metrics": getattr(args, "metrics", None),
+                "require_reportable_metrics": getattr(args, "require_reportable_metrics", None),
                 "runtime": str(_datetime.timedelta(seconds=time.time() - start)).split(".")[0],
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),

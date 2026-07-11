@@ -114,3 +114,26 @@ Recommended AAAI wording:
 - Use: "Projection-LRB is evaluated on a PEFTLeak-style image/adapter leakage mechanism as a cross-modal supplementary study."
 - Avoid: "full reproduction of PEFTLeak" or "byte-for-byte official PEFTLeak implementation."
 - Keep `oracle_*` fields out of main privacy tables; use them only to debug whether the constructed probes can recover the intended private slot assignments.
+
+## Source-Aligned CIFAR100 Runner
+
+Use `bash scripts/peftleak_official_image_clean.sh` for the paper-facing port of the upstream
+`Adapter_attack.ipynb` path. This wrapper enables `--require_reportable_metrics`, so a requested
+SSIM/LPIPS dependency failure, clustering failure, or official recovery-formula parity failure makes
+the run fail instead of producing a successful summary with missing fields.
+
+Metric scopes are intentionally separate:
+
+- `patch_recovery_rate` is the same-position, one-to-one GT verification rate at the reported
+  denormalized MSE threshold. It is bounded to `[0, 1]` and is not used to select images for the
+  top-level quality metrics.
+- Top-level `mse`, `psnr`, `ssim`, and `lpips` are computed on the entire reconstructed image batch.
+  Candidate patches are clustered without GT, missing patch positions are filled with mid-gray, and
+  the reconstructed images are matched one-to-one with references only for permutation-invariant
+  evaluation.
+- `image_metric_scope=clustered_full_images_one_to_one_all_reconstructions` identifies this protocol.
+  `matched_patch_*` fields remain threshold-conditioned patch diagnostics and must not replace the
+  top-level image metrics in defense comparisons.
+
+The default public split is CIFAR100 test. If `--public_split train` is requested, victim indices from
+`img_list.npy` are removed before public-bin estimation; the summary records the exclusion count.
