@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 from types import SimpleNamespace
@@ -17,11 +19,13 @@ if torch is not None:
         adaptive_attack_summary_fields,
         adaptive_check_if_in_span,
         adaptive_defense_aware_active,
+        adaptive_get_span_dists,
         adaptive_get_top_B_in_span,
         adaptive_transform_candidates,
         prepare_adaptive_attack,
         validate_adaptive_attack_args,
     )
+    from utils.functional import filter_outliers
 
 
 def assert_true(condition, message):
@@ -204,6 +208,101 @@ def test_adaptive_span_check_preserves_plain_shape():
     assert_true(tuple(sizes.shape) == (1, 3), "adaptive span check should preserve check_if_in_span output shape")
 
 
+class _SpanDistanceModelWrapper:
+    def __init__(self, layer_inputs=None):
+        self.args = SimpleNamespace(device="cpu", n_layers=2)
+        self.layer_inputs = layer_inputs
+        self.layer_input_calls = 0
+
+    def get_layer_inputs(self, sentences, layers):
+        self.layer_input_calls += 1
+        if self.layer_inputs is None:
+            raise AssertionError("p > 0 must not compute unused layer inputs")
+        return [value.clone() for value in self.layer_inputs]
+
+
+def _span_distance_args(verbose=False):
+    return SimpleNamespace(
+        adaptive_attack="none",
+        defense_adaptive_decoding=False,
+        defense="noise",
+        dist_norm="l2",
+        n_layers=2,
+        verbose_attack_debug=verbose,
+    )
+
+
+def _manual_span_logit_mean(args, matrices, values):
+    distances = [
+        adaptive_check_if_in_span(
+            args,
+            matrix,
+            value.clone(),
+            args.dist_norm,
+            layer_position=layer_position,
+        ).T
+        if layer_position == 0
+        else adaptive_check_if_in_span(
+            args,
+            matrix,
+            value.clone(),
+            args.dist_norm,
+            layer_position=layer_position,
+        )
+        for layer_position, (matrix, value) in enumerate(zip(matrices, values))
+    ]
+    joined = torch.cat(distances, dim=1).clamp(min=1e-12, max=1 - 1e-12)
+    return (torch.log(joined) - torch.log(1 - joined)).mean(dim=1)
+
+
+def test_noisy_span_distances_skip_unused_layer_forward_after_position_zero():
+    args = _span_distance_args()
+    wrapper = _SpanDistanceModelWrapper()
+    matrix = torch.tensor([[1.0, 0.0, 0.0]])
+    embeds = torch.eye(3).unsqueeze(0)
+    expected = _manual_span_logit_mean(args, [matrix], [embeds])
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        actual = adaptive_get_span_dists(args, wrapper, [matrix], embeds.clone(), p=3)
+
+    assert_true(wrapper.layer_input_calls == 0, "p > 0 should skip the unused vocabulary layer forward")
+    assert_true(torch.allclose(actual, expected), "p > 0 optimized distances should match the original formula")
+    assert_true(output.getvalue() == "", "span-distance debug output should be disabled by default")
+
+
+def test_noisy_span_distances_keep_position_zero_multilayer_semantics():
+    args = _span_distance_args()
+    matrices = [
+        torch.tensor([[1.0, 0.0, 0.0]]),
+        torch.tensor([[0.0, 1.0, 0.0]]),
+    ]
+    embeds = torch.eye(3).unsqueeze(0)
+    layer_inputs = torch.eye(3).unsqueeze(1)
+    wrapper = _SpanDistanceModelWrapper([layer_inputs])
+    expected = _manual_span_logit_mean(args, matrices, [embeds, layer_inputs])
+
+    actual = adaptive_get_span_dists(args, wrapper, matrices, embeds.clone(), p=0)
+
+    assert_true(wrapper.layer_input_calls == 1, "p == 0 should retain the required layer forward")
+    assert_true(torch.allclose(actual, expected), "p == 0 multilayer distances should preserve baseline semantics")
+
+
+def test_outlier_debug_output_is_opt_in_without_changing_candidates():
+    distances = torch.tensor([-2.0, -1.0, 1.0, 2.0])
+    quiet_output = io.StringIO()
+    with contextlib.redirect_stdout(quiet_output):
+        quiet_ids = filter_outliers(distances, std_thrs=0.5, maxB=2)
+
+    verbose_output = io.StringIO()
+    with contextlib.redirect_stdout(verbose_output):
+        verbose_ids = filter_outliers(distances, std_thrs=0.5, maxB=2, verbose=True)
+
+    assert_true(torch.equal(quiet_ids, verbose_ids), "verbosity must not change outlier candidates")
+    assert_true(quiet_output.getvalue() == "", "outlier diagnostics should be quiet by default")
+    assert_true("Wrong dists:" in verbose_output.getvalue(), "verbose mode should retain outlier diagnostics")
+
+
 def main():
     if torch is None:
         print("Skipping adaptive-attack semantic tests: torch is not installed in this Python environment.")
@@ -218,6 +317,9 @@ def main():
         test_lrb_projection_metadata_reuses_defense_layer_info,
         test_lrb_signed_projection_uses_feature_axis_signs_for_transposed_gpt2_grad,
         test_adaptive_span_check_preserves_plain_shape,
+        test_noisy_span_distances_skip_unused_layer_forward_after_position_zero,
+        test_noisy_span_distances_keep_position_zero_multilayer_semantics,
+        test_outlier_debug_output_is_opt_in_without_changing_candidates,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

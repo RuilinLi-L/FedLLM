@@ -415,7 +415,8 @@ def filter_l1(args, model_wrapper, R_Qs):
     n_tokens = 0
 
     while True:
-        print(f'L1 Position {p}')
+        if args.verbose_attack_debug:
+            print(f'L1 Position {p}')
         embeds = model_wrapper.get_embeddings(p)
         if model_wrapper.is_bert():
             if not uses_noisy_gradient_decoding(args):
@@ -449,7 +450,15 @@ def filter_l1(args, model_wrapper, R_Qs):
             else:
                 std_thrs = args.p1_std_thrs if p==0 else None
                 d = adaptive_get_span_dists(args, model_wrapper, R_Qs, embeds, p)
-                res_ids_new = filter_outliers(d, std_thrs=std_thrs, maxB=max(50*model_wrapper.args.batch_size, int(0.05*len(model_wrapper.tokenizer))))
+                res_ids_new = filter_outliers(
+                    d,
+                    std_thrs=std_thrs,
+                    maxB=max(
+                        50 * model_wrapper.args.batch_size,
+                        int(0.05 * len(model_wrapper.tokenizer)),
+                    ),
+                    verbose=args.verbose_attack_debug,
+                )
             res_types_new = torch.zeros_like(res_ids_new)
         res_pos_new = torch.ones_like( res_ids_new ) * p
         
@@ -500,7 +509,8 @@ def _decode_gpt2_nonprefix(args, model_wrapper, R_Qs, orig_batch):
     res_types = []
 
     for pos in range(max_len):
-        print(f'Non-prefix partial position {pos}')
+        if args.verbose_attack_debug:
+            print(f'Non-prefix partial position {pos}')
         proposals = []
         position_candidate_scores = {}
         for prefix, prefix_score in beams:
@@ -724,16 +734,17 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper, preco
         else:
             res_pos, res_ids, res_types, sentence_ends = filter_l1(args, model_wrapper, R_Qs)
         
-        print( orig_batch )
-        print( orig_batch['input_ids'].T )
+        if args.verbose_attack_debug:
+            print(orig_batch)
+            print(orig_batch['input_ids'].T)
         if len(res_ids) == 0:        
             reference = []
             for i in range(orig_batch['input_ids'].shape[0]):
                 reference += [remove_padding(tokenizer, orig_batch['input_ids'][i], left=(args.pad=='left'))]
             emit_rec_metrics(args, orig_batch, rec_status='no_l1_candidates')
             return ['' for _ in reference], reference
-        if len(res_ids[0])<100000:
-            print( res_pos, res_ids, res_types )
+        if args.verbose_attack_debug and len(res_ids[0]) < 100000:
+            print(res_pos, res_ids, res_types)
         
         rec_l1, rec_l1_maxB, rec_l2 = [], [], []
 
@@ -802,7 +813,8 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper, preco
                 layer_position=1,
             )
             boolsq2 = sizesq2 < args.l2_span_thresh
-            print( sizesq2 )
+            if args.verbose_attack_debug:
+                print(sizesq2)
         
             if args.task == 'next_token_pred':
                 rec_l2.append( torch.all(boolsq2[:-1]).item() )

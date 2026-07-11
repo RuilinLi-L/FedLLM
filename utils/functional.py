@@ -143,20 +143,22 @@ def get_top_B_in_span(R_K_norm, v, B, thresh, norm):
     which_new = tuple( which_new )
     return which_new
 
-def filter_outliers(d, stage='token', std_thrs=None, maxB=None):
+def filter_outliers(d, stage='token', std_thrs=None, maxB=None, verbose=False):
     if std_thrs is None:
         res_ids = torch.tensor(d.argsort()[:maxB])
         bools = torch.zeros_like(d).bool()
         bools[res_ids] = True
     elif maxB is None:
-        print(f'Wrong dists: {d.mean()} +- {d.std()}')
+        if verbose:
+            print(f'Wrong dists: {d.mean()} +- {d.std()}')
         d = (d - d.mean())/d.std()
         bools = d < -std_thrs
         res_ids = torch.tensor(np.nonzero(bools)[:, 0])
     else:
         bools = torch.zeros_like(d).bool()
         bools[torch.tensor(d.argsort()[:maxB])] = True
-        print(f'Wrong dists: {d.mean()} +- {d.std()}')
+        if verbose:
+            print(f'Wrong dists: {d.mean()} +- {d.std()}')
         d = (d - d.mean())/d.std()
         bools = bools & (d < -std_thrs)
         res_ids = torch.tensor(np.nonzero(bools)[:, 0])
@@ -170,8 +172,9 @@ def get_span_dists(args, model_wrapper, R_Qs, embeds, p=0, stage='token'):
     dists = []
     if stage == 'token':
         dists.append(check_if_in_span(R_Qs[0], embeds, args.dist_norm).T)
-        sentences = torch.arange(embeds.shape[1]).unsqueeze(1).to(model_wrapper.args.device)
-        embs = model_wrapper.get_layer_inputs(sentences, layers=args.n_layers-1)
+        if p == 0:
+            sentences = torch.arange(embeds.shape[1]).unsqueeze(1).to(model_wrapper.args.device)
+            embs = model_wrapper.get_layer_inputs(sentences, layers=args.n_layers-1)
         
     else:
         embs = [e.to(model_wrapper.args.device) for e in embeds]
@@ -180,8 +183,10 @@ def get_span_dists(args, model_wrapper, R_Qs, embeds, p=0, stage='token'):
         for i in range(model_wrapper.args.n_layers-1):
                 dists.append(check_if_in_span(R_Qs[i+1], embs[i], args.dist_norm))
     
-    print('dists', torch.cat(dists, axis=1).shape)
-    d = torch.log(torch.cat(dists, axis=1))-torch.log(1-torch.cat(dists, axis=1))
+    joined = torch.cat(dists, axis=1)
+    if bool(getattr(args, 'verbose_attack_debug', False)):
+        print('dists', joined.shape)
+    d = torch.log(joined)-torch.log(1-joined)
     d = d.mean(axis=1).cpu().detach()
     
     return d

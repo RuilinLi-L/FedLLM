@@ -5,6 +5,7 @@ from tqdm import tqdm
 from utils.adaptive_attack import adaptive_check_if_in_span
 
 def filter_encoder(args, model_wrapper, R_Q2, l, token_type, res_ids, sentence_filter, approx_sentence_filter, approx_sentence_score, max_ids, B):
+    verbose_attack_debug = bool(getattr(args, 'verbose_attack_debug', False))
     predicted_sentences = [ [-1]*(l+1) for i in range(B) ]
     predicted_sentences_scores = [ torch.inf for i in range(B) ]
 
@@ -36,8 +37,9 @@ def filter_encoder(args, model_wrapper, R_Q2, l, token_type, res_ids, sentence_f
     res_ids_final = torch.tensor(np.array( [ res_id + [-1]*(max_lens - len(res_id))  for i, res_id in enumerate(res_ids) if i < l ] )).to(args.device)
     
     it_lst = iter( lst )
-    print( f'Len {l}:{total_num_combos}' )
-    progress_bar = tqdm(total=total_num_combos)
+    if verbose_attack_debug:
+        print(f'Len {l}:{total_num_combos}')
+    progress_bar = tqdm(total=total_num_combos, disable=not verbose_attack_debug)
     passed = 0
     while passed < args.maxC:
         if total_num_combos < args.maxC:

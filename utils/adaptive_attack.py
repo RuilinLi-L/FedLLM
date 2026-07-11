@@ -447,8 +447,9 @@ def adaptive_get_span_dists(args, model_wrapper, R_Qs, embeds, p=0, stage="token
         dists.append(
             adaptive_check_if_in_span(args, R_Qs[0], embeds, args.dist_norm, layer_position=0).T
         )
-        sentences = torch.arange(embeds.shape[1]).unsqueeze(1).to(model_wrapper.args.device)
-        embs = model_wrapper.get_layer_inputs(sentences, layers=args.n_layers - 1)
+        if p == 0:
+            sentences = torch.arange(embeds.shape[1]).unsqueeze(1).to(model_wrapper.args.device)
+            embs = model_wrapper.get_layer_inputs(sentences, layers=args.n_layers - 1)
     else:
         embs = [e.to(model_wrapper.args.device) for e in embeds]
 
@@ -464,6 +465,7 @@ def adaptive_get_span_dists(args, model_wrapper, R_Qs, embeds, p=0, stage="token
                 )
             )
 
-    print("dists", torch.cat(dists, axis=1).shape)
     joined = torch.cat(dists, axis=1).clamp(min=1e-12, max=1 - 1e-12)
+    if bool(getattr(args, "verbose_attack_debug", False)):
+        print("dists", joined.shape)
     return (torch.log(joined) - torch.log(1 - joined)).mean(axis=1).cpu().detach()

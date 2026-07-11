@@ -26,6 +26,14 @@ def get_args(argv=None):
         help='Append all stdout/stderr to this UTF-8 file (Python streams only; use shell tee for raw FD capture).',
     )
     parser.add_argument('--log_append', action='store_true', help='Append to log_file instead of truncating.')
+    parser.add_argument(
+        '--verbose_attack_debug',
+        action='store_true',
+        help=(
+            'Print high-volume DAGER internals such as per-position span shapes, '
+            'candidate tensors, and decoder progress bars. Disabled by default.'
+        ),
+    )
     
     # Method and setting
     parser.add_argument('--rng_seed', type=int, default=101) 

@@ -23,6 +23,7 @@ def _decoder_candidate_chunk_size(args, n_ends):
 def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
     from utils.adaptive_attack import adaptive_check_if_in_span
 
+    verbose_attack_debug = bool(getattr(args, 'verbose_attack_debug', False))
     R_Q2 = R_Qs[1]
     res_ids = copy.deepcopy(res_ids)
     for i in range(len(res_ids)):
@@ -54,7 +55,8 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
     
     i = 1
     while True:
-        print(f'Position {i}')
+        if verbose_attack_debug:
+            print(f'Position {i}')
 
         top_B_incorrect_sentences_len = [[] for i in range(args.batch_size)]
         top_B_incorrect_scores_len = [torch.inf for i in range(args.batch_size)]
@@ -78,7 +80,10 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
         ds = []
         is_complete=not uses_noisy_gradient_decoding(args)
         curr_sentence = 0
-        progress_bar = tqdm(total=batch.shape[0]*ends.shape[0])
+        progress_bar = tqdm(
+            total=batch.shape[0] * ends.shape[0],
+            disable=not verbose_attack_debug,
+        )
         
         while True:
             els_b = []
@@ -102,9 +107,16 @@ def filter_decoder(args, model_wrapper, R_Qs, res_ids, max_ids=-1):
                 )
                 is_new_batch_incorrect = is_batch_incorrect[idxs[:, 0]]
                 sizesq2 = torch.cat(ds)
-                sizesq2, correct_sentences = filter_outliers(sizesq2, stage='sequence', std_thrs=args.l2_std_thrs, maxB=args.batch_size)
+                sizesq2, correct_sentences = filter_outliers(
+                    sizesq2,
+                    stage='sequence',
+                    std_thrs=args.l2_std_thrs,
+                    maxB=args.batch_size,
+                    verbose=verbose_attack_debug,
+                )
                 is_complete = True
-                print(sizesq2.min())
+                if verbose_attack_debug:
+                    print(sizesq2.min())
             else:
                 new_batch = torch.cat((batch[els_b], ends[els_ends].unsqueeze(1)),dim=-1).int().to(args.device)
                 is_new_batch_incorrect = is_batch_incorrect[els_b].to(args.device)
