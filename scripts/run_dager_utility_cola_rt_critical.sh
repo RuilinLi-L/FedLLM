@@ -9,6 +9,7 @@ DAGER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$DAGER_ROOT" || exit 1
 
 PROFILE="p0"
+BASELINE=""
 DATASETS="cola,rotten_tomatoes"
 GPU_REQUEST="auto"
 DRY_RUN=0
@@ -22,6 +23,7 @@ Usage: bash scripts/run_dager_utility_cola_rt_critical.sh [options]
 
 Options:
   --profile p0|p1|all       p0: main-table points; p1: extra mechanism points
+  --baseline NAME           Run exactly one baseline across the selected datasets
   --datasets LIST           Comma-separated: cola,rotten_tomatoes
   --gpu auto|all|ID[,ID]    Preserve, clear, or set CUDA_VISIBLE_DEVICES
   --log-dir PATH            Reuse a run directory (successful logs are skipped)
@@ -30,6 +32,10 @@ Options:
 
 P0 per dataset: none, Projection-LRB@0.99, privacy-boundary top-k, compression@20.
 P1 per dataset: Projection-LRB@0.90 and full LRB@0.50.
+
+Baseline names:
+  none, lrbprojonly_0.99, topk_boundary, compression_20,
+  lrbprojonly_0.90, lrb_0.50
 EOF
 }
 
@@ -41,6 +47,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --profile=*)
       PROFILE="${1#*=}"
+      shift
+      ;;
+    --baseline)
+      BASELINE="${2:?--baseline requires a value}"
+      shift 2
+      ;;
+    --baseline=*)
+      BASELINE="${1#*=}"
       shift
       ;;
     --datasets)
@@ -91,6 +105,16 @@ case "$PROFILE" in
     ;;
 esac
 
+if [ -n "$BASELINE" ]; then
+  case "$BASELINE" in
+    none|lrbprojonly_0.99|topk_boundary|compression_20|lrbprojonly_0.90|lrb_0.50) ;;
+    *)
+      echo "[utility-critical] Unsupported --baseline: ${BASELINE}" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 case "$GPU_REQUEST" in
   auto)
     ;;
@@ -115,7 +139,8 @@ done
 
 if [ -z "$RUN_DIR" ]; then
   STAMP="$(date +%Y%m%d_%H%M%S)"
-  RUN_DIR="log/runs/dager_utility_cola_rt_critical_${PROFILE}_${STAMP}"
+  RUN_LABEL="${BASELINE:-$PROFILE}"
+  RUN_DIR="log/runs/dager_utility_cola_rt_critical_${RUN_LABEL}_${STAMP}"
 fi
 
 EXIT_CODES="${RUN_DIR}/exit_codes.csv"
@@ -128,6 +153,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
   cat > "${RUN_DIR}/run_manifest.txt" <<EOF
 script=scripts/run_dager_utility_cola_rt_critical.sh
 profile=${PROFILE}
+baseline=${BASELINE:-all_from_profile}
 datasets=${DATASETS}
 batch_size=2
 num_epochs=1
@@ -239,18 +265,49 @@ run_variant() {
   done
 }
 
-for dataset in "${DATASET_LIST[@]}"; do
-  if [ "$PROFILE" = "p0" ] || [ "$PROFILE" = "all" ]; then
-    run_variant "$dataset" none n/a none
-    run_variant "$dataset" lrbprojonly 0.99 lrbprojonly_0.99
-    topk_boundary="$(topk_boundary_for "$dataset")"
-    run_variant "$dataset" topk "$topk_boundary" "topk_${topk_boundary}"
-    run_variant "$dataset" compression 20 compression_20
-  fi
+run_selected_baseline() {
+  local dataset="$1"
+  local baseline="$2"
 
-  if [ "$PROFILE" = "p1" ] || [ "$PROFILE" = "all" ]; then
-    run_variant "$dataset" lrbprojonly 0.90 lrbprojonly_0.90
-    run_variant "$dataset" lrb 0.50 lrb_0.50
+  case "$baseline" in
+    none)
+      run_variant "$dataset" none n/a none
+      ;;
+    lrbprojonly_0.99)
+      run_variant "$dataset" lrbprojonly 0.99 lrbprojonly_0.99
+      ;;
+    topk_boundary)
+      local topk_boundary
+      topk_boundary="$(topk_boundary_for "$dataset")"
+      run_variant "$dataset" topk "$topk_boundary" "topk_${topk_boundary}"
+      ;;
+    compression_20)
+      run_variant "$dataset" compression 20 compression_20
+      ;;
+    lrbprojonly_0.90)
+      run_variant "$dataset" lrbprojonly 0.90 lrbprojonly_0.90
+      ;;
+    lrb_0.50)
+      run_variant "$dataset" lrb 0.50 lrb_0.50
+      ;;
+  esac
+}
+
+for dataset in "${DATASET_LIST[@]}"; do
+  if [ -n "$BASELINE" ]; then
+    run_selected_baseline "$dataset" "$BASELINE"
+  else
+    if [ "$PROFILE" = "p0" ] || [ "$PROFILE" = "all" ]; then
+      run_selected_baseline "$dataset" none
+      run_selected_baseline "$dataset" lrbprojonly_0.99
+      run_selected_baseline "$dataset" topk_boundary
+      run_selected_baseline "$dataset" compression_20
+    fi
+
+    if [ "$PROFILE" = "p1" ] || [ "$PROFILE" = "all" ]; then
+      run_selected_baseline "$dataset" lrbprojonly_0.90
+      run_selected_baseline "$dataset" lrb_0.50
+    fi
   fi
 done
 

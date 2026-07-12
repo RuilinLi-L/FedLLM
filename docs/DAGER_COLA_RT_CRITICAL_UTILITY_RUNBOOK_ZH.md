@@ -51,7 +51,7 @@
 
 Rotten Tomatoes 暂无已汇总的 full-training utility。CoLA 也没有 Projection-LRB、top-k 边界或 compression 边界的 utility。
 
-## 执行
+## 执行：一个 baseline 一条命令
 
 在 Linux 训练服务器上：
 
@@ -59,36 +59,49 @@ Rotten Tomatoes 暂无已汇总的 full-training utility。CoLA 也没有 Projec
 cd /data/lrl/FedLLM
 conda activate dager
 
-# 先检查将执行的 24 条训练命令，不启动训练
-bash scripts/run_dager_utility_cola_rt_critical.sh --profile p0 --dry-run
-
-# 开始 P0；默认保留当前 CUDA_VISIBLE_DEVICES，并由 train.py 选择空闲可见 GPU
-bash scripts/run_dager_utility_cola_rt_critical.sh --profile p0 --gpu auto
+# 每条命令只检查一个 baseline，共打印 6 条训练命令（2 datasets x 3 seeds）
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline none --dry-run
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline lrbprojonly_0.99 --dry-run
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline topk_boundary --dry-run
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline compression_20 --dry-run
 ```
 
-手动限制 GPU：
+有四张 GPU 时，在四个终端或四个 tmux pane 中分别执行：
 
 ```bash
-bash scripts/run_dager_utility_cola_rt_critical.sh --profile p0 --gpu 2
-bash scripts/run_dager_utility_cola_rt_critical.sh --profile p0 --gpu 0,1
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline none --gpu 0
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline lrbprojonly_0.99 --gpu 1
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline topk_boundary --gpu 2
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline compression_20 --gpu 3
 ```
 
-如果中断，指定原日志目录即可续跑；包含 `result_status=ok` 的 seed 会跳过：
+每条命令依次跑 CoLA 和 Rotten Tomatoes，并为该 baseline 创建独立日志目录，例如 `dager_utility_cola_rt_critical_topk_boundary_<timestamp>`。不要让两个进程使用同一张物理 GPU，除非显存和调度允许。
+
+只有两张 GPU 时先并行跑前两条，结束后再并行跑后两条。仍然保持一个 baseline 一条命令。
+
+如果某个 baseline 中断，指定它原来的日志目录即可续跑；包含 `result_status=ok` 的 seed 会跳过：
 
 ```bash
 bash scripts/run_dager_utility_cola_rt_critical.sh \
-  --profile p0 \
-  --log-dir log/runs/dager_utility_cola_rt_critical_p0_YYYYMMDD_HHMMSS
+  --baseline topk_boundary \
+  --gpu 2 \
+  --log-dir log/runs/dager_utility_cola_rt_critical_topk_boundary_YYYYMMDD_HHMMSS
 ```
 
-只跑一个数据集：
+某个 baseline 只跑一个数据集：
 
 ```bash
-bash scripts/run_dager_utility_cola_rt_critical.sh --profile p0 --datasets cola
-bash scripts/run_dager_utility_cola_rt_critical.sh --profile p0 --datasets rotten_tomatoes
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline topk_boundary --datasets cola --gpu 0
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline topk_boundary --datasets rotten_tomatoes --gpu 1
 ```
 
-runner 与隐私实验保持一致：batch size `2`、epoch `1`、full fine-tuning、seeds `101/202/303`，并从各自 clean 2-epoch checkpoint 继续训练。与 `utility_baselines.sh --baseline_defense ...` 连续调用不同，它不会为每个候选点重复训练 `none`。
+runner 与隐私实验保持一致：batch size `2`、epoch `1`、full fine-tuning、seeds `101/202/303`，并从各自 clean 2-epoch checkpoint 继续训练。`topk_boundary` 会自动给 CoLA 使用 `0.45`、给 Rotten Tomatoes 使用 `0.55`。
+
+原来的整组模式仍保留，但不建议在需要并发时使用：
+
+```bash
+bash scripts/run_dager_utility_cola_rt_critical.sh --profile p0
+```
 
 ## P1：P0 跑完后再补
 
@@ -98,20 +111,22 @@ P1 每个数据集再加两个配置，共 12 次训练：
 - `full_lrb@0.50`：过防御/机制参照。CoLA 已有结果；时间更紧时只补 Rotten Tomatoes。
 
 ```bash
-# 两个数据集都补 P1
-bash scripts/run_dager_utility_cola_rt_critical.sh --profile p1
+# 两条命令可以分配到不同 GPU 并行执行
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline lrbprojonly_0.90 --gpu 0
+bash scripts/run_dager_utility_cola_rt_critical.sh --baseline lrb_0.50 --gpu 1
 
-# 时间更紧：只补 RT；CoLA 的 full_lrb@0.5 已有三 seed
+# 时间更紧：full_lrb@0.5 只补 RT；CoLA 已有三 seed
 bash scripts/run_dager_utility_cola_rt_critical.sh \
-  --profile p1 \
-  --datasets rotten_tomatoes
+  --baseline lrb_0.50 \
+  --datasets rotten_tomatoes \
+  --gpu 1
 ```
 
 不要在第一轮跑 `noise/dpsgd/mixup/soteria` 的 dense utility sweep。它们不是当前主表的关键竞争者；CoLA 已有 `dpsgd@5e-4` coverage。
 
 ## 验收
 
-runner 结束后检查新目录中的：
+每个 baseline runner 结束后检查其独立目录中的：
 
 - `exit_codes.csv`：所有目标行应为 `0`。
 - `utility_results.csv`：每行 `result_status=ok`、`n_runs=3`、`seeds=101 202 303`。
@@ -122,3 +137,17 @@ P0 的决策规则：
 1. 先确认 Projection-LRB@0.99 相对 `none` 的 accuracy 和 macro-F1 drop。
 2. 再与各数据集的 top-k 零恢复边界及共同的 compression@20 比较。
 3. 若 Projection-LRB@0.99 utility 最好或接近最好，再补 P1 和 adaptive DAGER；否则先检查 `k=0.90`，不要继续盲目铺参数。
+
+汇总四个 P0 目录：
+
+```bash
+python3 scripts/collect_experiment_logs.py \
+  log/runs/dager_utility_cola_rt_critical_none_* \
+  log/runs/dager_utility_cola_rt_critical_lrbprojonly_0.99_* \
+  log/runs/dager_utility_cola_rt_critical_topk_boundary_* \
+  log/runs/dager_utility_cola_rt_critical_compression_20_* \
+  -o log/runs/dager_utility_cola_rt_p0_all_results.csv \
+  --markdown log/runs/dager_utility_cola_rt_p0_all_results.md \
+  --utility-output log/runs/dager_utility_cola_rt_p0_utility_results.csv \
+  --utility-markdown log/runs/dager_utility_cola_rt_p0_utility_results.md
+```
