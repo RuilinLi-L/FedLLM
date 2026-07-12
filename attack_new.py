@@ -21,6 +21,7 @@ from utils.dpsgd_opacus import (
     normalize_dpsgd_opacus_args,
     record_dpsgd_opacus_summary,
     sync_private_model_to_public_model,
+    use_effective_batch_size,
 )
 from utils.gpu import resolve_cuda_device, resolve_gradient_device
 from utils.lrb_presets import lrb_preset_param_value
@@ -972,7 +973,7 @@ def _run_dpsgd_opacus_attack(args, metric, t_start):
     frozen_attack = freeze_position_embeddings(attack_wrapper.model)
     if frozen_train or frozen_attack:
         print(
-            f"[dager:dpsgd_opacus] Frozen BERT position embeddings "
+            f"[dager:dpsgd_opacus] Frozen position embeddings "
             f"(train={frozen_train}, attack={frozen_attack}).",
             flush=True,
         )
@@ -1009,7 +1010,8 @@ def _run_dpsgd_opacus_attack(args, metric, t_start):
         outputs = private_model(**model_inputs, labels=labels.view(-1).long())
         outputs.loss.backward()
 
-        if recover_idx >= args.start_input:
+        should_reconstruct = recover_idx >= args.start_input
+        if should_reconstruct:
             t_input_start = time.time()
             args.defense_rng_step = recover_idx
             sample = (decode_batch_texts(train_wrapper.tokenizer, batch), labels)
@@ -1023,7 +1025,6 @@ def _run_dpsgd_opacus_attack(args, metric, t_start):
                 print(seq, flush=True)
             print('========================', flush=True)
 
-            true_grads, _ = capture_private_grads(private_model)
             missing, unexpected = sync_private_model_to_public_model(private_model, attack_wrapper.model)
             if missing or unexpected:
                 print(
@@ -1031,14 +1032,24 @@ def _run_dpsgd_opacus_attack(args, metric, t_start):
                     f"missing={len(missing)} unexpected={len(unexpected)}.",
                     flush=True,
                 )
+
+        optimizer.step()
+        if should_reconstruct:
+            true_grads, _ = capture_private_grads(private_model)
+        optimizer.zero_grad(set_to_none=True)
+
+        if should_reconstruct:
             attack_wrapper.model.eval()
-            prediction, reference = reconstruct(
-                args,
-                sample,
-                metric,
-                attack_wrapper,
-                precomputed_true_grads=true_grads,
-            )
+            actual_batch_size = len(sample[0])
+            print(f'[dager:dpsgd_opacus] actual_batch_size={actual_batch_size}', flush=True)
+            with use_effective_batch_size(args, actual_batch_size):
+                prediction, reference = reconstruct(
+                    args,
+                    sample,
+                    metric,
+                    attack_wrapper,
+                    precomputed_true_grads=true_grads,
+                )
             predictions += prediction
             references += reference
 
@@ -1073,8 +1084,6 @@ def _run_dpsgd_opacus_attack(args, metric, t_start):
             print()
             print()
 
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
         recover_idx += 1
 
     if args.result_tracker['last_total_time'] is None:

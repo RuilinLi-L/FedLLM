@@ -167,6 +167,80 @@ def test_make_private_with_opacus_wraps_mapping_dataset_for_empty_batches():
     assert_true(observed["input_shape"] == (1, 2), "wrapped collator should preserve batch tensor shapes")
 
 
+def test_freeze_position_embeddings_supports_bert_and_gpt2_names():
+    class TinyPositionModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.transformer = torch.nn.Module()
+            self.transformer.wpe = torch.nn.Embedding(8, 4)
+            self.bert = torch.nn.Module()
+            self.bert.embeddings = torch.nn.Module()
+            self.bert.embeddings.position_embeddings = torch.nn.Embedding(8, 4)
+            self.token_embeddings = torch.nn.Embedding(8, 4)
+
+    model = TinyPositionModel()
+    frozen = dop.freeze_position_embeddings(model)
+
+    assert_true(frozen == 2, f"expected both position embedding tables to be frozen, got {frozen}")
+    assert_true(not model.transformer.wpe.weight.requires_grad, "GPT-2 wpe must be frozen before Opacus wrapping")
+    assert_true(
+        not model.bert.embeddings.position_embeddings.weight.requires_grad,
+        "BERT position embeddings must remain frozen before Opacus wrapping",
+    )
+    assert_true(model.token_embeddings.weight.requires_grad, "ordinary token embeddings must remain trainable")
+
+
+def test_effective_batch_size_context_restores_nominal_value():
+    args = SimpleNamespace(batch_size=2)
+    with dop.use_effective_batch_size(args, 5):
+        assert_true(args.batch_size == 5, "DAGER should see the current Poisson batch size")
+    assert_true(args.batch_size == 2, "nominal batch size must be restored after reconstruction")
+
+    try:
+        with dop.use_effective_batch_size(args, 4):
+            raise RuntimeError("test failure")
+    except RuntimeError:
+        pass
+    assert_true(args.batch_size == 2, "nominal batch size must also be restored after reconstruction failure")
+
+
+def test_opacus_attack_paths_capture_only_after_private_step():
+    cases = (
+        (ROOT / "attack.py", "def _run_dpsgd_opacus_attack", "def main"),
+        (ROOT / "attack_new.py", "def _run_dpsgd_opacus_attack", "def main"),
+        (ROOT / "attack_partial_gradient.py", "def _run_source_opacus_dpsgd", "def main"),
+    )
+    for path, start_marker, end_marker in cases:
+        source = path.read_text(encoding="utf8")
+        block = source.split(start_marker, 1)[1].split(end_marker, 1)[0]
+        sync_marker = (
+            "sync_private_model_to_public_model"
+            if path.name != "attack_partial_gradient.py"
+            else "_sync_private_model_to_attack_model"
+        )
+        sync_idx = block.index(sync_marker)
+        step_idx = block.index("optimizer.step()")
+        capture_marker = (
+            "capture_private_grads"
+            if path.name != "attack_partial_gradient.py"
+            else "_capture_source_opacus_grads"
+        )
+        capture_idx = block.index(capture_marker)
+        clear_idx = block.index("optimizer.zero_grad(set_to_none=True)", capture_idx)
+        reconstruct_idx = block.index("reconstruct(", capture_idx)
+
+        assert_true(sync_idx < step_idx, f"{path.name} must snapshot pre-update model state before Opacus step")
+        assert_true(step_idx < capture_idx, f"{path.name} must capture clipped/noised gradients after Opacus step")
+        assert_true(
+            capture_idx < clear_idx < reconstruct_idx,
+            f"{path.name} must clone then clear private gradients before reconstruction",
+        )
+        assert_true(
+            "with use_effective_batch_size" in block,
+            f"{path.name} must expose the actual Poisson batch size to reconstruction",
+        )
+
+
 def test_grad_similarity_metrics_returns_cosine_and_norm_retention():
     base = (torch.tensor([1.0, 0.0]), torch.tensor([0.0, 1.0]))
     defended = (torch.tensor([0.5, 0.0]), torch.tensor([0.0, 0.5]))
@@ -554,6 +628,8 @@ def main():
                 test_dpsgd_opacus_summary_fields_include_accounting_terms,
                 test_make_private_with_opacus_sets_module_to_train_mode,
                 test_make_private_with_opacus_wraps_mapping_dataset_for_empty_batches,
+                test_freeze_position_embeddings_supports_bert_and_gpt2_names,
+                test_effective_batch_size_context_restores_nominal_value,
                 test_grad_similarity_metrics_returns_cosine_and_norm_retention,
             ]
         )
@@ -567,6 +643,7 @@ def main():
         test_attack_anchor_keeps_adaptive_attack_separate,
         test_tradeoff_join_emits_adaptive_and_nonadaptive_rows,
         test_utility_aggregation_filters_failed_runs,
+        test_opacus_attack_paths_capture_only_after_private_step,
     ])
     for test in tests:
         print(f"Running {test.__name__}...")

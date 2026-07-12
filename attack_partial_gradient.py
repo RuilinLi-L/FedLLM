@@ -40,6 +40,7 @@ from utils.dpsgd_opacus import (
     normalize_dpsgd_opacus_args,
     record_dpsgd_opacus_summary,
     sync_private_model_to_public_model,
+    use_effective_batch_size,
 )
 from utils.gpu import resolve_cuda_device, resolve_gradient_device
 from utils.lrb_presets import apply_lrb_preset
@@ -972,11 +973,11 @@ def _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=None, lm_tokeni
     normalize_dpsgd_opacus_args(args, active=True)
     attack_wrapper = ModelWrapper(args)
     train_wrapper = ModelWrapper(args)
-    if _source_bert_parity_active(args):
-        frozen_train = _freeze_source_position_embeddings(train_wrapper.model)
-        frozen_attack = _freeze_source_position_embeddings(attack_wrapper.model)
+    frozen_train = _freeze_source_position_embeddings(train_wrapper.model)
+    frozen_attack = _freeze_source_position_embeddings(attack_wrapper.model)
+    if frozen_train or frozen_attack:
         print(
-            f"[ptg:dpsgd] Frozen BERT position embeddings before Opacus "
+            f"[ptg:dpsgd] Frozen position embeddings before Opacus "
             f"(train={frozen_train}, attack={frozen_attack}).",
             flush=True,
         )
@@ -1011,7 +1012,8 @@ def _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=None, lm_tokeni
         outputs = private_model(**batch, labels=labels.view(-1).long())
         outputs.loss.backward()
 
-        if recover_idx >= args.start_input:
+        should_reconstruct = recover_idx >= args.start_input
+        if should_reconstruct:
             input_start = time.time()
             args.defense_rng_step = tracker["n_inputs_completed"]
             decoded = train_wrapper.tokenizer.batch_decode(
@@ -1020,17 +1022,26 @@ def _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=None, lm_tokeni
             )
             sample = (decoded, labels)
             print(f"[ptg:dpsgd] Running input #{recover_idx} of {args.n_inputs}.", flush=True)
-            partial = _capture_source_opacus_grads(args, private_model)
             _sync_private_model_to_attack_model(private_model, attack_wrapper.model)
+
+        optimizer.step()
+        if should_reconstruct:
+            partial = _capture_source_opacus_grads(args, private_model)
+        optimizer.zero_grad(set_to_none=True)
+
+        if should_reconstruct:
             attack_wrapper.model.eval()
-            pred, ref, attack_result, selected_names = reconstruct(
-                args,
-                sample,
-                attack_wrapper,
-                precomputed_partial=partial,
-                lm_model=lm_model,
-                lm_tokenizer=lm_tokenizer,
-            )
+            actual_batch_size = len(sample[0])
+            print(f"[ptg:dpsgd] actual_batch_size={actual_batch_size}", flush=True)
+            with use_effective_batch_size(args, actual_batch_size):
+                pred, ref, attack_result, selected_names = reconstruct(
+                    args,
+                    sample,
+                    attack_wrapper,
+                    precomputed_partial=partial,
+                    lm_model=lm_model,
+                    lm_tokenizer=lm_tokenizer,
+                )
             predictions.extend(pred)
             references.extend(ref)
             _record_attack_result(args, tracker, recover_idx, input_start, start_time, attack_result, selected_names)
@@ -1042,8 +1053,6 @@ def _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=None, lm_tokeni
                 flush=True,
             )
 
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
         recover_idx += 1
 
     tracker["aggregate_metrics"] = compute_text_metrics(

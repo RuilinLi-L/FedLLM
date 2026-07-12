@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
@@ -151,10 +152,21 @@ def make_private_with_opacus(module, optimizer, data_loader, args):
 def freeze_position_embeddings(model) -> int:
     frozen = 0
     for name, param in model.named_parameters():
-        if "position_embeddings" in name:
+        path_parts = name.split(".")
+        if "position_embeddings" in path_parts or "wpe" in path_parts:
             param.requires_grad = False
             frozen += 1
     return frozen
+
+
+@contextmanager
+def use_effective_batch_size(args, batch_size: int):
+    nominal_batch_size = args.batch_size
+    args.batch_size = int(batch_size)
+    try:
+        yield
+    finally:
+        args.batch_size = nominal_batch_size
 
 
 def is_empty_opacus_batch(batch) -> bool:
