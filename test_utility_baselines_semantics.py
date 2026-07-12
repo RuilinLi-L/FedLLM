@@ -496,6 +496,90 @@ def test_selected_dpsgd_opacus_sweep_accepts_single_seed():
         assert_true("main_configs_per_dataset=8\n" in manifest, "manifest should record the full Opacus grid")
 
 
+def _run_noise_dpsgd_runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+    assert_true(WORKING_BASH is not None, "functional bash is required for this test")
+    root_bash = _to_bash_path(ROOT, WORKING_BASH)
+    cmd = (
+        f"cd {shlex.quote(root_bash)} && "
+        "bash scripts/run_dager_privacy_noise_dpsgd_one_seed.sh "
+        f"{' '.join(shlex.quote(arg) for arg in args)}"
+    )
+    return subprocess.run(
+        [WORKING_BASH, "-lc", cmd],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+
+def test_noise_dpsgd_one_seed_runner_schedules_full_dense_sweep():
+    runtime_root = ROOT / ".runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    expected_grid = {
+        "1e-6", "3e-6", "1e-5", "3e-5", "1e-4", "2e-4", "3e-4",
+        "5e-4", "7e-4", "1e-3", "2e-3", "3e-3", "5e-3", "1e-2",
+    }
+
+    with tempfile.TemporaryDirectory(dir=runtime_root) as tmp:
+        log_dir = Path(tmp) / "cola_noise_dpsgd_seed202"
+        log_dir_bash = _to_bash_path(log_dir, WORKING_BASH)
+        proc = _run_noise_dpsgd_runner([
+            "--baselines", "noise,dpsgd",
+            "--dataset", "cola",
+            "--seed", "202",
+            "--dry-run",
+            "--no-collect",
+            "--log-dir", log_dir_bash,
+        ])
+
+        assert_true(proc.returncode == 0, proc.stderr or proc.stdout)
+        run_lines = [
+            line for line in proc.stdout.splitlines()
+            if line.startswith("[dager-noise-dpsgd] run:")
+        ]
+        assert_true(len(run_lines) == 28, f"expected 2 baselines * 14 points, got {len(run_lines)}")
+
+        calls = [shlex.split(line.split("run:", 1)[1].strip()) for line in run_lines]
+        for call in calls:
+            assert_true(call[:2] == ["bash", "scripts/defense_baselines.sh"], f"unexpected runner command: {call}")
+            assert_true(call[2:6] == ["cola", "2", "gpt2", "100"], f"unexpected fixed DAGER settings: {call}")
+            assert_true(_arg_value(call, "--rng_seed") == "202", f"seed was not explicit: {call}")
+            assert_true(_arg_value(call, "--finetuned_path") == "./models/gpt2_cola_clean_num_epochs_2/final", f"wrong checkpoint: {call}")
+            assert_true("--skip_anchor_none" in call, f"clean anchor was not disabled: {call}")
+            assert_true(_arg_value(call, "--baseline_defense") != "none", f"unexpected clean anchor: {call}")
+
+        for baseline in ("noise", "dpsgd"):
+            baseline_calls = [call for call in calls if _arg_value(call, "--baseline_defense") == baseline]
+            params = [_arg_value(call, "--baseline_param") for call in baseline_calls]
+            assert_true(len(params) == 14, f"{baseline} should schedule 14 points")
+            assert_true(set(params) == expected_grid, f"{baseline} grid mismatch: {params}")
+            assert_true(len(params) == len(set(params)), f"{baseline} grid contains duplicates: {params}")
+
+        manifest = (log_dir / "run_manifest.txt").read_text(encoding="utf-8")
+        assert_true("selected_baselines=noise dpsgd\n" in manifest, "manifest should record both baselines")
+        assert_true("dataset=cola\n" in manifest, "manifest should record the dataset")
+        assert_true("seed=202\n" in manifest, "manifest should record the explicit seed")
+        assert_true("configs_per_baseline=14\n" in manifest, "manifest should record the dense grid size")
+        assert_true("planned_configs=28\n" in manifest, "manifest should record all scheduled configs")
+        assert_true("formal_dp_claim=false\n" in manifest, "manifest must not claim formal DP")
+
+
+def test_noise_dpsgd_one_seed_runner_rejects_invalid_cli():
+    invalid_cases = [
+        ["--dataset", "sst2", "--seed", "101"],
+        ["--baselines", "noise", "--seed", "101"],
+        ["--baselines", "noise", "--dataset", "sst2"],
+        ["--baselines", "topk", "--dataset", "sst2", "--seed", "101"],
+        ["--baselines", "noise", "--dataset", "qqp", "--seed", "101"],
+        ["--baselines", "dpsgd", "--dataset", "sst2", "--seed", "-1"],
+    ]
+    for args in invalid_cases:
+        proc = _run_noise_dpsgd_runner(args)
+        assert_true(proc.returncode == 2, f"invalid args should exit 2: {args}\n{proc.stderr}")
+
+
 def main():
     if WORKING_BASH is None:
         print("Skipping utility baseline semantics tests: no functional bash executable available.")
@@ -512,6 +596,8 @@ def main():
         test_focused_lrb_sensitivity_adds_extra_point_without_sweep,
         test_focus_signed_bottleneck_runs_uniform_projection_preset,
         test_selected_dpsgd_opacus_sweep_accepts_single_seed,
+        test_noise_dpsgd_one_seed_runner_schedules_full_dense_sweep,
+        test_noise_dpsgd_one_seed_runner_rejects_invalid_cli,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

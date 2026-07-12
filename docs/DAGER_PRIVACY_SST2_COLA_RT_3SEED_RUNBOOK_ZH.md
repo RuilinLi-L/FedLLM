@@ -97,6 +97,38 @@ bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baseli
 
 selected-baselines runner 的主参数网格与 `scripts/run_dager_privacy_one_dataset_baselines.sh` 对齐；非 `none` baseline 会逐参数传 `--baseline_param` 和 `--skip_anchor_none`，所以“选了哪个就只跑哪个”。`--baselines topk` 不会补跑 clean `none`；只有显式选择 `none` 或 `all` 时才会生成 clean anchor row。
 
+如果要把 `noise` / `dpsgd` 拆成“单数据集 + 单个显式种子”的独立调度任务，使用 one-seed runner：
+
+```bash
+# 单个 baseline
+bash scripts/run_dager_privacy_noise_dpsgd_one_seed.sh \
+  --baselines noise \
+  --dataset sst2 \
+  --seed 101
+
+# 同一数据集和种子依次运行 noise、dpsgd
+bash scripts/run_dager_privacy_noise_dpsgd_one_seed.sh \
+  --baselines noise,dpsgd \
+  --dataset cola \
+  --seed 202
+
+# 只检查调度，不执行攻击
+bash scripts/run_dager_privacy_noise_dpsgd_one_seed.sh \
+  --baselines dpsgd \
+  --dataset rotten_tomatoes \
+  --seed 303 \
+  --dry-run
+```
+
+该 runner 只接受 `noise` 和 `dpsgd`，不会补跑 `none`。种子通过 `--rng_seed` 显式传给底层 DAGER wrapper。两种 baseline 均使用完整 14 点 dense sweep：
+
+```text
+1e-6 3e-6 1e-5 3e-5 1e-4 2e-4 3e-4
+5e-4 7e-4 1e-3 2e-3 3e-3 5e-3 1e-2
+```
+
+选择一个 baseline 会生成 14 个配置，同时选择两个 baseline 会生成 28 个配置。固定设置仍为 GPT-2、batch size 2、`n_inputs=100`、`val`、`seq_class` 和 CUDA 自动选卡。`dpsgd` 在这里是 clipping + Gaussian noise 的 DP-SGD-style coverage baseline；没有正式 accountant 时，不应将结果写成 epsilon/delta DP 保证。
+
 GPU 参数含义：
 
 - `--gpu auto`：默认值，不改当前 `CUDA_VISIBLE_DEVICES`，在当前可见 GPU 中自动选空闲卡。
