@@ -15,6 +15,12 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 SEED="${SEED:-42}"
 PUBLIC_SPLIT="${PUBLIC_SPLIT:-test}"
 LOG_DIR="${LOG_DIR:-${OUTPUT_DIR}/logs}"
+PROFILE="${PROFILE:-full}"
+
+case "$PROFILE" in
+  core|full) ;;
+  *) echo "PROFILE must be core or full; got ${PROFILE}." >&2; exit 2 ;;
+esac
 
 mkdir -p "$LOG_DIR"
 
@@ -35,9 +41,11 @@ run_variant() {
 
 run_variant "none" --defense none "$@"
 run_variant "topk_0.1" --defense topk --defense_topk_ratio 0.1 "$@"
-run_variant "topk_0.3" --defense topk --defense_topk_ratio 0.3 "$@"
 run_variant "compression_8" --defense compression --defense_n_bits 8 "$@"
-run_variant "compression_16" --defense compression --defense_n_bits 16 "$@"
+if [[ "$PROFILE" == "full" ]]; then
+  run_variant "topk_0.3" --defense topk --defense_topk_ratio 0.3 "$@"
+  run_variant "compression_16" --defense compression --defense_n_bits 16 "$@"
+fi
 run_variant "proj_only_0.5" --defense proj_only --defense_lrb_keep_ratio_sensitive 0.5 "$@"
 run_variant "proj_only_0.75" --defense proj_only --defense_lrb_keep_ratio_sensitive 0.75 "$@"
 run_variant "proj_only_0.9" --defense proj_only --defense_lrb_keep_ratio_sensitive 0.9 "$@"

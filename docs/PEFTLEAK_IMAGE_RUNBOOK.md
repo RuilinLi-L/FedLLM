@@ -490,13 +490,22 @@ Primary attack evidence: DAGER
 Supplementary cross-modal mechanism evidence: PEFTLeak image/Adapter
 ```
 
-## 10. 代码和文档验证
+## 10. 图像侧真实 Utility
+
+当前 source-aligned runner 仍只负责固定 victim batch 的隐私重建评估。真实 CIFAR-100 下游效用使用独立的预训练 ViT-B/16 Adapter 训练轨道，完整命令、矩阵和验收标准见：
+
+- [PEFTLeak 图像侧下游效用 Runbook](./PEFTLEAK_IMAGE_UTILITY_RUNBOOK.md)
+
+两条轨道按 12 层双 Adapter、bottleneck=64、96 个共享 Adapter 梯度以及 defense hyperparameter 对齐。分类 head 是本地参数，不进入 PEFTLeak 共享更新，并通过 `head_only` 对照量化其独立贡献。该结果只能称为 supplementary cross-protocol comparison，不能称为同一恶意模型的严格 Pareto。`batch_top1_acc` 和 `loss_scope=pre_defense_attack_batch` 仍然只是攻击诊断，不得作为下游 utility。
+
+## 11. 代码和文档验证
 
 在 `fedllm-peftleak` 环境中执行：
 
 ```bash
 python PEFTLeak-main/PEFTLeak-main/official_image_runner.py --help
 python test_peftleak_image_semantics.py
+python test_peftleak_image_utility_semantics.py
 python test_lrb_defense_simple.py
 python test_defense_baselines_semantics.py
 ```

@@ -3,6 +3,8 @@
 ## FedLLM Project Runbooks
 
 - [Partial Gradient 中文 Runbook](./PARTIAL_GRADIENT_RUNBOOK_ZH.md): privacy and utility commands for DAGER partial exposure and PTG/LAMP-lite gradient matching.
+- [PEFTLeak Image Privacy Runbook](./PEFTLEAK_IMAGE_RUNBOOK.md): source-aligned CIFAR-100 image/Adapter reconstruction protocol.
+- [PEFTLeak Image Utility Runbook](./PEFTLEAK_IMAGE_UTILITY_RUNBOOK.md): ViT-B/16 Adapter downstream utility and privacy-utility aggregation.
 
 ## Prerequisites
 - Install Anaconda. 

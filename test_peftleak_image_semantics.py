@@ -73,6 +73,7 @@ from official_image_runner import (
     build_matched_patch_metrics,
     cluster_and_score_images,
     collect_adapter_gradients,
+    apply_official_image_defense,
     exclude_attack_indices_from_publicset,
     official_adapter_gradient_names,
     requested_metrics,
@@ -90,6 +91,14 @@ def assert_true(condition, message):
 
 def runtime_device():
     return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+def test_official_defense_summary_reports_effective_rng_seed():
+    args = argparse.Namespace(defense="none", rng_seed=42)
+    gradients = [torch.ones(2, 2)]
+    defended, fields = apply_official_image_defense(gradients, ["encoder1.mlp.adapt1.weight"], args)
+    assert_true(fields["defense_rng_seed"] == 42, "official image summary must audit the LRB RNG seed")
+    assert_true(torch.equal(defended[0], gradients[0]), "none defense should remain unchanged")
 
 
 def parse_result_summary(output: str) -> dict[str, str]:
@@ -1349,6 +1358,7 @@ def test_optimization_patch_baseline_loss_decreases():
 
 def main():
     tests = [
+        test_official_defense_summary_reports_effective_rng_seed,
         test_sampling_first_n_and_hash_are_stable,
         test_seeded_shuffle_sampling_uses_split_seed,
         test_indices_file_sampling_reads_text_and_npy,

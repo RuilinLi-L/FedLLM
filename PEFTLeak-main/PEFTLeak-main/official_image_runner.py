@@ -128,6 +128,7 @@ def emit_summary(fields: dict):
         "batch_size",
         "attack_index_count",
         "defense",
+        "defense_rng_seed",
         "defense_param_name",
         "defense_param_value",
         "defense_applied_to",
@@ -579,6 +580,7 @@ def apply_official_image_defense(grads, names, args):
 
     param_name, param_value = _official_image_defense_param(args)
     fields = {
+        "defense_rng_seed": int(args.rng_seed),
         "defense_param_name": param_name,
         "defense_param_value": param_value,
         "defense_applied_to": "adapter_weight_bias_gradients",
@@ -1414,6 +1416,7 @@ def run(args) -> dict:
         "batch_size": int(args.batch_size),
         "attack_index_count": len(attack_indices),
         "defense": args.defense,
+        "defense_rng_seed": int(args.rng_seed),
         "patch_count": patch_count,
         "peftleak_recovered_patch_metric": peftleak_recovered_patch_metric,
         "peftleak_recovered_patch_status": peftleak_recovered_patch_status,
@@ -1487,6 +1490,7 @@ def main(argv=None) -> int:
                 "public_split": getattr(args, "public_split", None),
                 "batch_size": getattr(args, "batch_size", None),
                 "defense": getattr(args, "defense", None),
+                "defense_rng_seed": getattr(args, "rng_seed", None),
                 "metrics": getattr(args, "metrics", None),
                 "require_reportable_metrics": getattr(args, "require_reportable_metrics", None),
                 "runtime": str(_datetime.timedelta(seconds=time.time() - start)).split(".")[0],

@@ -96,6 +96,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--markdown-output", default=None)
     args = parser.parse_args(argv)
 
+    print(
+        "[peftleak-image] legacy proxy table only: vit_adapter_loss and "
+        "batch_top1_acc are attack-batch diagnostics, not downstream task utility."
+    )
+
     log_dir = Path(args.log_dir)
     output = Path(args.output)
     rows = [
