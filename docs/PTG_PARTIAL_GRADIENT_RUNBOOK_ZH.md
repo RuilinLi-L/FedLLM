@@ -78,8 +78,8 @@ python test_partial_transformer_gradients_semantics.py
 |---|---:|---:|---:|
 | `none` | `n/a` | 1 | 3 |
 | `proj_only` | `k=0.5/0.65/0.75/0.9` | 4 | 12 |
-| `topk` | `0.1` | 1 | 3 |
-| `compression` | `8` bits | 1 | 3 |
+| `topk` | `0.05/0.1/0.3` | 3 | 9 |
+| `compression` | `4/8/16` bits | 3 | 9 |
 
 不要将单个 `proj_only@k=0.9` 与 `none` 的差异当作结论。默认单 seed 用于快速筛查；用于结论时，必须完成全部 keep-ratio sweep 并按三 seed 聚合后选择 projection operating point。
 
@@ -107,21 +107,27 @@ for k in 0.5 0.65 0.75 0.9; do
   done
 done
 
-# strong empirical baselines
-for seed in "${SEEDS[@]}"; do
-  ./scripts/ptg_baselines.sh "$DATASET" "$BATCH" "$MODEL" "$N_INPUTS" \
-    "${PTG_COMMON[@]}" \
-    --exposure first2 \
-    --baseline_defense topk \
-    --baseline_param 0.1 \
-    --rng_seed "$seed"
+# strong empirical baseline sweeps
+for ratio in 0.05 0.1 0.3; do
+  for seed in "${SEEDS[@]}"; do
+    ./scripts/ptg_baselines.sh "$DATASET" "$BATCH" "$MODEL" "$N_INPUTS" \
+      "${PTG_COMMON[@]}" \
+      --exposure first2 \
+      --baseline_defense topk \
+      --baseline_param "$ratio" \
+      --rng_seed "$seed"
+  done
+done
 
-  ./scripts/ptg_baselines.sh "$DATASET" "$BATCH" "$MODEL" "$N_INPUTS" \
-    "${PTG_COMMON[@]}" \
-    --exposure first2 \
-    --baseline_defense compression \
-    --baseline_param 8 \
-    --rng_seed "$seed"
+for bits in 4 8 16; do
+  for seed in "${SEEDS[@]}"; do
+    ./scripts/ptg_baselines.sh "$DATASET" "$BATCH" "$MODEL" "$N_INPUTS" \
+      "${PTG_COMMON[@]}" \
+      --exposure first2 \
+      --baseline_defense compression \
+      --baseline_param "$bits" \
+      --rng_seed "$seed"
+  done
 done
 ```
 
@@ -181,18 +187,42 @@ for seed in "${SEEDS[@]}"; do
 done
 ```
 
-将上面命令的 `--exposure first2` 改为 `--exposure qkv_only`，即可在 `qkv_only` 上运行同一 `full_lrb@k=0.5` 对照。其他可选 coverage baseline 的单 seed smoke 例如：
+`full_lrb` is routed as `--defense lrb --defense_lrb_preset full_lrb`. It applies signed low-resolution projection, layer-wise clipping, and residual-space noise before PTG selects the visible subset. `--baseline_param` sets only `defense_lrb_keep_ratio_sensitive`; at `0.5`, the preset keeps `keep_ratio_other=0.75`, `clip_scale_sensitive/other=0.5/1.0`, and `noise_sensitive/other=0.03/0.005`. Confirm these fields through the result summary before using the row in a table.
+
+将上面命令的 `--exposure first2` 改为 `--exposure qkv_only`，即可在 `qkv_only` 上运行同一 `full_lrb@k=0.5` 对照。`noise` 和 `dpsgd` 仅在 `first2` 上做 coverage sweep，统一使用仓库既有的五点网格：
 
 ```bash
-./scripts/ptg_baselines.sh "$DATASET" "$BATCH" "$MODEL" "$N_INPUTS" \
-  "${PTG_COMMON[@]}" \
-  --exposure first2 \
-  --baseline_defense noise \
-  --baseline_param 5e-4 \
-  --rng_seed 101
+NOISE_LEVELS=(1e-6 1e-5 1e-4 5e-4 1e-3)
+
+# Gaussian noise coverage
+for sigma in "${NOISE_LEVELS[@]}"; do
+  for seed in "${SEEDS[@]}"; do
+    ./scripts/ptg_baselines.sh "$DATASET" "$BATCH" "$MODEL" "$N_INPUTS" \
+      "${PTG_COMMON[@]}" \
+      --exposure first2 \
+      --baseline_defense noise \
+      --baseline_param "$sigma" \
+      --rng_seed "$seed"
+  done
+done
+
+# DP-SGD-style coverage: per-example clipping + mean aggregation + Gaussian noise
+for sigma in "${NOISE_LEVELS[@]}"; do
+  for seed in "${SEEDS[@]}"; do
+    ./scripts/ptg_baselines.sh "$DATASET" "$BATCH" "$MODEL" "$N_INPUTS" \
+      "${PTG_COMMON[@]}" \
+      --exposure first2 \
+      --baseline_defense dpsgd \
+      --baseline_param "$sigma" \
+      --defense_clip_norm 1.0 \
+      --rng_seed "$seed"
+  done
+done
 ```
 
-将 `noise`/`5e-4` 分别替换为 `dpsgd`/`5e-4`、`soteria`/`30` 或 `mixup`/`0.3`。是否将这些 baseline 扩展为三 seed 或延伸到 `qkv_only`，在主矩阵稳定后按论文空间决定。
+这里两个 sweep 的 `--baseline_param` 含义不同：对 `noise`，它是每个梯度坐标所加高斯噪声的标准差；对 `dpsgd`，它是噪声乘数 `sigma`，实际噪声标准差为 `sigma * clip_norm / batch_size`。本节固定 `clip_norm=1.0`，且正式 PTG 设置为 `batch_size=1`。默认 `SEEDS=(101)` 时每个 defense 运行 5 次；设置 `PTG_SEEDS="101 202 303"` 后每个 defense 运行 15 次。
+
+这里的 `dpsgd` 固定使用默认 `dpsgd_style`，不运行 `source_opacus`，也没有 privacy accountant；因此只能作为 clipping + Gaussian noise coverage baseline，不能表述为正式的 `(epsilon, delta)` DP 保证。`soteria@30` 和 `mixup@0.3` 仍只作为可选单点 smoke；是否扩展为三 seed 或延伸到 `qkv_only`，在主矩阵稳定后按论文空间决定。
 
 ## 7. 收集、聚合和解释
 
