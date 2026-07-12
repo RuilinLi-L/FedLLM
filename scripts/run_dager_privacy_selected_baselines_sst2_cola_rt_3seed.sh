@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run selected three-seed, GPU full-gradient DAGER privacy baselines for
+# Run selected-seed, GPU full-gradient DAGER privacy baselines for
 # SST-2, CoLA, and Rotten Tomatoes.
 
 set -euo pipefail
@@ -14,8 +14,10 @@ usage() {
     "                        Accepts comma-separated or space-separated names." \
     "                        Allowed: all, none, lrbprojonly, lrb, topk, compression," \
     "                                 noise, dpsgd, dpsgd_opacus, mixup, soteria." \
+    "  --seeds LIST          Seeds to run. Default: 101 202 303." \
+    "                        Accepts comma-separated or space-separated integers." \
     "  --gpu auto|all|ID     GPU visibility mode. Default: auto." \
-    "  --log-dir PATH        Output log root. Default: log/runs/dager_privacy_selected_baselines_sst2_cola_rt_3seed_<timestamp>." \
+    "  --log-dir PATH        Output log root. Default includes the selected seed tag." \
     "  --n-inputs N          Formal DAGER n_inputs. Default: 100." \
     "  --dry-run             Print commands without executing them." \
     "  --skip-main           Skip non-none baseline sweeps." \
@@ -28,9 +30,10 @@ usage() {
     "  bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines none,topk" \
     "  bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines noise dpsgd mixup soteria" \
     "  bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines topk --run-adaptive" \
+    "  bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh --baselines dpsgd_opacus --seeds 101" \
     "" \
-    "This script intentionally fixes DAGER_SEEDS=\"101 202 303\" and never passes" \
-    "--rng_seed to defense_baselines.sh. Non-none selected baselines are called with" \
+    "This script exports the selected DAGER_SEEDS and never passes --rng_seed to" \
+    "defense_baselines.sh. Non-none selected baselines are called with" \
     "--skip_anchor_none so selecting topk only runs topk, not repeated clean none anchors." \
     "Parameter grids are aligned with run_dager_privacy_one_dataset_baselines.sh." \
     "defense_baselines.sh calls attack.py with --device cuda; bare cuda is resolved" \
@@ -52,6 +55,7 @@ SKIP_MAIN=0
 RUN_ADAPTIVE=0
 NO_COLLECT=0
 BASELINES_REQUEST="all"
+SEEDS_REQUEST="101 202 303"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -68,6 +72,19 @@ while [ "$#" -gt 0 ]; do
       ;;
     --baselines=*)
       BASELINES_REQUEST="${1#*=}"; shift ;;
+    --seeds)
+      shift
+      if [ "$#" -eq 0 ] || [[ "$1" == -* ]]; then
+        die_usage "--seeds requires at least one value."
+      fi
+      SEEDS_REQUEST=""
+      while [ "$#" -gt 0 ] && [[ "$1" != -* ]]; do
+        SEEDS_REQUEST="${SEEDS_REQUEST}${SEEDS_REQUEST:+ }$1"
+        shift
+      done
+      ;;
+    --seeds=*)
+      SEEDS_REQUEST="${1#*=}"; shift ;;
     --gpu)
       if [ "$#" -lt 2 ]; then die_usage "--gpu requires a value."; fi
       GPU_REQUEST="$2"; shift 2 ;;
@@ -108,8 +125,6 @@ fi
 SCRIPT_DIR="$(cd "$SCRIPT_DIR_PART" && pwd)"
 DAGER_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$DAGER_ROOT" || exit 1
-
-export DAGER_SEEDS="101 202 303"
 
 DATASETS=(sst2 cola rotten_tomatoes)
 ALL_BASELINES=(none lrbprojonly lrb topk compression noise dpsgd dpsgd_opacus mixup soteria)
@@ -196,6 +211,28 @@ normalize_selected_baselines() {
   for token in "${SELECTED_BASELINES[@]}"; do
     SELECTED_LOOKUP[$token]=1
   done
+}
+
+normalize_requested_seeds() {
+  local raw
+  local token
+  declare -A seen=()
+
+  raw="${SEEDS_REQUEST//,/ }"
+  DAGER_SEEDS=""
+  for token in $raw; do
+    if ! [[ "$token" =~ ^[0-9]+$ ]]; then
+      die_usage "invalid seed: ${token}; seeds must be non-negative integers."
+    fi
+    if [ "${seen[$token]+x}" != "x" ]; then
+      DAGER_SEEDS="${DAGER_SEEDS}${DAGER_SEEDS:+ }${token}"
+      seen[$token]=1
+    fi
+  done
+  if [ -z "$DAGER_SEEDS" ]; then
+    die_usage "--seeds cannot be empty."
+  fi
+  export DAGER_SEEDS
 }
 
 cuda_visible_devices_label() {
@@ -463,12 +500,18 @@ check_environment() {
   fi
 }
 
+normalize_requested_seeds
 normalize_selected_baselines
 configure_gpu_visibility
 
 if [ -z "$LOG_DIR" ]; then
   printf -v STAMP '%(%Y%m%d_%H%M%S)T' -1
-  LOG_DIR="log/runs/dager_privacy_selected_baselines_sst2_cola_rt_3seed_${STAMP}"
+  if [ "$DAGER_SEEDS" = "101 202 303" ]; then
+    SEED_TAG="3seed"
+  else
+    SEED_TAG="seeds_${DAGER_SEEDS// /-}"
+  fi
+  LOG_DIR="log/runs/dager_privacy_selected_baselines_sst2_cola_rt_${SEED_TAG}_${STAMP}"
 fi
 export DAGER_LOG_DIR="$LOG_DIR"
 mkdir -p "$DAGER_LOG_DIR"

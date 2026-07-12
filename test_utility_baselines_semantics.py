@@ -458,6 +458,44 @@ def test_focus_signed_bottleneck_runs_uniform_projection_preset():
     result["tmpdir"].cleanup()
 
 
+def test_selected_dpsgd_opacus_sweep_accepts_single_seed():
+    assert_true(WORKING_BASH is not None, "functional bash is required for this test")
+
+    runtime_root = ROOT / ".runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=runtime_root) as tmp:
+        log_dir = Path(tmp) / "seed101"
+        root_bash = _to_bash_path(ROOT, WORKING_BASH)
+        log_dir_bash = _to_bash_path(log_dir, WORKING_BASH)
+        cmd = (
+            f"cd {shlex.quote(root_bash)} && "
+            "bash scripts/run_dager_privacy_selected_baselines_sst2_cola_rt_3seed.sh "
+            "--baselines dpsgd_opacus --seeds 101 --n-inputs 3 --dry-run --no-collect "
+            f"--log-dir {shlex.quote(log_dir_bash)}"
+        )
+        proc = subprocess.run(
+            [WORKING_BASH, "-lc", cmd],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+
+        assert_true(proc.returncode == 0, proc.stderr or proc.stdout)
+        run_lines = [line for line in proc.stdout.splitlines() if line.startswith("[dager-selected] run:")]
+        assert_true(len(run_lines) == 24, f"expected 3 datasets * 8 Opacus points, got {len(run_lines)}")
+        assert_true(all("--baseline_defense dpsgd_opacus" in line for line in run_lines), "unexpected defense in focused sweep")
+        assert_true(sum(" sst2 " in line for line in run_lines) == 8, "SST-2 should receive all 8 points")
+        assert_true(sum(" cola " in line for line in run_lines) == 8, "CoLA should receive all 8 points")
+        assert_true(sum(" rotten_tomatoes " in line for line in run_lines) == 8, "RT should receive all 8 points")
+
+        manifest = (log_dir / "run_manifest.txt").read_text(encoding="utf-8")
+        assert_true("selected_baselines=dpsgd_opacus\n" in manifest, "manifest should record the focused defense")
+        assert_true("seeds=101\n" in manifest, "manifest should record only seed 101")
+        assert_true("main_configs_per_dataset=8\n" in manifest, "manifest should record the full Opacus grid")
+
+
 def main():
     if WORKING_BASH is None:
         print("Skipping utility baseline semantics tests: no functional bash executable available.")
@@ -473,6 +511,7 @@ def main():
         test_malformed_cli_combinations_exit_with_code_2,
         test_focused_lrb_sensitivity_adds_extra_point_without_sweep,
         test_focus_signed_bottleneck_runs_uniform_projection_preset,
+        test_selected_dpsgd_opacus_sweep_accepts_single_seed,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")
