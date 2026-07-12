@@ -190,6 +190,71 @@ def test_freeze_position_embeddings_supports_bert_and_gpt2_names():
     assert_true(model.token_embeddings.weight.requires_grad, "ordinary token embeddings must remain trainable")
 
 
+def test_opacus_dager_layer_ids_follow_captured_parameter_names():
+    original_names = [f"param.{idx}" for idx in range(17)]
+    original_names[1] = "transformer.wpe.weight"
+    original_names[4] = "transformer.h.0.attn.c_attn.weight"
+    original_names[16] = "transformer.h.1.attn.c_attn.weight"
+
+    class FakeModel:
+        def named_parameters(self):
+            return [
+                (name, SimpleNamespace(requires_grad=True))
+                for name in original_names
+            ]
+
+    target_names = dop.capture_opacus_dager_layer_names(FakeModel(), [4, 16])
+    assert_true(
+        target_names
+        == (
+            "transformer.h.0.attn.c_attn.weight",
+            "transformer.h.1.attn.c_attn.weight",
+        ),
+        f"unexpected captured DAGER target names: {target_names}",
+    )
+
+    original_grads = tuple(torch.zeros(1) for _ in original_names)
+    assert_true(
+        dop.remap_opacus_dager_layer_ids(target_names, original_grads, original_names) == [4, 16],
+        "unfrozen gradient inventory should preserve legacy DAGER indices",
+    )
+
+    frozen_names = [name for name in original_names if name != "transformer.wpe.weight"]
+    frozen_grads = tuple(torch.zeros(1) for _ in frozen_names)
+    assert_true(
+        dop.remap_opacus_dager_layer_ids(target_names, frozen_grads, frozen_names) == [3, 15],
+        "freezing GPT-2 wpe should remap DAGER indices by parameter name",
+    )
+
+
+def test_opacus_dager_layer_remap_rejects_invalid_inventories():
+    targets = ("layer.0.weight", "layer.1.weight")
+
+    invalid_cases = (
+        ((torch.zeros(1),), ("layer.0.weight", "layer.1.weight"), "count mismatch"),
+        ((torch.zeros(1), torch.zeros(1)), ("layer.0.weight", "layer.0.weight"), "not unique"),
+        ((torch.zeros(1),), ("layer.0.weight",), "missing target"),
+    )
+    for gradients, names, label in invalid_cases:
+        try:
+            dop.remap_opacus_dager_layer_ids(targets, gradients, names)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Opacus DAGER remap should reject {label}")
+
+    try:
+        dop.remap_opacus_dager_layer_ids(
+            ("layer.0.weight", "layer.0.weight"),
+            (torch.zeros(1),),
+            ("layer.0.weight",),
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Opacus DAGER remap should reject duplicate target names")
+
+
 def test_effective_batch_size_context_restores_nominal_value():
     args = SimpleNamespace(batch_size=2)
     with dop.use_effective_batch_size(args, 5):
@@ -239,6 +304,39 @@ def test_opacus_attack_paths_capture_only_after_private_step():
             "with use_effective_batch_size" in block,
             f"{path.name} must expose the actual Poisson batch size to reconstruction",
         )
+
+
+def test_opacus_dager_layer_remap_is_scoped_to_full_private_paths():
+    for filename in ("attack.py", "attack_new.py"):
+        source = (ROOT / filename).read_text(encoding="utf8")
+        block = source.split("def _run_dpsgd_opacus_attack", 1)[1].split("def main", 1)[0]
+        capture_targets_idx = block.index("capture_opacus_dager_layer_names(")
+        freeze_idx = block.index("freeze_position_embeddings(")
+        capture_grads_idx = block.index("true_grads, true_grad_names = capture_private_grads(")
+        remap_idx = block.index("remap_opacus_dager_layer_ids(")
+        reconstruct_idx = block.index("reconstruct(", remap_idx)
+
+        assert_true(
+            capture_targets_idx < freeze_idx,
+            f"{filename} must capture target names before freezing position embeddings",
+        )
+        assert_true(
+            capture_grads_idx < remap_idx < reconstruct_idx,
+            f"{filename} must remap only captured Opacus gradients before reconstruction",
+        )
+        assert_true(
+            source.count("remap_opacus_dager_layer_ids(") == 1,
+            f"{filename} should remap indices only in its Opacus attack function",
+        )
+
+    assert_true(
+        "remap_opacus_dager_layer_ids" not in (ROOT / "utils" / "models.py").read_text(encoding="utf8"),
+        "public DAGER model logic must not depend on the Opacus-only remap",
+    )
+    assert_true(
+        "remap_opacus_dager_layer_ids" not in (ROOT / "attack_partial_gradient.py").read_text(encoding="utf8"),
+        "partial-gradient attack logic must remain unchanged",
+    )
 
 
 def test_grad_similarity_metrics_returns_cosine_and_norm_retention():
@@ -629,6 +727,8 @@ def main():
                 test_make_private_with_opacus_sets_module_to_train_mode,
                 test_make_private_with_opacus_wraps_mapping_dataset_for_empty_batches,
                 test_freeze_position_embeddings_supports_bert_and_gpt2_names,
+                test_opacus_dager_layer_ids_follow_captured_parameter_names,
+                test_opacus_dager_layer_remap_rejects_invalid_inventories,
                 test_effective_batch_size_context_restores_nominal_value,
                 test_grad_similarity_metrics_returns_cosine_and_norm_retention,
             ]
@@ -644,6 +744,7 @@ def main():
         test_tradeoff_join_emits_adaptive_and_nonadaptive_rows,
         test_utility_aggregation_filters_failed_runs,
         test_opacus_attack_paths_capture_only_after_private_step,
+        test_opacus_dager_layer_remap_is_scoped_to_full_private_paths,
     ])
     for test in tests:
         print(f"Running {test.__name__}...")

@@ -10,6 +10,7 @@ from utils.functional import filter_outliers, remove_padding, resolve_dager_deco
 from utils.defenses import apply_defense, requires_gradient_generation_defense, uses_noisy_gradient_decoding
 from utils.dpsgd_opacus import (
     DPSGD_OPACUS_DEFENSE,
+    capture_opacus_dager_layer_names,
     capture_private_grads,
     create_source_dpsgd_dataloader,
     decode_batch_texts,
@@ -19,6 +20,7 @@ from utils.dpsgd_opacus import (
     make_private_with_opacus,
     normalize_dpsgd_opacus_args,
     record_dpsgd_opacus_summary,
+    remap_opacus_dager_layer_ids,
     sync_private_model_to_public_model,
     use_effective_batch_size,
 )
@@ -978,6 +980,10 @@ def _run_dpsgd_opacus_attack(args, device, metric, t_start):
     normalize_dpsgd_opacus_args(args, active=True)
     train_wrapper = ModelWrapper(args)
     attack_wrapper = ModelWrapper(args)
+    opacus_dager_layer_names = capture_opacus_dager_layer_names(
+        attack_wrapper.model,
+        attack_wrapper.layer_ids,
+    )
     frozen_train = freeze_position_embeddings(train_wrapper.model)
     frozen_attack = freeze_position_embeddings(attack_wrapper.model)
     if frozen_train or frozen_attack:
@@ -1044,7 +1050,12 @@ def _run_dpsgd_opacus_attack(args, device, metric, t_start):
 
         optimizer.step()
         if should_reconstruct:
-            true_grads, _ = capture_private_grads(private_model)
+            true_grads, true_grad_names = capture_private_grads(private_model)
+            attack_wrapper.layer_ids = remap_opacus_dager_layer_ids(
+                opacus_dager_layer_names,
+                true_grads,
+                true_grad_names,
+            )
         optimizer.zero_grad(set_to_none=True)
 
         if should_reconstruct:

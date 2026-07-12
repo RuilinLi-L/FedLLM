@@ -159,6 +159,52 @@ def freeze_position_embeddings(model) -> int:
     return frozen
 
 
+def capture_opacus_dager_layer_names(model, layer_ids) -> tuple[str, ...]:
+    parameter_names = [
+        name
+        for name, param in model.named_parameters()
+        if getattr(param, "requires_grad", False)
+    ]
+    if len(parameter_names) != len(set(parameter_names)):
+        raise ValueError("Cannot capture Opacus DAGER layers: trainable parameter names are not unique.")
+
+    target_names = []
+    for raw_idx in layer_ids:
+        idx = int(raw_idx)
+        if idx < 0 or idx >= len(parameter_names):
+            raise ValueError(
+                f"Cannot capture Opacus DAGER layer index {idx}: "
+                f"trainable parameter count is {len(parameter_names)}."
+            )
+        target_names.append(parameter_names[idx])
+    if len(target_names) != len(set(target_names)):
+        raise ValueError("Cannot capture Opacus DAGER layers: target parameter names are not unique.")
+    return tuple(target_names)
+
+
+def remap_opacus_dager_layer_ids(target_names, gradients, gradient_names) -> list[int]:
+    target_names = tuple(target_names)
+    gradient_names = tuple(gradient_names)
+    if len(gradients) != len(gradient_names):
+        raise ValueError(
+            "Cannot remap Opacus DAGER layers: gradient/name count mismatch "
+            f"({len(gradients)} gradients, {len(gradient_names)} names)."
+        )
+    if len(gradient_names) != len(set(gradient_names)):
+        raise ValueError("Cannot remap Opacus DAGER layers: gradient parameter names are not unique.")
+    if len(target_names) != len(set(target_names)):
+        raise ValueError("Cannot remap Opacus DAGER layers: target parameter names are not unique.")
+
+    indices_by_name = {name: idx for idx, name in enumerate(gradient_names)}
+    missing = [name for name in target_names if name not in indices_by_name]
+    if missing:
+        raise ValueError(
+            "Cannot remap Opacus DAGER layers; captured gradients are missing target "
+            f"parameter(s): {', '.join(missing)}."
+        )
+    return [indices_by_name[name] for name in target_names]
+
+
 @contextmanager
 def use_effective_batch_size(args, batch_size: int):
     nominal_batch_size = args.batch_size
