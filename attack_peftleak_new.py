@@ -23,8 +23,10 @@ from attacks.peftleak_text_new import (
     token_recovery_accuracy,
 )
 from utils.defense_common import add_shared_defense_args, defense_param_spec, fmt_summary_value, safe_mean
+from utils.data import ATTACK_SPLIT_CHOICES, dataset_summary_fields, record_dataset_protocol
 from utils.gpu import resolve_cuda_device, resolve_gradient_device
 from utils.lrb_presets import apply_lrb_preset
+from utils.lrb_defense import lrb_seed_summary_fields
 from utils.representation_bottleneck import validate_rep_bottleneck_args
 
 
@@ -45,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     parser.add_argument("--task", choices=["seq_class"], default="seq_class")
-    parser.add_argument("--split", choices=["val", "test"], required=True)
+    parser.add_argument("--split", choices=ATTACK_SPLIT_CHOICES, required=True)
     parser.add_argument("-b", "--batch_size", type=int, default=1)
     parser.add_argument("--n_inputs", type=int, required=True)
     parser.add_argument("--start_input", type=int, default=0)
@@ -275,6 +277,7 @@ def _emit_summary(args, tracker):
         ("reproduction_level", tracker["reproduction_level"]),
         ("dataset", args.dataset),
         ("split", args.split),
+        *dataset_summary_fields(args),
         ("task", args.task),
         ("model_path", args.model_path),
         ("finetuned_path", args.finetuned_path),
@@ -288,6 +291,7 @@ def _emit_summary(args, tracker):
         ("defense", args.defense),
         ("defense_param_name", defense_name),
         ("defense_param_value", defense_value),
+        *lrb_seed_summary_fields(args),
         ("defense_aware", args.peftleak_attack_mode == "opt"),
         ("classification_head_shared", False),
         ("declared_side_information", "sequence_length,attention_mask"),
@@ -480,6 +484,7 @@ def main(argv=None):
             args.batch_size,
             args.cache_dir,
         )
+        record_dataset_protocol(args, private_dataset)
         ignored_token_ids = _ignored_token_ids(model_wrapper.tokenizer, model_wrapper)
 
         for input_index in range(int(args.start_input), min(int(args.n_inputs), int(args.end_input))):

@@ -20,6 +20,7 @@ from attacks.peftleak_text_ratio import (
     decode_ratio_recovery,
 )
 from utils.defense_common import add_shared_defense_args, defense_param_spec, fmt_summary_value, safe_mean
+from utils.data import ATTACK_SPLIT_CHOICES, dataset_summary_fields, record_dataset_protocol
 from utils.defenses import (
     apply_defense,
     dpsgd_defense,
@@ -29,7 +30,7 @@ from utils.defenses import (
     topk_sparsification,
 )
 from utils.gpu import resolve_cuda_device, resolve_gradient_device
-from utils.lrb_defense import apply_lrb_defense
+from utils.lrb_defense import apply_lrb_defense, lrb_seed_summary_fields
 from utils.lrb_presets import apply_lrb_preset
 from utils.representation_bottleneck import rep_bottleneck_summary_fields, validate_rep_bottleneck_args
 
@@ -55,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="FedLLM PEFT text attack for LoRA/IA3/adapter gradients")
     parser.add_argument("--dataset", choices=["cola", "sst2", "rte", "rotten_tomatoes", "stanfordnlp/imdb", "glnmario/ECHR"], required=True)
     parser.add_argument("--task", choices=["seq_class"], default="seq_class")
-    parser.add_argument("--split", choices=["val", "test"], required=True)
+    parser.add_argument("--split", choices=ATTACK_SPLIT_CHOICES, required=True)
     parser.add_argument("-b", "--batch_size", type=int, default=1)
     parser.add_argument("--n_inputs", type=int, required=True)
     parser.add_argument("--start_input", type=int, default=0)
@@ -297,6 +298,7 @@ def _emit_result_summary(args, tracker):
         ("attack_variant", tracker.get("attack_variant", "text_opt")),
         ("dataset", args.dataset),
         ("split", args.split),
+        *dataset_summary_fields(args),
         ("task", args.task),
         ("model_path", args.model_path),
         ("finetuned_path", args.finetuned_path),
@@ -325,6 +327,7 @@ def _emit_result_summary(args, tracker):
         ("defense", args.defense),
         ("defense_param_name", defense_param_name),
         ("defense_param_value", defense_param_value),
+        *lrb_seed_summary_fields(args),
         *rep_bottleneck_summary_fields(args),
         ("peftleak_steps", args.peftleak_steps),
         ("peftleak_lr", args.peftleak_lr),
@@ -710,6 +713,7 @@ def main(argv=None):
 
     try:
         dataset = TextDataset(args.device, args.dataset, args.split, args.n_inputs, args.batch_size, args.cache_dir)
+        record_dataset_protocol(args, dataset)
         model_wrapper = ModelWrapper(args)
         ratio_stats, public_stats_source, public_stats_n_inputs = _build_ratio_public_stats(args, model_wrapper, TextDataset)
         tracker["public_stats_source"] = public_stats_source

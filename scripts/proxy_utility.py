@@ -27,6 +27,7 @@ from utils.defenses import apply_defense, requires_gradient_generation_defense
 from utils.dpsgd_opacus import DPSGD_OPACUS_DEFENSE, normalize_dpsgd_opacus_args
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import apply_lrb_preset
+from utils.lrb_defense import lrb_seed_summary_fields
 from utils.seq_class_utils import (
     load_seq_class_datasets,
     load_seq_class_model_and_tokenizer,
@@ -118,6 +119,7 @@ def emit_proxy_summary(args, tracker: dict) -> None:
         ("defense", args.defense),
         ("defense_param_name", defense_param_name),
         ("defense_param_value", defense_param_value),
+        *lrb_seed_summary_fields(args),
         ("proxy_defense_semantics", proxy_defense_semantics(args)),
         ("n_train_batches", args.n_train_batches),
         ("val_size", args.val_size),

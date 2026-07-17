@@ -7,7 +7,11 @@ import torch
 
 from utils.lrb_presets import LRB_PRESET_CHOICES, lrb_preset_param_value
 from utils.representation_bottleneck import REP_BOTTLENECK_CHOICES
-from utils.adaptive_attack import ADAPTIVE_ATTACK_CHOICES
+from utils.adaptive_attack import (
+    ADAPTIVE_ATTACK_CHOICES,
+    ADAPTIVE_LRB_HYPOTHESIS_REDUCERS,
+    ADAPTIVE_LRB_KNOWLEDGE_CHOICES,
+)
 from utils.dpsgd_opacus import (
     DPSGD_OPACUS_DEFAULT_DELTA,
     DPSGD_OPACUS_DEFAULT_NOISE_MULTIPLIER,
@@ -138,6 +142,19 @@ def add_shared_defense_args(
         help="Optional hard cap on adaptive ranked L1 candidates per position.",
     )
     parser.add_argument(
+        "--adaptive_lrb_knowledge",
+        choices=ADAPTIVE_LRB_KNOWLEDGE_CHOICES,
+        default="oracle",
+    )
+    parser.add_argument("--adaptive_lrb_ratio_grid", default="auto")
+    parser.add_argument("--adaptive_lrb_attack_seed", type=int, default=None)
+    parser.add_argument("--adaptive_lrb_seed_samples", type=int, default=16)
+    parser.add_argument(
+        "--adaptive_lrb_hypothesis_reduce",
+        choices=ADAPTIVE_LRB_HYPOTHESIS_REDUCERS,
+        default="min",
+    )
+    parser.add_argument(
         "--defense_lrb_preset",
         type=str,
         default="custom",
@@ -149,6 +166,12 @@ def add_shared_defense_args(
         type=int,
         default=2,
         help="How many earliest transformer layers receive the strongest LRB protection.",
+    )
+    parser.add_argument("--defense_lrb_seed", type=int, default=None)
+    parser.add_argument(
+        "--defense_lrb_seed_mode",
+        choices=["static", "per_update"],
+        default="static",
     )
     parser.add_argument(
         "--defense_lrb_keep_ratio_sensitive",
@@ -202,7 +225,7 @@ def add_shared_defense_args(
         "--defense_lrb_projection",
         type=str,
         default="signed_pool",
-        choices=["signed_pool", "pool"],
+        choices=["signed_pool", "pool", "signed_pool_nearest", "signed_stride"],
         help="Public subspace projection used by LRB.",
     )
     parser.add_argument(

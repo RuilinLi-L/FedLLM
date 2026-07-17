@@ -55,6 +55,24 @@ PROXY_SUMMARY_BLOCK_RE = re.compile(
 VARIANT_START_RE = re.compile(r"^===== VARIANT START (?P<body>.*?) =====$", re.MULTILINE)
 VARIANT_END_RE = re.compile(r"^===== VARIANT END .*?exit_code=(?P<exit_code>\d+) =====$", re.MULTILINE)
 
+AUDIT_DEFAULT_KEYS = frozenset(
+    {
+        "data_protocol",
+        "source_partition",
+        "defense_lrb_seed_mode",
+        "defense_lrb_seed_source",
+        "defense_lrb_seed",
+        "adaptive_lrb_knowledge",
+        "adaptive_lrb_ratio_grid",
+        "adaptive_lrb_attack_seed",
+        "adaptive_lrb_seed_samples",
+        "adaptive_lrb_hypothesis_reduce",
+        "adaptive_lrb_hypothesis_count_mean",
+        "adaptive_lrb_ratio_knowledge",
+        "adaptive_lrb_sign_knowledge",
+    }
+)
+
 TAG_DATASET_BATCH = frozenset(
     {
         "gpt2",
@@ -440,6 +458,7 @@ def _all_keys(rows: list[dict]) -> list[str]:
     keys: set[str] = set()
     for row in rows:
         keys.update(row.keys())
+    keys.update(AUDIT_DEFAULT_KEYS)
     preferred = [
         "log_path",
         "log_kind",
@@ -457,6 +476,8 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "attack",
         "dataset",
         "split",
+        "data_protocol",
+        "source_partition",
         "task",
         "model_path",
         "batch_size",
@@ -492,6 +513,9 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "defense",
         "defense_param_name",
         "defense_param_value",
+        "defense_lrb_seed_mode",
+        "defense_lrb_seed_source",
+        "defense_lrb_seed",
         "proxy_defense_semantics",
         "rep_bottleneck_type",
         "rep_keep_ratio",
@@ -507,6 +531,14 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "adaptive_support_density_mean",
         "adaptive_quantization_levels_mean",
         "adaptive_lrb_keep_ratio_mean",
+        "adaptive_lrb_knowledge",
+        "adaptive_lrb_ratio_grid",
+        "adaptive_lrb_attack_seed",
+        "adaptive_lrb_seed_samples",
+        "adaptive_lrb_hypothesis_reduce",
+        "adaptive_lrb_hypothesis_count_mean",
+        "adaptive_lrb_ratio_knowledge",
+        "adaptive_lrb_sign_knowledge",
         "adaptive_selected_gradients",
         "gradient_layer_subset",
         "gradient_param_filter",
@@ -656,6 +688,13 @@ def _all_keys(rows: list[dict]) -> list[str]:
     return [key for key in preferred if key in keys] + rest
 
 
+def _output_cell(row: dict, key: str):
+    value = row.get(key)
+    if key in AUDIT_DEFAULT_KEYS and value in (None, ""):
+        return "n/a"
+    return "" if value is None else value
+
+
 def write_csv(path: Path, rows: list[dict]) -> None:
     if not rows:
         path.write_text("", encoding="utf-8")
@@ -665,7 +704,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: row.get(key, "") for key in fieldnames})
+            writer.writerow({key: _output_cell(row, key) for key in fieldnames})
 
 
 def write_markdown(path: Path, rows: list[dict]) -> None:
@@ -682,7 +721,7 @@ def write_markdown(path: Path, rows: list[dict]) -> None:
         "| " + " | ".join("---" for _ in keys) + " |",
     ]
     for row in rows:
-        lines.append("| " + " | ".join(esc(str(row.get(key, ""))) for key in keys) + " |")
+        lines.append("| " + " | ".join(esc(str(_output_cell(row, key))) for key in keys) + " |")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1086,6 +1125,21 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _adaptive_lrb_protocol_key(row: dict) -> tuple[str, ...]:
+    fields = (
+        "split",
+        "data_protocol",
+        "source_partition",
+        "defense_lrb_seed_mode",
+        "adaptive_lrb_knowledge",
+        "adaptive_lrb_ratio_grid",
+        "adaptive_lrb_attack_seed",
+        "adaptive_lrb_seed_samples",
+        "adaptive_lrb_hypothesis_reduce",
+    )
+    return tuple(str(row.get(field) or "n/a") for field in fields)
+
+
 def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
     attack_rows = [row for row in rows if row.get("log_kind") == "attack_dager"]
     grouped: dict[tuple[str, ...], list[dict]] = {}
@@ -1109,6 +1163,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             row.get("defense_param_name", ""),
             row.get("defense_param_value", ""),
             row.get("rouge_backend", row.get("ptg_rouge_backend_requested", "unknown")),
+            *_adaptive_lrb_protocol_key(row),
         )
         grouped.setdefault(key, []).append(row)
 
@@ -1135,6 +1190,15 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             param_name,
             param_value,
             rouge_backend,
+            split,
+            data_protocol,
+            source_partition,
+            defense_lrb_seed_mode,
+            adaptive_lrb_knowledge,
+            adaptive_lrb_ratio_grid,
+            adaptive_lrb_attack_seed,
+            adaptive_lrb_seed_samples,
+            adaptive_lrb_hypothesis_reduce,
         ) = key
         valid_items = [item for item in items if _is_complete_successful_attack(item)]
         incomplete = [item for item in items if not _is_complete_successful_attack(item)]
@@ -1160,6 +1224,15 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             "defense_param_name": param_name,
             "defense_param_value": param_value,
             "rouge_backend": rouge_backend,
+            "split": split,
+            "data_protocol": data_protocol,
+            "source_partition": source_partition,
+            "defense_lrb_seed_mode": defense_lrb_seed_mode,
+            "adaptive_lrb_knowledge": adaptive_lrb_knowledge,
+            "adaptive_lrb_ratio_grid": adaptive_lrb_ratio_grid,
+            "adaptive_lrb_attack_seed": adaptive_lrb_attack_seed,
+            "adaptive_lrb_seed_samples": adaptive_lrb_seed_samples,
+            "adaptive_lrb_hypothesis_reduce": adaptive_lrb_hypothesis_reduce,
             "n_privacy_runs": str(len(items)),
             "n_privacy_valid_runs": str(len(valid_items)),
             "failed_or_incomplete_privacy_runs": str(len(incomplete)),
@@ -1284,6 +1357,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
             row.get("defense", ""),
             row.get("defense_param_value", ""),
             row.get("rouge_backend", row.get("ptg_rouge_backend_requested", "unknown")),
+            *_adaptive_lrb_protocol_key(row),
         ): row
         for row in attack_rows
     }
@@ -1360,6 +1434,18 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
                 row[field] = attack.get(field, row.get(field, ""))
             row["adaptive_attack"] = attack.get("adaptive_attack", row.get("adaptive_attack", "none"))
             row["adaptive_attack_profile"] = attack.get("adaptive_attack_profile", row.get("adaptive_attack_profile", "none"))
+            for field in (
+                "split",
+                "data_protocol",
+                "source_partition",
+                "defense_lrb_seed_mode",
+                "adaptive_lrb_knowledge",
+                "adaptive_lrb_ratio_grid",
+                "adaptive_lrb_attack_seed",
+                "adaptive_lrb_seed_samples",
+                "adaptive_lrb_hypothesis_reduce",
+            ):
+                row[field] = attack.get(field, "n/a")
             row["privacy_eval_status"] = attack.get("result_status", "")
             row["privacy_result_status"] = attack.get("result_status", "")
             row["n_privacy_runs"] = attack.get("n_privacy_runs", "")
@@ -1475,6 +1561,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
                     defense,
                     param_value,
                     attack.get("rouge_backend", attack.get("ptg_rouge_backend_requested", "unknown")),
+                    *_adaptive_lrb_protocol_key(attack),
                 )
             )
         out.append(make_tradeoff_row(utility, attack))

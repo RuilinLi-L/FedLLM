@@ -45,6 +45,7 @@ ALL_PEFT_DEFENSES=( none noise dpsgd topk compression soteria mixup dager lrb lr
 SUPPORTED_PEFT_DEFENSES=( none noise dpsgd topk compression soteria mixup lrb lrbprojonly signed_bottleneck )
 KNOWN_LRB_PRESETS=(
   identity_lrb
+  sign_only
   clip_only
   proj_only
   proj_clip
@@ -56,6 +57,9 @@ KNOWN_LRB_PRESETS=(
   proj_rule_only
   proj_empirical_only
   proj_uniform
+  proj_uniform_pool
+  proj_uniform_nearest
+  proj_uniform_stride
   proj_no_empirical
 )
 

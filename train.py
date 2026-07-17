@@ -36,6 +36,7 @@ from utils.dpsgd_opacus import (
 )
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import apply_lrb_preset
+from utils.lrb_defense import lrb_seed_summary_fields
 from utils.peft_utils import (
     apply_peft_config_to_args,
     normalize_peft_args,
@@ -178,6 +179,7 @@ def emit_train_result_summary(args, tracker: dict) -> None:
         ("defense", getattr(args, "defense", "none")),
         ("defense_param_name", defense_param_name),
         ("defense_param_value", defense_param_value),
+        *lrb_seed_summary_fields(args),
         *dpsgd_opacus_summary_fields(args, tracker),
         *rep_bottleneck_summary_fields(args),
         ("output_dir", tracker.get("output_dir")),
@@ -297,6 +299,11 @@ def build_parser():
         help="Directory used for checkpoints and the final saved model.",
     )
     parser.add_argument(
+        "--skip_final_save",
+        action="store_true",
+        help="Report training utility without saving the final model checkpoint.",
+    )
+    parser.add_argument(
         "--log_file",
         type=str,
         default=None,
@@ -391,8 +398,14 @@ def run_training_dpsgd_opacus(args, tracker: dict, model, tokenizer, train_loade
 
     tracker["total_train_time"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - train_start))
     record_dpsgd_opacus_summary(args, tracker, privacy_engine)
-    final_path = output_dir / ("final" if not peft_active(args) else "final_adapter")
-    tracker["final_model_path"] = save_model(opacus_public_model(model), tokenizer, final_path, args.train_method)
+    if getattr(args, "skip_final_save", False):
+        tracker["final_model_path"] = "n/a"
+        print("[dager] Skipping final model save.", flush=True)
+    else:
+        final_path = output_dir / ("final" if not peft_active(args) else "final_adapter")
+        tracker["final_model_path"] = save_model(
+            opacus_public_model(model), tokenizer, final_path, args.train_method
+        )
     print("END")
 
 
@@ -501,8 +514,12 @@ def run_training(args, tracker: dict) -> None:
         print("metric eval: ", eval_metrics)
 
     tracker["total_train_time"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - train_start))
-    final_path = output_dir / ("final" if not peft_active(args) else "final_adapter")
-    tracker["final_model_path"] = save_model(model, tokenizer, final_path, args.train_method)
+    if getattr(args, "skip_final_save", False):
+        tracker["final_model_path"] = "n/a"
+        print("[dager] Skipping final model save.", flush=True)
+    else:
+        final_path = output_dir / ("final" if not peft_active(args) else "final_adapter")
+        tracker["final_model_path"] = save_model(model, tokenizer, final_path, args.train_method)
     print("END")
 
 

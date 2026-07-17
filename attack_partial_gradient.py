@@ -28,6 +28,7 @@ from attacks.partial_transformer_gradients import (
 from attacks.peftleak_text import get_token_embedding_matrix, summarize_token_predictions, token_recovery_ratio
 from attack_peftleak import compute_text_metrics, validate_text_metric_backend
 from utils.defense_common import add_shared_defense_args, defense_param_spec, fmt_summary_value, safe_mean
+from utils.data import ATTACK_SPLIT_CHOICES, dataset_summary_fields, record_dataset_protocol
 from utils.defenses import apply_defense, requires_gradient_generation_defense
 from utils.dpsgd_opacus import (
     DPSGD_OPACUS_DEFENSE,
@@ -44,6 +45,7 @@ from utils.dpsgd_opacus import (
 )
 from utils.gpu import resolve_cuda_device, resolve_gradient_device
 from utils.lrb_presets import apply_lrb_preset
+from utils.lrb_defense import lrb_seed_summary_fields
 from utils.representation_bottleneck import rep_bottleneck_summary_fields, validate_rep_bottleneck_args
 
 
@@ -75,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     parser.add_argument("--task", choices=["seq_class"], default="seq_class")
-    parser.add_argument("--split", choices=["val", "test"], required=True)
+    parser.add_argument("--split", choices=ATTACK_SPLIT_CHOICES, required=True)
     parser.add_argument("-b", "--batch_size", type=int, default=1)
     parser.add_argument("--n_inputs", type=int, required=True)
     parser.add_argument("--start_input", type=int, default=0)
@@ -634,6 +636,7 @@ def _emit_result_summary(args, tracker):
         ("partial_attack_variant", tracker.get("partial_attack_variant")),
         ("dataset", args.dataset),
         ("split", args.split),
+        *dataset_summary_fields(args),
         ("task", args.task),
         ("model_path", args.model_path),
         ("finetuned_path", args.finetuned_path),
@@ -646,6 +649,7 @@ def _emit_result_summary(args, tracker):
         ("clipping_bound", args.clipping_bound),
         ("defense_param_name", defense_param_name),
         ("defense_param_value", defense_param_value),
+        *lrb_seed_summary_fields(args),
         *dpsgd_opacus_summary_fields(args, tracker),
         *rep_bottleneck_summary_fields(args),
         *ptg_selector_summary_fields(args),
@@ -1092,6 +1096,7 @@ def main(argv=None):
             return 0
 
         dataset = TextDataset(args.device, args.dataset, args.split, args.n_inputs, args.batch_size, args.cache_dir)
+        record_dataset_protocol(args, dataset)
         model_wrapper = ModelWrapper(args)
         predictions = []
         references = []

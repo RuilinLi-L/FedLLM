@@ -520,6 +520,57 @@ def test_lrb_signed_projection_is_reproducible_and_not_plain_pooling():
     assert_true(not torch.allclose(signed_a, plain), "signed-pool projection should differ from plain coordinate pooling")
 
 
+def test_lrb_new_projection_ablation_modes_preserve_shape():
+    tensor = torch.arange(1, 25, dtype=torch.float32).view(4, 6)
+    outputs = [
+        _project_low_resolution(tensor, 0.5, seed=13, mode=mode)
+        for mode in ("signed_pool_nearest", "signed_stride")
+    ]
+    assert_true(all(output.shape == tensor.shape for output in outputs), "new LRB modes must preserve tensor shape")
+    assert_true(all(torch.isfinite(output).all() for output in outputs), "new LRB modes must stay finite")
+
+
+def test_lrb_static_and_per_update_seed_modes_are_reproducible():
+    grads = (torch.arange(1, 17, dtype=torch.float32),)
+    base = dict(
+        defense="lrb",
+        defense_lrb_preset="proj_uniform",
+        defense_lrb_keep_ratio_sensitive=0.5,
+        defense_lrb_seed=700001,
+        defense_lrb_sensitive_n_layers=2,
+        defense_lrb_calibration_samples=16,
+        rng_seed=101,
+    )
+
+    static_a = SimpleNamespace(**base, defense_lrb_seed_mode="static", defense_rng_step=0)
+    static_b = SimpleNamespace(**base, defense_lrb_seed_mode="static", defense_rng_step=9)
+    apply_lrb_preset(static_a)
+    apply_lrb_preset(static_b)
+    out_static_a = apply_lrb_defense(grads, static_a)[0]
+    out_static_b = apply_lrb_defense(grads, static_b)[0]
+    assert_true(torch.allclose(out_static_a, out_static_b), "static LRB signs must ignore update step")
+
+    step_a = SimpleNamespace(**base, defense_lrb_seed_mode="per_update", defense_rng_step=3)
+    step_a_repeat = SimpleNamespace(**base, defense_lrb_seed_mode="per_update", defense_rng_step=3)
+    step_b = SimpleNamespace(**base, defense_lrb_seed_mode="per_update", defense_rng_step=4)
+    for args in (step_a, step_a_repeat, step_b):
+        apply_lrb_preset(args)
+    out_step_a = apply_lrb_defense(grads, step_a)[0]
+    out_step_a_repeat = apply_lrb_defense(grads, step_a_repeat)[0]
+    out_step_b = apply_lrb_defense(grads, step_b)[0]
+    assert_true(torch.allclose(out_step_a, out_step_a_repeat), "same per-update step must reproduce signs")
+    assert_true(not torch.allclose(out_step_a, out_step_b), "different per-update steps must change signs")
+
+    fallback = SimpleNamespace(**base, defense_lrb_seed_mode="per_update")
+    apply_lrb_preset(fallback)
+    out_fallback_first = apply_lrb_defense(grads, fallback)[0]
+    first_step = fallback.lrb_defense_layer_info[0]["projection_seed_step"]
+    out_fallback_second = apply_lrb_defense(grads, fallback)[0]
+    second_step = fallback.lrb_defense_layer_info[0]["projection_seed_step"]
+    assert_true((first_step, second_step) == (0, 1), "missing update steps must use a monotonic internal counter")
+    assert_true(not torch.allclose(out_fallback_first, out_fallback_second), "fallback update steps must change signs")
+
+
 def test_lrb_matrix_projection_path_matches_cpu_reference():
     cases = [
         (torch.arange(1, 13, dtype=torch.float32).view(3, 4), (2, 3)),
@@ -779,6 +830,8 @@ def main():
         test_mixup_changes_gradients_via_representation_mixing,
         test_mixup_falls_back_for_small_batches_and_non_seq_class,
         test_lrb_signed_projection_is_reproducible_and_not_plain_pooling,
+        test_lrb_new_projection_ablation_modes_preserve_shape,
+        test_lrb_static_and_per_update_seed_modes_are_reproducible,
         test_lrb_matrix_projection_path_matches_cpu_reference,
         test_lrb_signed_matrix_projection_preserves_legacy_rng_order_with_cache,
         test_lrb_adaptive_bin_bounds_use_exact_integer_math,

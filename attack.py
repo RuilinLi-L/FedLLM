@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from datasets import load_metric
 from utils.models import ModelWrapper
-from utils.data import TextDataset
+from utils.data import TextDataset, dataset_summary_fields, record_dataset_protocol
 from utils.filtering_encoder import filter_encoder
 from utils.filtering_decoder import filter_decoder
 from utils.functional import filter_outliers, remove_padding, resolve_dager_decomp_device
@@ -26,6 +26,7 @@ from utils.dpsgd_opacus import (
 )
 from utils.gpu import resolve_cuda_device, resolve_gradient_device
 from utils.lrb_presets import lrb_preset_param_value
+from utils.lrb_defense import lrb_seed_summary_fields
 from utils.adaptive_attack import (
     adaptive_attack_summary_fields,
     adaptive_check_if_in_span,
@@ -282,6 +283,7 @@ def _emit_result_summary(args):
         ('result_status', tracker.get('result_status', 'ok')),
         ('dataset', args.dataset),
         ('split', args.split),
+        *dataset_summary_fields(args),
         ('task', args.task),
         ('model_path', args.model_path),
         ('finetuned_path', args.finetuned_path if args.finetuned_path is not None else 'n/a'),
@@ -317,6 +319,7 @@ def _emit_result_summary(args):
         ('defense', getattr(args, 'defense', 'none')),
         ('defense_param_name', defense_param_name),
         ('defense_param_value', defense_param_value),
+        *lrb_seed_summary_fields(args),
         *dpsgd_opacus_summary_fields(args, tracker),
         *rep_bottleneck_summary_fields(args),
         *partial_gradient_summary_fields(args),
@@ -1129,6 +1132,7 @@ def main():
             return
 
         dataset = TextDataset(args.device, args.dataset, args.split, args.n_inputs, args.batch_size, args.cache_dir)
+        record_dataset_protocol(args, dataset)
 
         model_wrapper = ModelWrapper(args)
 

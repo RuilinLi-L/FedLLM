@@ -12,6 +12,11 @@ from utils.lrb_defense import _layer_projection_seed
 
 
 ADAPTIVE_ATTACK_CHOICES = ("none", "auto", "defense_aware")
+ADAPTIVE_LRB_KNOWLEDGE_CHOICES = ("oracle", "ratio_hidden", "signs_hidden", "method_only")
+ADAPTIVE_LRB_HYPOTHESIS_REDUCERS = ("min", "mean")
+ADAPTIVE_LRB_MAX_HYPOTHESES = 1024
+_ATTACK_SEED_STRIDE = 1_000_033
+_UPDATE_SEED_STRIDE = 1_000_003
 LRB_PROJECTION_DEFENSES = {"lrb", "lrbprojonly", "signed_bottleneck"}
 RANKED_SPAN_DEFENSES = {"topk", "compression", "lrb", "lrbprojonly", "signed_bottleneck"}
 
@@ -37,7 +42,72 @@ def validate_adaptive_attack_args(args):
     cap = getattr(args, "adaptive_candidate_cap", None)
     if cap is not None and int(cap) <= 0:
         raise ValueError("--adaptive_candidate_cap must be positive when set.")
+    knowledge = str(getattr(args, "adaptive_lrb_knowledge", "oracle"))
+    if knowledge not in ADAPTIVE_LRB_KNOWLEDGE_CHOICES:
+        raise ValueError(f"Unsupported --adaptive_lrb_knowledge: {knowledge}")
+    reducer = str(getattr(args, "adaptive_lrb_hypothesis_reduce", "min"))
+    if reducer not in ADAPTIVE_LRB_HYPOTHESIS_REDUCERS:
+        raise ValueError(f"Unsupported --adaptive_lrb_hypothesis_reduce: {reducer}")
+    seed_samples = int(getattr(args, "adaptive_lrb_seed_samples", 16))
+    if seed_samples <= 0:
+        raise ValueError("--adaptive_lrb_seed_samples must be positive.")
+    ratios = _adaptive_lrb_ratio_grid(args)
+    hidden_signs = knowledge in {"signs_hidden", "method_only"}
+    if hidden_signs and adaptive_defense_aware_active(args) and str(getattr(args, "defense", "none")) in LRB_PROJECTION_DEFENSES:
+        attack_seed = getattr(args, "adaptive_lrb_attack_seed", None)
+        if attack_seed is None:
+            raise ValueError(f"--adaptive_lrb_attack_seed is required for {knowledge}.")
+        configured_seed = getattr(args, "defense_lrb_seed", None)
+        defense_seed = int(getattr(args, "rng_seed", 0) if configured_seed is None else configured_seed)
+        if int(attack_seed) == defense_seed:
+            raise ValueError("The hidden-sign attack seed must differ from the defense LRB seed.")
+    ratio_count = len(ratios) if knowledge in {"ratio_hidden", "method_only"} else 1
+    seed_count = seed_samples if hidden_signs else 1
+    if ratio_count * seed_count > ADAPTIVE_LRB_MAX_HYPOTHESES:
+        raise ValueError(
+            f"Adaptive LRB hypotheses exceed {ADAPTIVE_LRB_MAX_HYPOTHESES}: "
+            f"{ratio_count} ratios x {seed_count} seeds."
+        )
     return args
+
+
+def _adaptive_lrb_ratio_grid(args) -> list[float]:
+    raw = str(getattr(args, "adaptive_lrb_ratio_grid", "auto") or "auto").strip().lower()
+    if raw == "auto":
+        sensitive = float(getattr(args, "defense_lrb_keep_ratio_sensitive", 0.2))
+        other = float(getattr(args, "defense_lrb_keep_ratio_other", 0.75))
+        low, high = sorted((sensitive, other))
+        if math.isclose(low, high, rel_tol=0.0, abs_tol=1e-12):
+            values = [low]
+        else:
+            values = [low + (high - low) * idx / 5.0 for idx in range(6)]
+    else:
+        try:
+            values = [float(part.strip()) for part in raw.split(",") if part.strip()]
+        except ValueError as exc:
+            raise ValueError("--adaptive_lrb_ratio_grid must be 'auto' or comma-separated floats.") from exc
+        if not values:
+            raise ValueError("--adaptive_lrb_ratio_grid cannot be empty.")
+    if any(not (0.0 < value <= 1.0) for value in values):
+        raise ValueError("Every adaptive LRB keep ratio must be in (0, 1].")
+    return list(dict.fromkeys(float(value) for value in values))
+
+
+def _resolved_ratio_grid_text(args) -> str:
+    return ",".join(f"{value:.6g}" for value in _adaptive_lrb_ratio_grid(args))
+
+
+def _hidden_projection_seeds(args, idx: int) -> list[int]:
+    attack_seed = int(getattr(args, "adaptive_lrb_attack_seed"))
+    step = int(getattr(args, "defense_rng_step", 0) or 0)
+    per_update = str(getattr(args, "defense_lrb_seed_mode", "static")) == "per_update"
+    out = []
+    for sample_idx in range(int(getattr(args, "adaptive_lrb_seed_samples", 16))):
+        base_seed = attack_seed + _ATTACK_SEED_STRIDE * sample_idx
+        if per_update:
+            base_seed += _UPDATE_SEED_STRIDE * step
+        out.append(_layer_projection_seed(base_seed, idx))
+    return out
 
 
 def adaptive_attack_active(args) -> bool:
@@ -147,7 +217,7 @@ def _project_last_dim_signed_pool(
 ) -> torch.Tensor:
     if values.shape[-1] <= 1 or keep_ratio >= 0.999:
         return values
-    if mode not in {"pool", "signed_pool"}:
+    if mode not in {"pool", "signed_pool", "signed_pool_nearest", "signed_stride"}:
         raise ValueError(f"Unsupported adaptive projection mode: {mode}")
 
     keep_ratio = float(max(1e-4, min(1.0, keep_ratio)))
@@ -159,7 +229,7 @@ def _project_last_dim_signed_pool(
     dtype = values.dtype
     flat = values.float().reshape(-1, hidden)
     signs = None
-    if mode == "signed_pool":
+    if mode in {"signed_pool", "signed_pool_nearest", "signed_stride"}:
         if feature_signs is not None:
             signs = feature_signs.to(device=values.device, dtype=torch.float32).reshape(-1)
         if signs is None or int(signs.numel()) != hidden:
@@ -170,8 +240,15 @@ def _project_last_dim_signed_pool(
             signs = signs.mul_(2.0).sub_(1.0)
         flat = flat * signs
 
-    pooled = F.adaptive_avg_pool1d(flat.unsqueeze(1), target)
-    projected = F.interpolate(pooled, size=hidden, mode="linear", align_corners=False).squeeze(1)
+    if mode == "signed_stride":
+        indices = torch.linspace(0, hidden - 1, steps=target, device=values.device).round().long()
+        pooled = flat.index_select(1, indices).unsqueeze(1)
+    else:
+        pooled = F.adaptive_avg_pool1d(flat.unsqueeze(1), target)
+    if mode == "signed_pool_nearest":
+        projected = F.interpolate(pooled, size=hidden, mode="nearest").squeeze(1)
+    else:
+        projected = F.interpolate(pooled, size=hidden, mode="linear", align_corners=False).squeeze(1)
     if signs is not None:
         projected = projected * signs
     return projected.reshape(values.shape).to(dtype=dtype)
@@ -246,6 +323,18 @@ def prepare_adaptive_attack(
         "adaptive_support_density_mean": "n/a",
         "adaptive_quantization_levels_mean": "n/a",
         "adaptive_lrb_keep_ratio_mean": "n/a",
+        "adaptive_lrb_knowledge": str(getattr(args, "adaptive_lrb_knowledge", "oracle")),
+        "adaptive_lrb_ratio_grid": _resolved_ratio_grid_text(args),
+        "adaptive_lrb_attack_seed": (
+            "n/a"
+            if getattr(args, "adaptive_lrb_attack_seed", None) is None
+            else int(getattr(args, "adaptive_lrb_attack_seed"))
+        ),
+        "adaptive_lrb_seed_samples": int(getattr(args, "adaptive_lrb_seed_samples", 16)),
+        "adaptive_lrb_hypothesis_reduce": str(getattr(args, "adaptive_lrb_hypothesis_reduce", "min")),
+        "adaptive_lrb_hypothesis_count_mean": "n/a",
+        "adaptive_lrb_ratio_knowledge": "n/a",
+        "adaptive_lrb_sign_knowledge": "n/a",
         "adaptive_selected_gradients": ";".join(selected_names) if selected_names else "n/a",
     }
     state = {"layers": {}, "profile": profile}
@@ -255,13 +344,15 @@ def prepare_adaptive_attack(
         setattr(args, "adaptive_attack_state", state)
         return args
 
+    knowledge = str(getattr(args, "adaptive_lrb_knowledge", "oracle"))
     lrb_projection_info = {}
-    if defense in LRB_PROJECTION_DEFENSES:
+    if defense in LRB_PROJECTION_DEFENSES and knowledge != "method_only":
         lrb_projection_info = _lrb_projection_info_for_selected(args, selected_indices)
 
     support_densities: list[float] = []
     quant_levels: list[float] = []
     lrb_keep_values: list[float] = []
+    lrb_hypothesis_counts: list[float] = []
     transforms: list[str] = []
     projection_mode = str(getattr(args, "defense_lrb_projection", "signed_pool"))
     base_seed = int(getattr(args, "rng_seed", 0))
@@ -286,20 +377,65 @@ def prepare_adaptive_attack(
             quant_levels.append(float(_sample_unique_count(oriented)))
             transforms.append("ranked_quantized_span")
 
-        if defense in LRB_PROJECTION_DEFENSES and idx in lrb_projection_info:
-            projection_info = lrb_projection_info[idx]
-            keep_ratio = float(projection_info["keep_ratio"])
-            projection_seed = int(projection_info.get("projection_seed", _layer_projection_seed(base_seed, idx)))
-            original_shape = tuple(int(dim) for dim in projection_info.get("shape", tuple(grad.shape)))
+        if defense in LRB_PROJECTION_DEFENSES:
+            projection_info = lrb_projection_info.get(idx)
+            if knowledge != "method_only" and projection_info is None:
+                raise RuntimeError(
+                    f"Adaptive LRB knowledge={knowledge} requires defense metadata for gradient index {idx}."
+                )
+            original_shape = tuple(
+                int(dim)
+                for dim in ((projection_info or {}).get("shape", tuple(grad.shape)))
+            )
             feature_axis = _lrb_feature_axis(args, grad, original_shape)
-            layer_state["lrb_keep_ratio"] = keep_ratio
-            layer_state["lrb_projection_mode"] = str(projection_info.get("projection_mode", projection_mode))
-            layer_state["lrb_projection_seed"] = projection_seed
+            layer_projection_mode = str((projection_info or {}).get("projection_mode", projection_mode))
+            if knowledge in {"oracle", "signs_hidden"}:
+                keep_ratios = [float(projection_info["keep_ratio"])]
+                lrb_keep_values.extend(keep_ratios)
+            else:
+                keep_ratios = _adaptive_lrb_ratio_grid(args)
+            if knowledge in {"oracle", "ratio_hidden"}:
+                projection_seeds = [
+                    int(projection_info.get("projection_seed", _layer_projection_seed(base_seed, idx)))
+                ]
+            elif layer_projection_mode == "pool":
+                projection_seeds = [0]
+            else:
+                projection_seeds = _hidden_projection_seeds(args, idx)
+
+            hypotheses = []
+            for keep_ratio in keep_ratios:
+                for projection_seed in projection_seeds:
+                    signs = None
+                    if layer_projection_mode != "pool":
+                        signs = _lrb_feature_signs(projection_seed, original_shape, feature_axis)
+                    hypotheses.append(
+                        {
+                            "keep_ratio": float(keep_ratio),
+                            "projection_mode": layer_projection_mode,
+                            "projection_seed": int(projection_seed),
+                            "feature_signs": signs,
+                        }
+                    )
+            if len(hypotheses) > ADAPTIVE_LRB_MAX_HYPOTHESES:
+                raise RuntimeError(
+                    f"Layer {idx} generated {len(hypotheses)} adaptive LRB hypotheses; "
+                    f"maximum is {ADAPTIVE_LRB_MAX_HYPOTHESES}."
+                )
+
+            if knowledge == "oracle":
+                keep_ratio = hypotheses[0]["keep_ratio"]
+                projection_seed = hypotheses[0]["projection_seed"]
+                layer_state["lrb_keep_ratio"] = keep_ratio
+                layer_state["lrb_projection_mode"] = layer_projection_mode
+                layer_state["lrb_projection_seed"] = projection_seed
+                layer_state["lrb_feature_signs"] = hypotheses[0]["feature_signs"]
+            else:
+                layer_state["lrb_hypotheses"] = hypotheses
             layer_state["lrb_original_shape"] = original_shape
             layer_state["lrb_feature_axis"] = "n/a" if feature_axis is None else feature_axis
-            layer_state["lrb_feature_signs"] = _lrb_feature_signs(projection_seed, original_shape, feature_axis)
-            lrb_keep_values.append(keep_ratio)
-            transforms.append("lrb_public_projection")
+            lrb_hypothesis_counts.append(float(len(hypotheses)))
+            transforms.append("lrb_public_projection" if knowledge == "oracle" else "lrb_hypothesis_projection")
 
         if layer_state:
             state["layers"][int(layer_pos)] = layer_state
@@ -310,6 +446,10 @@ def prepare_adaptive_attack(
         info["adaptive_quantization_levels_mean"] = _fmt_float(mean(quant_levels))
     if lrb_keep_values:
         info["adaptive_lrb_keep_ratio_mean"] = _fmt_float(mean(lrb_keep_values))
+    if lrb_hypothesis_counts:
+        info["adaptive_lrb_hypothesis_count_mean"] = _fmt_float(mean(lrb_hypothesis_counts))
+        info["adaptive_lrb_ratio_knowledge"] = "exact" if knowledge in {"oracle", "signs_hidden"} else "hidden"
+        info["adaptive_lrb_sign_knowledge"] = "exact" if knowledge in {"oracle", "ratio_hidden"} else "hidden"
     if transforms:
         info["adaptive_span_transform"] = "+".join(sorted(set(transforms)))
 
@@ -332,6 +472,18 @@ def adaptive_attack_summary_fields(args):
             "adaptive_support_density_mean": "n/a",
             "adaptive_quantization_levels_mean": "n/a",
             "adaptive_lrb_keep_ratio_mean": "n/a",
+            "adaptive_lrb_knowledge": str(getattr(args, "adaptive_lrb_knowledge", "oracle")),
+            "adaptive_lrb_ratio_grid": _resolved_ratio_grid_text(args),
+            "adaptive_lrb_attack_seed": (
+                "n/a"
+                if getattr(args, "adaptive_lrb_attack_seed", None) is None
+                else int(getattr(args, "adaptive_lrb_attack_seed"))
+            ),
+            "adaptive_lrb_seed_samples": int(getattr(args, "adaptive_lrb_seed_samples", 16)),
+            "adaptive_lrb_hypothesis_reduce": str(getattr(args, "adaptive_lrb_hypothesis_reduce", "min")),
+            "adaptive_lrb_hypothesis_count_mean": "n/a",
+            "adaptive_lrb_ratio_knowledge": "n/a",
+            "adaptive_lrb_sign_knowledge": "n/a",
             "adaptive_selected_gradients": "n/a",
         }
     return [
@@ -344,6 +496,14 @@ def adaptive_attack_summary_fields(args):
         ("adaptive_support_density_mean", info.get("adaptive_support_density_mean", "n/a")),
         ("adaptive_quantization_levels_mean", info.get("adaptive_quantization_levels_mean", "n/a")),
         ("adaptive_lrb_keep_ratio_mean", info.get("adaptive_lrb_keep_ratio_mean", "n/a")),
+        ("adaptive_lrb_knowledge", info.get("adaptive_lrb_knowledge", "oracle")),
+        ("adaptive_lrb_ratio_grid", info.get("adaptive_lrb_ratio_grid", "n/a")),
+        ("adaptive_lrb_attack_seed", info.get("adaptive_lrb_attack_seed", "n/a")),
+        ("adaptive_lrb_seed_samples", info.get("adaptive_lrb_seed_samples", "n/a")),
+        ("adaptive_lrb_hypothesis_reduce", info.get("adaptive_lrb_hypothesis_reduce", "min")),
+        ("adaptive_lrb_hypothesis_count_mean", info.get("adaptive_lrb_hypothesis_count_mean", "n/a")),
+        ("adaptive_lrb_ratio_knowledge", info.get("adaptive_lrb_ratio_knowledge", "n/a")),
+        ("adaptive_lrb_sign_knowledge", info.get("adaptive_lrb_sign_knowledge", "n/a")),
         ("adaptive_selected_gradients", info.get("adaptive_selected_gradients", "n/a")),
     ]
 
@@ -378,6 +538,23 @@ def adaptive_transform_candidates(args, values: torch.Tensor, *, layer_position:
 
 
 def adaptive_check_if_in_span(args, R_K_norm, values, norm="l2", *, layer_position: int = 0):
+    state = getattr(args, "adaptive_attack_state", None)
+    layer_state = (state or {}).get("layers", {}).get(int(layer_position), {})
+    hypotheses = layer_state.get("lrb_hypotheses", [])
+    if adaptive_defense_aware_active(args) and hypotheses:
+        scores = []
+        for hypothesis in hypotheses:
+            transformed = _project_last_dim_signed_pool(
+                values,
+                float(hypothesis["keep_ratio"]),
+                seed=int(hypothesis["projection_seed"]),
+                mode=str(hypothesis["projection_mode"]),
+                feature_signs=hypothesis.get("feature_signs"),
+            )
+            scores.append(check_if_in_span(R_K_norm, transformed, norm))
+        stacked = torch.stack(scores, dim=0)
+        reducer = str(getattr(args, "adaptive_lrb_hypothesis_reduce", "min"))
+        return stacked.amin(dim=0) if reducer == "min" else stacked.mean(dim=0)
     values = adaptive_transform_candidates(args, values, layer_position=layer_position)
     return check_if_in_span(R_K_norm, values, norm)
 

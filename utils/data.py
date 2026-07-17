@@ -2,6 +2,49 @@ from datasets import load_dataset
 import numpy as np
 import torch 
 
+
+ATTACK_SPLIT_CHOICES = ("val", "test", "official_validation")
+
+
+def _official_partition(dataset: str) -> tuple[str, str | None]:
+    if dataset in {"cola", "sst2", "rte"}:
+        return "validation", "glue"
+    if dataset == "rotten_tomatoes":
+        return "validation", None
+    if dataset == "stanfordnlp/imdb":
+        return "test", None
+    if dataset == "glnmario/ECHR":
+        raise ValueError("official_validation is unavailable for glnmario/ECHR")
+    raise ValueError(f"official_validation is unsupported for dataset {dataset!r}")
+
+
+def _official_validation_indices(full, seq_key: str, n_samples: int) -> list[int]:
+    if n_samples > len(full):
+        raise ValueError(
+            f"official_validation requests {n_samples} samples from a partition of size {len(full)}"
+        )
+
+    shuffled = np.arange(len(full))
+    np.random.shuffle(shuffled)
+    ranked = sorted(shuffled.tolist(), key=lambda idx: len(full[idx][seq_key]))
+    buckets = np.array_split(np.asarray(ranked, dtype=np.int64), n_samples)
+    selected = [int(bucket[np.random.randint(0, len(bucket))]) for bucket in buckets]
+    np.random.shuffle(selected)
+    return selected
+
+
+def record_dataset_protocol(args, dataset) -> None:
+    args.data_protocol = dataset.data_protocol
+    args.source_partition = dataset.source_partition
+
+
+def dataset_summary_fields(args):
+    return [
+        ("data_protocol", getattr(args, "data_protocol", "n/a")),
+        ("source_partition", getattr(args, "source_partition", "n/a")),
+    ]
+
+
 class TextDataset:
     def __init__(self, device, dataset, split, n_inputs, batch_size, cache_dir=None):
         
@@ -15,7 +58,17 @@ class TextDataset:
         }
         seq_key = seq_keys[dataset]
 
-        if dataset in ['cola', 'sst2', 'rte']:
+        self.data_protocol = "legacy_internal"
+        self.source_partition = "train"
+        if split == "official_validation":
+            partition, dataset_family = _official_partition(dataset)
+            if dataset_family == "glue":
+                full = load_dataset("glue", dataset, cache_dir=cache_dir)[partition]
+            else:
+                full = load_dataset(dataset, cache_dir=cache_dir)[partition]
+            self.data_protocol = "official_validation"
+            self.source_partition = partition
+        elif dataset in ['cola', 'sst2', 'rte']:
             full = load_dataset('glue', dataset, cache_dir=cache_dir)['train']
         elif dataset == 'glnmario/ECHR':
             full = load_dataset('csv', data_files = ['models_cache/datasets--glnmario--ECHR/ECHR_Dataset.csv'], cache_dir=cache_dir)['train']
@@ -30,7 +83,9 @@ class TextDataset:
 
         n_samples = n_inputs * batch_size
 
-        if split == 'test':
+        if split == "official_validation":
+            idxs = _official_validation_indices(full, seq_key, n_samples)
+        elif split == 'test':
             assert n_samples <= 1000
             idxs = idxs[:n_samples]
         elif split == 'val':

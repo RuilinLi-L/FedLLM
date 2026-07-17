@@ -15,6 +15,7 @@ except ModuleNotFoundError:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if torch is not None:
+    import utils.adaptive_attack as adaptive_module
     from utils.adaptive_attack import (
         adaptive_attack_summary_fields,
         adaptive_check_if_in_span,
@@ -41,6 +42,16 @@ def _base_args(defense="topk"):
         adaptive_candidate_cap=None,
         defense=defense,
         defense_lrb_projection="signed_pool",
+        defense_lrb_keep_ratio_sensitive=0.5,
+        defense_lrb_keep_ratio_other=0.75,
+        defense_lrb_seed=None,
+        defense_lrb_seed_mode="static",
+        defense_rng_step=0,
+        adaptive_lrb_knowledge="oracle",
+        adaptive_lrb_ratio_grid="auto",
+        adaptive_lrb_attack_seed=None,
+        adaptive_lrb_seed_samples=16,
+        adaptive_lrb_hypothesis_reduce="min",
         rng_seed=7,
         train_method="full",
         model_path="bert-base-uncased",
@@ -196,6 +207,121 @@ def test_lrb_signed_projection_uses_feature_axis_signs_for_transposed_gpt2_grad(
     assert_true(signs.numel() == 2, "feature signs should follow the oriented hidden dimension")
 
 
+def _hypothesis_signature(args):
+    hypotheses = args.adaptive_attack_state["layers"][0]["lrb_hypotheses"]
+    return [
+        (
+            item["keep_ratio"],
+            item["projection_seed"],
+            None if item["feature_signs"] is None else item["feature_signs"].clone(),
+        )
+        for item in hypotheses
+    ]
+
+
+def test_method_only_does_not_read_oracle_lrb_metadata():
+    args_a = _base_args("lrb")
+    args_a.adaptive_lrb_knowledge = "method_only"
+    args_a.adaptive_lrb_ratio_grid = "0.4,0.6"
+    args_a.adaptive_lrb_attack_seed = 9001
+    args_a.adaptive_lrb_seed_samples = 2
+    args_a.dager_selected_gradient_indices = [0]
+    args_a.dager_selected_gradient_names = ["transformer.h.0.attn.c_attn.weight"]
+    args_a.lrb_defense_layer_info = [
+        {"idx": 0, "active": True, "keep_ratio": 0.1, "projection_seed": 111, "shape": (4, 4)}
+    ]
+    grad = torch.ones(4, 4)
+    prepare_adaptive_attack(args_a, (grad,), parameter_names=args_a.dager_selected_gradient_names)
+    first = _hypothesis_signature(args_a)
+
+    args_b = _base_args("lrb")
+    args_b.adaptive_lrb_knowledge = "method_only"
+    args_b.adaptive_lrb_ratio_grid = "0.4,0.6"
+    args_b.adaptive_lrb_attack_seed = 9001
+    args_b.adaptive_lrb_seed_samples = 2
+    args_b.dager_selected_gradient_indices = [0]
+    args_b.dager_selected_gradient_names = list(args_a.dager_selected_gradient_names)
+    args_b.lrb_defense_layer_info = [
+        {"idx": 0, "active": True, "keep_ratio": 0.9, "projection_seed": 999, "shape": (4, 4)}
+    ]
+    prepare_adaptive_attack(args_b, (grad,), parameter_names=args_b.dager_selected_gradient_names)
+    second = _hypothesis_signature(args_b)
+
+    assert_true(len(first) == len(second) == 4, "method-only should build ratio x seed hypotheses")
+    for left, right in zip(first, second):
+        assert_true(left[0] == right[0], "method-only ratios must ignore oracle metadata")
+        assert_true(left[1] == right[1], "method-only seeds must ignore oracle metadata")
+        assert_true(torch.equal(left[2], right[2]), "method-only signs must ignore oracle metadata")
+
+
+def test_hidden_knowledge_profiles_isolate_ratio_and_sign_metadata():
+    grad = torch.ones(4, 4)
+    metadata = [{
+        "idx": 0,
+        "active": True,
+        "keep_ratio": 0.55,
+        "projection_seed": 123,
+        "projection_mode": "signed_pool",
+        "shape": (4, 4),
+    }]
+
+    ratio_args = _base_args("lrb")
+    ratio_args.adaptive_lrb_knowledge = "ratio_hidden"
+    ratio_args.adaptive_lrb_ratio_grid = "0.25,0.75"
+    ratio_args.dager_selected_gradient_indices = [0]
+    ratio_args.dager_selected_gradient_names = ["layer.weight"]
+    ratio_args.lrb_defense_layer_info = metadata
+    prepare_adaptive_attack(ratio_args, (grad,), parameter_names=ratio_args.dager_selected_gradient_names)
+    ratio_hypotheses = ratio_args.adaptive_attack_state["layers"][0]["lrb_hypotheses"]
+    assert_true([item["keep_ratio"] for item in ratio_hypotheses] == [0.25, 0.75], "ratio-hidden must use the grid")
+    assert_true(all(item["projection_seed"] == 123 for item in ratio_hypotheses), "ratio-hidden must retain exact signs")
+
+    sign_args = _base_args("lrb")
+    sign_args.adaptive_lrb_knowledge = "signs_hidden"
+    sign_args.adaptive_lrb_attack_seed = 9001
+    sign_args.adaptive_lrb_seed_samples = 3
+    sign_args.dager_selected_gradient_indices = [0]
+    sign_args.dager_selected_gradient_names = ["layer.weight"]
+    sign_args.lrb_defense_layer_info = metadata
+    prepare_adaptive_attack(sign_args, (grad,), parameter_names=sign_args.dager_selected_gradient_names)
+    sign_hypotheses = sign_args.adaptive_attack_state["layers"][0]["lrb_hypotheses"]
+    assert_true(len(sign_hypotheses) == 3, "sign-hidden must build the requested seed ensemble")
+    assert_true(all(item["keep_ratio"] == 0.55 for item in sign_hypotheses), "sign-hidden must retain the exact ratio")
+    assert_true(all(item["projection_seed"] != 123 for item in sign_hypotheses), "sign-hidden must not reuse the true seed")
+    fields = dict(adaptive_attack_summary_fields(sign_args))
+    assert_true(fields["adaptive_lrb_attack_seed"] == 9001, "summary must record the hidden-sign attack seed")
+
+
+def test_lrb_hypothesis_reducers_match_min_and_mean_distances():
+    args = _base_args("lrb")
+    hypotheses = [
+        {"keep_ratio": 0.5, "projection_mode": "pool", "projection_seed": 0, "feature_signs": None},
+        {"keep_ratio": 0.75, "projection_mode": "pool", "projection_seed": 0, "feature_signs": None},
+    ]
+    args.adaptive_attack_state = {"layers": {0: {"lrb_hypotheses": hypotheses}}}
+    values = torch.tensor([[[1.0, 4.0, 2.0, 8.0], [3.0, 1.0, 7.0, 2.0]]])
+    span = torch.eye(4)[:2]
+
+    individual = []
+    for hypothesis in hypotheses:
+        transformed = adaptive_module._project_last_dim_signed_pool(
+            values.clone(),
+            hypothesis["keep_ratio"],
+            seed=hypothesis["projection_seed"],
+            mode=hypothesis["projection_mode"],
+        )
+        individual.append(adaptive_module.check_if_in_span(span, transformed, "l2"))
+    stacked = torch.stack(individual)
+
+    args.adaptive_lrb_hypothesis_reduce = "min"
+    actual_min = adaptive_check_if_in_span(args, span, values.clone(), "l2", layer_position=0)
+    args.adaptive_lrb_hypothesis_reduce = "mean"
+    actual_mean = adaptive_check_if_in_span(args, span, values.clone(), "l2", layer_position=0)
+
+    assert_true(torch.allclose(actual_min, stacked.amin(dim=0)), "min reducer must be attacker-friendly per candidate")
+    assert_true(torch.allclose(actual_mean, stacked.mean(dim=0)), "mean reducer must average hypothesis distances")
+
+
 def test_adaptive_span_check_preserves_plain_shape():
     args = _base_args("compression")
     args.dager_selected_gradient_indices = []
@@ -316,6 +442,9 @@ def main():
         test_ranked_adaptive_l1_uses_threshold_hits_when_available,
         test_lrb_projection_metadata_reuses_defense_layer_info,
         test_lrb_signed_projection_uses_feature_axis_signs_for_transposed_gpt2_grad,
+        test_method_only_does_not_read_oracle_lrb_metadata,
+        test_hidden_knowledge_profiles_isolate_ratio_and_sign_metadata,
+        test_lrb_hypothesis_reducers_match_min_and_mean_distances,
         test_adaptive_span_check_preserves_plain_shape,
         test_noisy_span_distances_skip_unused_layer_forward_after_position_zero,
         test_noisy_span_distances_keep_position_zero_multilayer_semantics,

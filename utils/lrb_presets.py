@@ -9,6 +9,7 @@ LRB_PRESET_CHOICES = [
     "custom",
     "lrbprojonly",
     "identity_lrb",
+    "sign_only",
     "clip_only",
     "proj_only",
     "proj_clip",
@@ -20,6 +21,9 @@ LRB_PRESET_CHOICES = [
     "proj_rule_only",
     "proj_empirical_only",
     "proj_uniform",
+    "proj_uniform_pool",
+    "proj_uniform_nearest",
+    "proj_uniform_stride",
     "signed_bottleneck",
     "proj_no_empirical",
 ]
@@ -97,6 +101,19 @@ def apply_lrb_preset(args: Any) -> Any:
             projection="signed_pool",
         )
 
+    if preset == "sign_only":
+        return _set_lrb_args(
+            args,
+            keep_sensitive=1.0,
+            keep_other=1.0,
+            clip_sensitive=NO_CLIP,
+            clip_other=NO_CLIP,
+            noise_sensitive=0.0,
+            noise_other=0.0,
+            empirical_weight=0.0,
+            projection="signed_pool",
+        )
+
     if preset == "clip_only":
         return _set_lrb_args(
             args,
@@ -128,7 +145,18 @@ def apply_lrb_preset(args: Any) -> Any:
             projection="signed_pool",
         )
 
-    if preset in {"proj_uniform", "signed_bottleneck"}:
+    if preset in {
+        "proj_uniform",
+        "proj_uniform_pool",
+        "proj_uniform_nearest",
+        "proj_uniform_stride",
+        "signed_bottleneck",
+    }:
+        projection = {
+            "proj_uniform_pool": "pool",
+            "proj_uniform_nearest": "signed_pool_nearest",
+            "proj_uniform_stride": "signed_stride",
+        }.get(preset, "signed_pool")
         return _set_lrb_args(
             args,
             keep_sensitive=k,
@@ -138,7 +166,7 @@ def apply_lrb_preset(args: Any) -> Any:
             noise_sensitive=0.0,
             noise_other=0.0,
             empirical_weight=0.0,
-            projection="signed_pool",
+            projection=projection,
         )
 
     if preset == "proj_clip":

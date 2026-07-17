@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import csv
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from scripts.collect_experiment_logs import build_privacy_utility_tradeoff, build_utility_results
-from scripts.collect_experiment_logs import classify_and_parse, build_attack_anchor_results
+from scripts.collect_experiment_logs import classify_and_parse, build_attack_anchor_results, write_csv
 
 
 def assert_true(condition, message):
@@ -497,6 +499,68 @@ agg_r1fm_r2fm=200.000000
     assert_true(rows[0]["input_r1fm_r2fm_std"] == "70.710678", "per-input r1+r2 std should be parsed")
 
 
+def test_adaptive_protocols_do_not_mix_in_privacy_aggregation():
+    base = {
+        "log_kind": "attack_dager",
+        "dataset": "sst2",
+        "batch_size": "2",
+        "train_method": "full",
+        "defense": "lrb",
+        "defense_param_name": "lrb_preset",
+        "defense_param_value": "proj_only@k=0.5",
+        "adaptive_attack": "defense_aware",
+        "adaptive_attack_profile": "projection_span",
+        "result_status": "ok",
+        "n_inputs_requested": "100",
+        "n_inputs_completed": "100",
+    }
+    rows = [
+        {
+            **base,
+            "split": "val",
+            "data_protocol": "legacy_internal",
+            "source_partition": "train",
+            "adaptive_lrb_knowledge": "oracle",
+            "adaptive_lrb_ratio_grid": "0.5,0.55,0.6,0.65,0.7,0.75",
+            "adaptive_lrb_seed_samples": "16",
+            "adaptive_lrb_hypothesis_reduce": "min",
+            "rec_token_mean": "0.9",
+        },
+        {
+            **base,
+            "split": "official_validation",
+            "data_protocol": "official_validation",
+            "source_partition": "validation",
+            "adaptive_lrb_knowledge": "method_only",
+            "adaptive_lrb_ratio_grid": "0.2,0.5,0.75",
+            "adaptive_lrb_attack_seed": "900001",
+            "adaptive_lrb_seed_samples": "16",
+            "adaptive_lrb_hypothesis_reduce": "min",
+            "rec_token_mean": "0.1",
+        },
+    ]
+
+    anchors = build_attack_anchor_results(rows)
+    assert_true(len(anchors) == 2, "legacy/oracle and held-out/method-only results must not share a mean")
+    assert_true(
+        {row["adaptive_lrb_knowledge"] for row in anchors} == {"oracle", "method_only"},
+        "adaptive knowledge must remain an aggregation key",
+    )
+
+
+def test_old_logs_receive_na_audit_cells_without_numeric_reinterpretation():
+    rows = [{"log_kind": "attack_dager", "rec_token_mean": "0.833506"}]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        output = Path(temp_dir) / "rows.csv"
+        write_csv(output, rows)
+        with output.open(newline="", encoding="utf-8") as handle:
+            parsed = list(csv.DictReader(handle))
+
+    assert_true(parsed[0]["data_protocol"] == "n/a", "old logs should use explicit n/a protocol metadata")
+    assert_true(parsed[0]["adaptive_lrb_knowledge"] == "n/a", "old logs should use explicit n/a knowledge metadata")
+    assert_true(parsed[0]["rec_token_mean"] == "0.833506", "old numeric results must remain byte-for-byte unchanged")
+
+
 def main():
     tests = [
         test_prefix_utility_rows_are_training_only_not_failed_privacy,
@@ -511,6 +575,8 @@ def main():
         test_unsupported_partial_attack_status_is_preserved,
         test_adaptive_fallback_summary_stays_in_adaptive_group,
         test_full_variant_log_with_per_input_stats_parses_once,
+        test_adaptive_protocols_do_not_mix_in_privacy_aggregation,
+        test_old_logs_receive_na_audit_cells_without_numeric_reinterpretation,
     ]
     for test in tests:
         print(f"Running {test.__name__}...")

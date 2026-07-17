@@ -24,6 +24,7 @@ import torch.nn.functional as F
 
 _CACHE_LIMIT = 512
 _NO_CLIP_SENTINEL = 1_000_000.0
+_LRB_UPDATE_SEED_STRIDE = 1_000_003
 _BIN_BOUNDS_CACHE: OrderedDict[tuple, tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
 _SIGN_CACHE: OrderedDict[tuple, torch.Tensor] = OrderedDict()
 
@@ -261,6 +262,39 @@ def _pool_interpolate_matrix(matrix: torch.Tensor, keep_ratio: float) -> torch.T
     return projected.view_as(matrix)
 
 
+def _pool_nearest_flat(flat: torch.Tensor, keep_ratio: float) -> torch.Tensor:
+    n = flat.shape[0]
+    k = max(1, int(round(n * keep_ratio)))
+    pooled = _adaptive_avg_pool1d_manual(flat.reshape(-1), k).reshape(1, 1, k)
+    return F.interpolate(pooled, size=n, mode="nearest").view_as(flat)
+
+
+def _pool_nearest_matrix(matrix: torch.Tensor, keep_ratio: float) -> torch.Tensor:
+    m, n = matrix.shape
+    km = max(1, int(round(m * keep_ratio)))
+    kn = max(1, int(round(n * keep_ratio)))
+    pooled = _adaptive_avg_pool2d_manual(matrix.reshape(m, n), (km, kn)).reshape(1, 1, km, kn)
+    return F.interpolate(pooled, size=(m, n), mode="nearest").view_as(matrix)
+
+
+def _stride_interpolate_flat(flat: torch.Tensor, keep_ratio: float) -> torch.Tensor:
+    n = flat.shape[0]
+    k = max(1, int(round(n * keep_ratio)))
+    indices = torch.linspace(0, n - 1, steps=k, device=flat.device).round().long()
+    sampled = flat.index_select(0, indices).reshape(1, 1, k)
+    return F.interpolate(sampled, size=n, mode="linear", align_corners=False).view_as(flat)
+
+
+def _stride_interpolate_matrix(matrix: torch.Tensor, keep_ratio: float) -> torch.Tensor:
+    m, n = matrix.shape
+    km = max(1, int(round(m * keep_ratio)))
+    kn = max(1, int(round(n * keep_ratio)))
+    row_indices = torch.linspace(0, m - 1, steps=km, device=matrix.device).round().long()
+    col_indices = torch.linspace(0, n - 1, steps=kn, device=matrix.device).round().long()
+    sampled = matrix.index_select(0, row_indices).index_select(1, col_indices).reshape(1, 1, km, kn)
+    return F.interpolate(sampled, size=(m, n), mode="bilinear", align_corners=False).view_as(matrix)
+
+
 def _project_low_resolution(
     tensor: torch.Tensor,
     keep_ratio: float,
@@ -274,36 +308,91 @@ def _project_low_resolution(
     keep_ratio = float(max(1e-4, min(1.0, keep_ratio)))
     x = tensor.float()
 
-    if mode not in {"pool", "signed_pool"}:
+    if mode not in {"pool", "signed_pool", "signed_pool_nearest", "signed_stride"}:
         raise ValueError(f"Unsupported LRB projection mode: {mode}")
 
     if tensor.dim() == 1:
         if mode == "pool":
             projected = _pool_interpolate_flat(x.reshape(-1), keep_ratio)
-        else:
+        elif mode == "signed_pool":
             signs = _cached_rademacher(x.shape, device=tensor.device, seed=seed)
             projected = _pool_interpolate_flat(x * signs, keep_ratio) * signs
+        elif mode == "signed_pool_nearest":
+            signs = _cached_rademacher(x.shape, device=tensor.device, seed=seed)
+            projected = _pool_nearest_flat(x * signs, keep_ratio) * signs
+        else:
+            signs = _cached_rademacher(x.shape, device=tensor.device, seed=seed)
+            projected = _stride_interpolate_flat(x * signs, keep_ratio) * signs
         return projected.view_as(x).to(dtype=tensor.dtype)
 
     if tensor.dim() == 2:
         if mode == "pool":
             projected = _pool_interpolate_matrix(x, keep_ratio)
-        else:
+        elif mode == "signed_pool":
             row_shape = (x.shape[0], 1)
             col_shape = (1, x.shape[1])
             row_signs = _cached_rademacher(row_shape, device=tensor.device, seed=seed)
             col_signs = _cached_rademacher(col_shape, device=tensor.device, seed=seed, prior_shapes=(row_shape,))
             projected = _pool_interpolate_matrix(x * row_signs * col_signs, keep_ratio)
             projected = projected * row_signs * col_signs
+        else:
+            row_shape = (x.shape[0], 1)
+            col_shape = (1, x.shape[1])
+            row_signs = _cached_rademacher(row_shape, device=tensor.device, seed=seed)
+            col_signs = _cached_rademacher(col_shape, device=tensor.device, seed=seed, prior_shapes=(row_shape,))
+            signed = x * row_signs * col_signs
+            if mode == "signed_pool_nearest":
+                projected = _pool_nearest_matrix(signed, keep_ratio)
+            else:
+                projected = _stride_interpolate_matrix(signed, keep_ratio)
+            projected = projected * row_signs * col_signs
         return projected.view_as(x).to(dtype=tensor.dtype)
 
     flat = x.reshape(-1)
     if mode == "pool":
         projected = _pool_interpolate_flat(flat, keep_ratio)
-    else:
+    elif mode == "signed_pool":
         signs = _cached_rademacher(flat.shape, device=tensor.device, seed=seed)
         projected = _pool_interpolate_flat(flat * signs, keep_ratio) * signs
+    elif mode == "signed_pool_nearest":
+        signs = _cached_rademacher(flat.shape, device=tensor.device, seed=seed)
+        projected = _pool_nearest_flat(flat * signs, keep_ratio) * signs
+    else:
+        signs = _cached_rademacher(flat.shape, device=tensor.device, seed=seed)
+        projected = _stride_interpolate_flat(flat * signs, keep_ratio) * signs
     return projected.view_as(x).to(dtype=tensor.dtype)
+
+
+def _effective_projection_base_seed(args) -> tuple[int, int | None]:
+    configured_seed = getattr(args, "defense_lrb_seed", None)
+    base_seed = int(getattr(args, "rng_seed", 0) if configured_seed is None else configured_seed)
+    mode = str(getattr(args, "defense_lrb_seed_mode", "static"))
+    if mode == "static":
+        return base_seed, None
+    if mode != "per_update":
+        raise ValueError(f"Unsupported LRB seed mode: {mode}")
+
+    step = getattr(args, "defense_rng_step", None)
+    if step is None:
+        step = int(getattr(args, "_lrb_defense_call_index", 0))
+        setattr(args, "_lrb_defense_call_index", step + 1)
+    return base_seed + _LRB_UPDATE_SEED_STRIDE * int(step), int(step)
+
+
+def lrb_seed_summary_fields(args):
+    if str(getattr(args, "defense", "none")) not in {"lrb", "lrbprojonly", "signed_bottleneck"}:
+        return [
+            ("defense_lrb_seed_mode", "n/a"),
+            ("defense_lrb_seed_source", "n/a"),
+            ("defense_lrb_seed", "n/a"),
+        ]
+    configured_seed = getattr(args, "defense_lrb_seed", None)
+    resolved_seed = int(getattr(args, "rng_seed", 0) if configured_seed is None else configured_seed)
+    return [
+        ("defense_lrb_seed_mode", getattr(args, "defense_lrb_seed_mode", "static")),
+        ("defense_lrb_seed_source", "rng_seed" if configured_seed is None else "explicit"),
+        ("defense_lrb_seed", resolved_seed),
+    ]
 
 
 def _orthogonal_residual_noise(
@@ -463,7 +552,7 @@ def apply_lrb_defense(
     empirical_weight = float(getattr(args, "defense_lrb_empirical_weight", 0.6))
     calibration_samples = int(getattr(args, "defense_lrb_calibration_samples", 4096))
     projection_mode = str(getattr(args, "defense_lrb_projection", "signed_pool"))
-    base_seed = int(getattr(args, "rng_seed", 0))
+    base_seed, seed_step = _effective_projection_base_seed(args)
 
     clipping_disabled = sensitive_clip >= _NO_CLIP_SENTINEL and other_clip >= _NO_CLIP_SENTINEL
     noise_disabled = sensitive_noise <= 0.0 and other_noise <= 0.0
@@ -533,6 +622,9 @@ def apply_lrb_defense(
                 "clip_scale": float(clip_scale),
                 "noise_scale": float(noise_scale),
                 "projection_seed": int(layer_seed),
+                "projection_base_seed": int(base_seed),
+                "projection_seed_mode": str(getattr(args, "defense_lrb_seed_mode", "static")),
+                "projection_seed_step": seed_step,
                 "projection_mode": projection_mode,
                 "shape": tuple(int(dim) for dim in grad.shape),
             }

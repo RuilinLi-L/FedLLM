@@ -6,7 +6,13 @@ from utils.lrb_presets import LRB_PRESET_CHOICES, apply_lrb_preset
 from utils.peft_utils import normalize_peft_args, validate_peft_eval_args
 from utils.partial_gradient import validate_partial_gradient_args
 from utils.representation_bottleneck import REP_BOTTLENECK_CHOICES, validate_rep_bottleneck_args
-from utils.adaptive_attack import ADAPTIVE_ATTACK_CHOICES, validate_adaptive_attack_args
+from utils.adaptive_attack import (
+    ADAPTIVE_ATTACK_CHOICES,
+    ADAPTIVE_LRB_HYPOTHESIS_REDUCERS,
+    ADAPTIVE_LRB_KNOWLEDGE_CHOICES,
+    validate_adaptive_attack_args,
+)
+from utils.data import ATTACK_SPLIT_CHOICES
 from utils.dpsgd_opacus import (
     DPSGD_OPACUS_DEFAULT_DELTA,
     DPSGD_OPACUS_DEFENSE,
@@ -40,7 +46,7 @@ def get_args(argv=None):
     parser.add_argument('--dataset', choices=['cola', 'sst2', 'rte', 'rotten_tomatoes', 'stanfordnlp/imdb', 'glnmario/ECHR'], required=True)
     parser.add_argument('--task', choices=['seq_class', 'next_token_pred'], required=True)
     parser.add_argument('--pad', choices=['right', 'left'], default='right')
-    parser.add_argument('--split', choices=['val', 'test'], required=True)
+    parser.add_argument('--split', choices=ATTACK_SPLIT_CHOICES, required=True)
     parser.add_argument('-b','--batch_size', type=int, default=1)
     parser.add_argument('--n_inputs', type=int, required=True) # val:10/20, test:100
     parser.add_argument('--start_input', type=int, default=0)
@@ -173,6 +179,20 @@ def get_args(argv=None):
         default=None,
         help='Optional hard cap on adaptive ranked L1 candidates per position.',
     )
+    parser.add_argument(
+        '--adaptive_lrb_knowledge',
+        choices=ADAPTIVE_LRB_KNOWLEDGE_CHOICES,
+        default='oracle',
+        help='LRB attacker knowledge: exact metadata or hidden ratio/sign realizations.',
+    )
+    parser.add_argument('--adaptive_lrb_ratio_grid', default='auto')
+    parser.add_argument('--adaptive_lrb_attack_seed', type=int, default=None)
+    parser.add_argument('--adaptive_lrb_seed_samples', type=int, default=16)
+    parser.add_argument(
+        '--adaptive_lrb_hypothesis_reduce',
+        choices=ADAPTIVE_LRB_HYPOTHESIS_REDUCERS,
+        default='min',
+    )
 
     # Unified defense baselines (FL-LLM.md)
     parser.add_argument(
@@ -231,6 +251,12 @@ def get_args(argv=None):
         default=2,
         help='How many earliest transformer layers receive the strongest LRB protection.',
     )
+    parser.add_argument('--defense_lrb_seed', type=int, default=None)
+    parser.add_argument(
+        '--defense_lrb_seed_mode',
+        choices=['static', 'per_update'],
+        default='static',
+    )
     parser.add_argument(
         '--defense_lrb_keep_ratio_sensitive',
         type=float,
@@ -283,7 +309,7 @@ def get_args(argv=None):
         '--defense_lrb_projection',
         type=str,
         default='signed_pool',
-        choices=['signed_pool', 'pool'],
+        choices=['signed_pool', 'pool', 'signed_pool_nearest', 'signed_stride'],
         help='Public subspace projection used by LRB; signed_pool is the randomized-basis default.',
     )
     parser.add_argument(

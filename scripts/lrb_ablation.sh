@@ -40,6 +40,7 @@ FAIL_FAST=0
 ALL_VARIANTS=(
   none
   identity_lrb
+  sign_only
   clip_only
   proj_only
   proj_clip
@@ -51,6 +52,9 @@ ALL_VARIANTS=(
   proj_rule_only
   proj_empirical_only
   proj_uniform
+  proj_uniform_pool
+  proj_uniform_nearest
+  proj_uniform_stride
   signed_bottleneck
   proj_no_empirical
 )
@@ -77,10 +81,11 @@ Execution control:
   --mode all|privacy|proxy|train|privacy,proxy
                               Which stages to run, default: all
   --variants LIST             Comma-separated variants, or all. Default: all
-                              Variants: none,identity_lrb,clip_only,proj_only,proj_clip,
+                              Variants: none,identity_lrb,sign_only,clip_only,proj_only,proj_clip,
                                         full_lrb,pool_full,rule_only,empirical_only,
                                         uniform_all_sensitive,proj_rule_only,
-                                        proj_empirical_only,proj_uniform,signed_bottleneck,
+                                        proj_empirical_only,proj_uniform,proj_uniform_pool,
+                                        proj_uniform_nearest,proj_uniform_stride,signed_bottleneck,
                                         proj_no_empirical
   --skip_existing             Skip a log if it already contains a result summary
   --dry_run                   Print commands without running
@@ -238,7 +243,7 @@ variant_args() {
       DEFENSE="none"
       DEF_EXTRA=()
       ;;
-    identity_lrb|clip_only|proj_only|proj_clip|full_lrb|pool_full|rule_only|empirical_only|uniform_all_sensitive|proj_rule_only|proj_empirical_only|proj_uniform|signed_bottleneck|proj_no_empirical)
+    identity_lrb|sign_only|clip_only|proj_only|proj_clip|full_lrb|pool_full|rule_only|empirical_only|uniform_all_sensitive|proj_rule_only|proj_empirical_only|proj_uniform|proj_uniform_pool|proj_uniform_nearest|proj_uniform_stride|signed_bottleneck|proj_no_empirical)
       DEF_EXTRA=(
         --defense_lrb_preset "$variant"
         --defense_lrb_keep_ratio_sensitive "$LRB_MAIN_K"
