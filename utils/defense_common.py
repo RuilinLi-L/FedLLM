@@ -11,6 +11,7 @@ from utils.adaptive_attack import (
     ADAPTIVE_ATTACK_CHOICES,
     ADAPTIVE_LRB_HYPOTHESIS_REDUCERS,
     ADAPTIVE_LRB_KNOWLEDGE_CHOICES,
+    ADAPTIVE_LRB_SIGN_SOURCES,
 )
 from utils.dpsgd_opacus import (
     DPSGD_OPACUS_DEFAULT_DELTA,
@@ -145,6 +146,11 @@ def add_shared_defense_args(
         "--adaptive_lrb_knowledge",
         choices=ADAPTIVE_LRB_KNOWLEDGE_CHOICES,
         default="oracle",
+    )
+    parser.add_argument(
+        "--adaptive_lrb_sign_source",
+        choices=ADAPTIVE_LRB_SIGN_SOURCES,
+        default="legacy_cpu",
     )
     parser.add_argument("--adaptive_lrb_ratio_grid", default="auto")
     parser.add_argument("--adaptive_lrb_attack_seed", type=int, default=None)

@@ -666,7 +666,15 @@ def _decode_gpt2_nonprefix(args, model_wrapper, R_Qs, orig_batch):
         predicted_scores = [float(completed[0][1])]
     return res_pos, res_ids, res_types, [], predicted_sentences, predicted_scores
 
-def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper, precomputed_true_grads=None):
+def reconstruct(
+    args,
+    device,
+    sample,
+    metric,
+    model_wrapper: ModelWrapper,
+    precomputed_true_grads=None,
+    defense_rng_step=None,
+):
     global total_correct_tokens, total_tokens, total_correct_maxB_tokens
 
     tokenizer = model_wrapper.tokenizer
@@ -674,7 +682,9 @@ def reconstruct(args, device, sample, metric, model_wrapper: ModelWrapper, preco
     sequences, true_labels = sample
     
     orig_batch = tokenizer(sequences,padding=True, truncation=True, max_length=min(tokenizer.model_max_length, model_wrapper.emb_size - 20),return_tensors='pt').to(args.device)
-    args.defense_rng_step = int(args.result_tracker.get('n_inputs_completed', 0))
+    if defense_rng_step is None:
+        defense_rng_step = args.result_tracker.get('n_inputs_completed', 0)
+    args.defense_rng_step = int(defense_rng_step)
     
     if precomputed_true_grads is not None:
         true_grads = precomputed_true_grads
@@ -1031,7 +1041,6 @@ def _run_dpsgd_opacus_attack(args, device, metric, t_start):
         should_reconstruct = recover_idx >= args.start_input
         if should_reconstruct:
             t_input_start = time.time()
-            args.defense_rng_step = int(args.result_tracker.get('n_inputs_completed', 0))
             sample = (decode_batch_texts(train_wrapper.tokenizer, batch), labels)
             print(f'Running input #{recover_idx} of {args.n_inputs}.', flush=True)
             if args.neptune:
@@ -1073,6 +1082,7 @@ def _run_dpsgd_opacus_attack(args, device, metric, t_start):
                     metric,
                     attack_wrapper,
                     precomputed_true_grads=true_grads,
+                    defense_rng_step=recover_idx,
                 )
             predictions += prediction
             references += reference
@@ -1154,7 +1164,14 @@ def main():
 
             print('========================', flush=True)
             
-            prediction, reference = reconstruct(args, device, sample, metric, model_wrapper)
+            prediction, reference = reconstruct(
+                args,
+                device,
+                sample,
+                metric,
+                model_wrapper,
+                defense_rng_step=i,
+            )
             predictions += prediction
             references += reference
 

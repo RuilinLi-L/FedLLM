@@ -63,6 +63,7 @@ AUDIT_DEFAULT_KEYS = frozenset(
         "defense_lrb_seed_source",
         "defense_lrb_seed",
         "adaptive_lrb_knowledge",
+        "adaptive_lrb_sign_source",
         "adaptive_lrb_ratio_grid",
         "adaptive_lrb_attack_seed",
         "adaptive_lrb_seed_samples",
@@ -532,6 +533,7 @@ def _all_keys(rows: list[dict]) -> list[str]:
         "adaptive_quantization_levels_mean",
         "adaptive_lrb_keep_ratio_mean",
         "adaptive_lrb_knowledge",
+        "adaptive_lrb_sign_source",
         "adaptive_lrb_ratio_grid",
         "adaptive_lrb_attack_seed",
         "adaptive_lrb_seed_samples",
@@ -1132,6 +1134,7 @@ def _adaptive_lrb_protocol_key(row: dict) -> tuple[str, ...]:
         "source_partition",
         "defense_lrb_seed_mode",
         "adaptive_lrb_knowledge",
+        "adaptive_lrb_sign_source",
         "adaptive_lrb_ratio_grid",
         "adaptive_lrb_attack_seed",
         "adaptive_lrb_seed_samples",
@@ -1195,6 +1198,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             source_partition,
             defense_lrb_seed_mode,
             adaptive_lrb_knowledge,
+            adaptive_lrb_sign_source,
             adaptive_lrb_ratio_grid,
             adaptive_lrb_attack_seed,
             adaptive_lrb_seed_samples,
@@ -1229,6 +1233,7 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
             "source_partition": source_partition,
             "defense_lrb_seed_mode": defense_lrb_seed_mode,
             "adaptive_lrb_knowledge": adaptive_lrb_knowledge,
+            "adaptive_lrb_sign_source": adaptive_lrb_sign_source,
             "adaptive_lrb_ratio_grid": adaptive_lrb_ratio_grid,
             "adaptive_lrb_attack_seed": adaptive_lrb_attack_seed,
             "adaptive_lrb_seed_samples": adaptive_lrb_seed_samples,
@@ -1310,26 +1315,47 @@ def build_attack_anchor_results(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _pareto_protocol_key(row: dict) -> tuple[str, ...]:
+    return (
+        str(row.get("dataset", "")),
+        str(row.get("batch_size", "")),
+        str(row.get("train_method", "full")),
+        _peft_method(row),
+        str(row.get("lora_r", "")),
+        _normalized_lora_target_modules(row),
+        _adapter_reduction_factor(row),
+        _attack_surface(row),
+        _gradient_layer_subset(row),
+        _gradient_param_filter(row),
+        _partial_attack_variant(row),
+        str(row.get("adaptive_attack", "none")),
+        str(row.get("adaptive_attack_profile", "none")),
+        str(row.get("rouge_backend", row.get("ptg_rouge_backend_requested", "unknown"))),
+        *_adaptive_lrb_protocol_key(row),
+    )
+
+
 def _mark_pareto(rows: list[dict]) -> None:
-    numeric_rows = []
+    grouped: dict[tuple[str, ...], list[tuple[dict, float, float]]] = {}
     for row in rows:
         privacy_score = _to_float(row.get("privacy_score"))
         utility_drop = _to_float(row.get("utility_drop"))
         if privacy_score is None or utility_drop is None:
             row["pareto_optimal"] = ""
             continue
-        numeric_rows.append((row, privacy_score, utility_drop))
+        grouped.setdefault(_pareto_protocol_key(row), []).append((row, privacy_score, utility_drop))
 
-    for row, privacy_score, utility_drop in numeric_rows:
-        dominated = False
-        for other, other_privacy, other_drop in numeric_rows:
-            if other is row:
-                continue
-            if other_privacy >= privacy_score and other_drop <= utility_drop:
-                if other_privacy > privacy_score or other_drop < utility_drop:
-                    dominated = True
-                    break
-        row["pareto_optimal"] = "true" if not dominated else "false"
+    for numeric_rows in grouped.values():
+        for row, privacy_score, utility_drop in numeric_rows:
+            dominated = False
+            for other, other_privacy, other_drop in numeric_rows:
+                if other is row:
+                    continue
+                if other_privacy >= privacy_score and other_drop <= utility_drop:
+                    if other_privacy > privacy_score or other_drop < utility_drop:
+                        dominated = True
+                        break
+            row["pareto_optimal"] = "true" if not dominated else "false"
 
 
 def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
@@ -1440,6 +1466,7 @@ def build_privacy_utility_tradeoff(rows: list[dict]) -> list[dict]:
                 "source_partition",
                 "defense_lrb_seed_mode",
                 "adaptive_lrb_knowledge",
+                "adaptive_lrb_sign_source",
                 "adaptive_lrb_ratio_grid",
                 "adaptive_lrb_attack_seed",
                 "adaptive_lrb_seed_samples",

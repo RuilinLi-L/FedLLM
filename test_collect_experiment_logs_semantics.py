@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from scripts.collect_experiment_logs import build_privacy_utility_tradeoff, build_utility_results
-from scripts.collect_experiment_logs import classify_and_parse, build_attack_anchor_results, write_csv
+from scripts.collect_experiment_logs import _mark_pareto, classify_and_parse, build_attack_anchor_results, write_csv
 
 
 def assert_true(condition, message):
@@ -521,6 +521,7 @@ def test_adaptive_protocols_do_not_mix_in_privacy_aggregation():
             "data_protocol": "legacy_internal",
             "source_partition": "train",
             "adaptive_lrb_knowledge": "oracle",
+            "adaptive_lrb_sign_source": "legacy_cpu",
             "adaptive_lrb_ratio_grid": "0.5,0.55,0.6,0.65,0.7,0.75",
             "adaptive_lrb_seed_samples": "16",
             "adaptive_lrb_hypothesis_reduce": "min",
@@ -532,20 +533,73 @@ def test_adaptive_protocols_do_not_mix_in_privacy_aggregation():
             "data_protocol": "official_validation",
             "source_partition": "validation",
             "adaptive_lrb_knowledge": "method_only",
+            "adaptive_lrb_sign_source": "defense_device",
             "adaptive_lrb_ratio_grid": "0.2,0.5,0.75",
             "adaptive_lrb_attack_seed": "900001",
             "adaptive_lrb_seed_samples": "16",
             "adaptive_lrb_hypothesis_reduce": "min",
             "rec_token_mean": "0.1",
         },
+        {
+            **base,
+            "split": "val",
+            "data_protocol": "legacy_internal",
+            "source_partition": "train",
+            "adaptive_lrb_knowledge": "oracle",
+            "adaptive_lrb_sign_source": "defense_device",
+            "adaptive_lrb_ratio_grid": "0.5,0.55,0.6,0.65,0.7,0.75",
+            "adaptive_lrb_seed_samples": "16",
+            "adaptive_lrb_hypothesis_reduce": "min",
+            "rec_token_mean": "0.2",
+        },
     ]
 
     anchors = build_attack_anchor_results(rows)
-    assert_true(len(anchors) == 2, "legacy/oracle and held-out/method-only results must not share a mean")
+    assert_true(len(anchors) == 3, "data, knowledge, and sign-source protocols must not share a mean")
     assert_true(
         {row["adaptive_lrb_knowledge"] for row in anchors} == {"oracle", "method_only"},
         "adaptive knowledge must remain an aggregation key",
     )
+    oracle_sources = {
+        row["adaptive_lrb_sign_source"]
+        for row in anchors
+        if row["adaptive_lrb_knowledge"] == "oracle"
+    }
+    assert_true(oracle_sources == {"legacy_cpu", "defense_device"}, "sign source must remain an aggregation key")
+
+
+def test_pareto_marking_is_scoped_to_attack_protocol():
+    common = {
+        "dataset": "sst2",
+        "batch_size": "2",
+        "train_method": "full",
+        "attack_surface": "full_gradient",
+        "gradient_layer_subset": "all",
+        "gradient_param_filter": "all",
+        "partial_attack_variant": "full_gradient_visible",
+        "adaptive_attack": "defense_aware",
+        "adaptive_attack_profile": "projection_span",
+        "split": "official_validation",
+        "data_protocol": "official_validation",
+        "source_partition": "validation",
+        "defense_lrb_seed_mode": "static",
+        "adaptive_lrb_sign_source": "defense_device",
+        "adaptive_lrb_ratio_grid": "0.2,0.5,0.75",
+        "adaptive_lrb_seed_samples": "16",
+        "adaptive_lrb_hypothesis_reduce": "min",
+        "rouge_backend": "datasets",
+    }
+    rows = [
+        {**common, "adaptive_lrb_knowledge": "oracle", "privacy_score": "0.5", "utility_drop": "0.1"},
+        {**common, "adaptive_lrb_knowledge": "oracle", "privacy_score": "0.6", "utility_drop": "0.05"},
+        {**common, "adaptive_lrb_knowledge": "method_only", "privacy_score": "0.9", "utility_drop": "0.0"},
+    ]
+
+    _mark_pareto(rows)
+
+    assert_true(rows[0]["pareto_optimal"] == "false", "domination within one protocol must still be detected")
+    assert_true(rows[1]["pareto_optimal"] == "true", "best oracle point should remain Pareto within oracle")
+    assert_true(rows[2]["pareto_optimal"] == "true", "method-only must not dominate oracle across protocols")
 
 
 def test_old_logs_receive_na_audit_cells_without_numeric_reinterpretation():
@@ -558,6 +612,7 @@ def test_old_logs_receive_na_audit_cells_without_numeric_reinterpretation():
 
     assert_true(parsed[0]["data_protocol"] == "n/a", "old logs should use explicit n/a protocol metadata")
     assert_true(parsed[0]["adaptive_lrb_knowledge"] == "n/a", "old logs should use explicit n/a knowledge metadata")
+    assert_true(parsed[0]["adaptive_lrb_sign_source"] == "n/a", "old logs should use explicit n/a sign-source metadata")
     assert_true(parsed[0]["rec_token_mean"] == "0.833506", "old numeric results must remain byte-for-byte unchanged")
 
 
@@ -576,6 +631,7 @@ def main():
         test_adaptive_fallback_summary_stays_in_adaptive_group,
         test_full_variant_log_with_per_input_stats_parses_once,
         test_adaptive_protocols_do_not_mix_in_privacy_aggregation,
+        test_pareto_marking_is_scoped_to_attack_protocol,
         test_old_logs_receive_na_audit_cells_without_numeric_reinterpretation,
     ]
     for test in tests:

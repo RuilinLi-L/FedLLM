@@ -27,6 +27,7 @@ if torch is not None:
         validate_adaptive_attack_args,
     )
     from utils.functional import filter_outliers
+    from utils.lrb_defense import _cached_rademacher
 
 
 def assert_true(condition, message):
@@ -48,6 +49,7 @@ def _base_args(defense="topk"):
         defense_lrb_seed_mode="static",
         defense_rng_step=0,
         adaptive_lrb_knowledge="oracle",
+        adaptive_lrb_sign_source="legacy_cpu",
         adaptive_lrb_ratio_grid="auto",
         adaptive_lrb_attack_seed=None,
         adaptive_lrb_seed_samples=16,
@@ -205,6 +207,67 @@ def test_lrb_signed_projection_uses_feature_axis_signs_for_transposed_gpt2_grad(
 
     assert_true(layer_state["lrb_feature_axis"] == 0, "GPT-2 span transpose should map features to original row signs")
     assert_true(signs.numel() == 2, "feature signs should follow the oriented hidden dimension")
+    assert_true(
+        torch.equal(signs, adaptive_module._lrb_feature_signs(5, (2, 4), 0)),
+        "legacy oracle must preserve the original CPU seed replay tensor",
+    )
+
+
+def test_defense_device_sign_source_matches_defense_rng_on_available_devices():
+    devices = [torch.device("cpu")]
+    if torch.cuda.is_available():
+        devices.append(torch.device("cuda"))
+
+    for device in devices:
+        args = _base_args("lrb")
+        args.adaptive_lrb_sign_source = "defense_device"
+        args.dager_selected_gradient_indices = [0]
+        args.dager_selected_gradient_names = ["layer.weight"]
+        args.lrb_defense_layer_info = [{
+            "idx": 0,
+            "active": True,
+            "keep_ratio": 0.5,
+            "projection_seed": 12345,
+            "projection_mode": "signed_pool",
+            "projection_device": str(device),
+            "shape": (4, 6),
+        }]
+        grad = torch.ones(4, 6, device=device)
+        prepare_adaptive_attack(args, (grad,), parameter_names=args.dager_selected_gradient_names)
+
+        actual = args.adaptive_attack_state["layers"][0]["lrb_feature_signs"]
+        expected = _cached_rademacher(
+            (1, 6),
+            device=device,
+            seed=12345,
+            prior_shapes=((4, 1),),
+        ).reshape(-1)
+        fields = dict(adaptive_attack_summary_fields(args))
+        assert_true(torch.equal(actual, expected), f"oracle signs must match defense RNG on {device}")
+        assert_true(fields["adaptive_lrb_sign_knowledge"] == "exact", "defense-device replay must be audited as exact")
+
+
+def test_legacy_sign_source_preserves_cpu_seed_replay_label():
+    args = _base_args("lrb")
+    args.dager_selected_gradient_indices = [0]
+    args.dager_selected_gradient_names = ["layer.weight"]
+    args.lrb_defense_layer_info = [{
+        "idx": 0,
+        "active": True,
+        "keep_ratio": 0.5,
+        "projection_seed": 7,
+        "projection_mode": "signed_pool",
+        "projection_device": "cuda",
+        "shape": (4, 6),
+    }]
+    prepare_adaptive_attack(args, (torch.ones(4, 6),), parameter_names=args.dager_selected_gradient_names)
+
+    fields = dict(adaptive_attack_summary_fields(args))
+    assert_true(fields["adaptive_lrb_sign_source"] == "legacy_cpu", "old commands must retain legacy CPU replay")
+    assert_true(
+        fields["adaptive_lrb_sign_knowledge"] == "legacy_seed_replay",
+        "legacy replay must not be mislabeled as exact",
+    )
 
 
 def _hypothesis_signature(args):
@@ -222,13 +285,14 @@ def _hypothesis_signature(args):
 def test_method_only_does_not_read_oracle_lrb_metadata():
     args_a = _base_args("lrb")
     args_a.adaptive_lrb_knowledge = "method_only"
+    args_a.adaptive_lrb_sign_source = "defense_device"
     args_a.adaptive_lrb_ratio_grid = "0.4,0.6"
     args_a.adaptive_lrb_attack_seed = 9001
     args_a.adaptive_lrb_seed_samples = 2
     args_a.dager_selected_gradient_indices = [0]
     args_a.dager_selected_gradient_names = ["transformer.h.0.attn.c_attn.weight"]
     args_a.lrb_defense_layer_info = [
-        {"idx": 0, "active": True, "keep_ratio": 0.1, "projection_seed": 111, "shape": (4, 4)}
+        {"idx": 0, "active": True, "keep_ratio": 0.1, "projection_seed": 111, "projection_device": "cuda:99", "shape": (4, 4)}
     ]
     grad = torch.ones(4, 4)
     prepare_adaptive_attack(args_a, (grad,), parameter_names=args_a.dager_selected_gradient_names)
@@ -236,13 +300,14 @@ def test_method_only_does_not_read_oracle_lrb_metadata():
 
     args_b = _base_args("lrb")
     args_b.adaptive_lrb_knowledge = "method_only"
+    args_b.adaptive_lrb_sign_source = "defense_device"
     args_b.adaptive_lrb_ratio_grid = "0.4,0.6"
     args_b.adaptive_lrb_attack_seed = 9001
     args_b.adaptive_lrb_seed_samples = 2
     args_b.dager_selected_gradient_indices = [0]
     args_b.dager_selected_gradient_names = list(args_a.dager_selected_gradient_names)
     args_b.lrb_defense_layer_info = [
-        {"idx": 0, "active": True, "keep_ratio": 0.9, "projection_seed": 999, "shape": (4, 4)}
+        {"idx": 0, "active": True, "keep_ratio": 0.9, "projection_seed": 999, "projection_device": "cpu", "shape": (4, 4)}
     ]
     prepare_adaptive_attack(args_b, (grad,), parameter_names=args_b.dager_selected_gradient_names)
     second = _hypothesis_signature(args_b)
@@ -262,11 +327,13 @@ def test_hidden_knowledge_profiles_isolate_ratio_and_sign_metadata():
         "keep_ratio": 0.55,
         "projection_seed": 123,
         "projection_mode": "signed_pool",
+        "projection_device": "cpu",
         "shape": (4, 4),
     }]
 
     ratio_args = _base_args("lrb")
     ratio_args.adaptive_lrb_knowledge = "ratio_hidden"
+    ratio_args.adaptive_lrb_sign_source = "defense_device"
     ratio_args.adaptive_lrb_ratio_grid = "0.25,0.75"
     ratio_args.dager_selected_gradient_indices = [0]
     ratio_args.dager_selected_gradient_names = ["layer.weight"]
@@ -275,6 +342,10 @@ def test_hidden_knowledge_profiles_isolate_ratio_and_sign_metadata():
     ratio_hypotheses = ratio_args.adaptive_attack_state["layers"][0]["lrb_hypotheses"]
     assert_true([item["keep_ratio"] for item in ratio_hypotheses] == [0.25, 0.75], "ratio-hidden must use the grid")
     assert_true(all(item["projection_seed"] == 123 for item in ratio_hypotheses), "ratio-hidden must retain exact signs")
+    assert_true(
+        dict(adaptive_attack_summary_fields(ratio_args))["adaptive_lrb_sign_knowledge"] == "exact",
+        "ratio-hidden defense-device replay must be audited as exact",
+    )
 
     sign_args = _base_args("lrb")
     sign_args.adaptive_lrb_knowledge = "signs_hidden"
@@ -442,6 +513,8 @@ def main():
         test_ranked_adaptive_l1_uses_threshold_hits_when_available,
         test_lrb_projection_metadata_reuses_defense_layer_info,
         test_lrb_signed_projection_uses_feature_axis_signs_for_transposed_gpt2_grad,
+        test_defense_device_sign_source_matches_defense_rng_on_available_devices,
+        test_legacy_sign_source_preserves_cpu_seed_replay_label,
         test_method_only_does_not_read_oracle_lrb_metadata,
         test_hidden_knowledge_profiles_isolate_ratio_and_sign_metadata,
         test_lrb_hypothesis_reducers_match_min_and_mean_distances,

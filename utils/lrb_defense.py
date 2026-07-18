@@ -625,6 +625,7 @@ def apply_lrb_defense(
                 "projection_base_seed": int(base_seed),
                 "projection_seed_mode": str(getattr(args, "defense_lrb_seed_mode", "static")),
                 "projection_seed_step": seed_step,
+                "projection_device": str(grad.device),
                 "projection_mode": projection_mode,
                 "shape": tuple(int(dim) for dim in grad.shape),
             }

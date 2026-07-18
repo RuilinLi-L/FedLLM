@@ -14,6 +14,7 @@ MODEL_PATH="gpt2"
 MAIN_K="0.5"
 VARIANTS_RAW="proj_only,proj_uniform"
 KNOWLEDGE_RAW="oracle,method_only"
+SIGN_SOURCE="defense_device"
 DEFENSE_SEED_MODE="static"
 DEFENSE_SEED=""
 ATTACK_SEED=""
@@ -47,6 +48,7 @@ Matrix options:
   --k FLOAT                     default: 0.5
   --variants CSV                LRB presets
   --knowledge CSV               oracle,ratio_hidden,signs_hidden,method_only
+  --sign_source MODE            legacy_cpu|defense_device (default: defense_device)
   --defense_seed_mode MODE      static|per_update
   --defense_seed N              optional independent LRB seed
   --attack_seed N               required when signs are hidden
@@ -86,6 +88,8 @@ while [ "$#" -gt 0 ]; do
     --variants=*) VARIANTS_RAW="${1#*=}"; shift ;;
     --knowledge) KNOWLEDGE_RAW="$2"; shift 2 ;;
     --knowledge=*) KNOWLEDGE_RAW="${1#*=}"; shift ;;
+    --sign_source) SIGN_SOURCE="$2"; shift 2 ;;
+    --sign_source=*) SIGN_SOURCE="${1#*=}"; shift ;;
     --defense_seed_mode) DEFENSE_SEED_MODE="$2"; shift 2 ;;
     --defense_seed_mode=*) DEFENSE_SEED_MODE="${1#*=}"; shift ;;
     --defense_seed) DEFENSE_SEED="$2"; shift 2 ;;
@@ -133,6 +137,7 @@ if [ ! -e "$CHECKPOINT" ]; then
   exit 2
 fi
 case "$SPLIT" in val|test|official_validation) ;; *) echo "[adaptive-matrix] invalid split: $SPLIT" >&2; exit 2 ;; esac
+case "$SIGN_SOURCE" in legacy_cpu|defense_device) ;; *) echo "[adaptive-matrix] invalid sign source: $SIGN_SOURCE" >&2; exit 2 ;; esac
 case "$DEFENSE_SEED_MODE" in static|per_update) ;; *) echo "[adaptive-matrix] invalid seed mode: $DEFENSE_SEED_MODE" >&2; exit 2 ;; esac
 case "$MODE" in smoke|formal) ;; *) echo "[adaptive-matrix] invalid mode: $MODE" >&2; exit 2 ;; esac
 
@@ -166,6 +171,50 @@ done
 
 slugify() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | sed 's/__*/_/g' | sed 's/^_\|_$//g'; }
 
+checkpoint_digest() {
+  if [ -d "$CHECKPOINT" ]; then
+    find "$CHECKPOINT" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+  else
+    sha256sum "$CHECKPOINT" | awk '{print $1}'
+  fi
+}
+
+CHECKPOINT_DIGEST="$(checkpoint_digest)"
+GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || printf n/a)"
+GIT_STATUS_PORCELAIN="$(git status --porcelain --untracked-files=normal 2>/dev/null || true)"
+GIT_DIRTY=false
+if [ -n "$GIT_STATUS_PORCELAIN" ]; then GIT_DIRTY=true; fi
+GIT_STATUS_SHA256="$(printf '%s' "$GIT_STATUS_PORCELAIN" | sha256sum | awk '{print $1}')"
+
+emit_experiment_config() {
+  printf '%s\n' \
+    "config_schema=1" \
+    "dataset=$DATASET" \
+    "split=$SPLIT" \
+    "n_inputs=$N_INPUTS" \
+    "batch_size=$BATCH_SIZE" \
+    "model_path=$MODEL_PATH" \
+    "checkpoint=$CHECKPOINT" \
+    "checkpoint_digest=$CHECKPOINT_DIGEST" \
+    "k=$MAIN_K" \
+    "variants=$VARIANTS_RAW" \
+    "knowledge=$KNOWLEDGE_RAW" \
+    "sign_source=$SIGN_SOURCE" \
+    "defense_seed_mode=$DEFENSE_SEED_MODE" \
+    "defense_seed=${DEFENSE_SEED:-rng_seed}" \
+    "attack_seed=${ATTACK_SEED:-n/a}" \
+    "ratio_grid=$RATIO_GRID" \
+    "seed_samples=$SEED_SAMPLES_RAW" \
+    "reducers=$REDUCE_RAW" \
+    "seeds=$SEEDS_RAW" \
+    "mode=$MODE" \
+    "device=$DEVICE" \
+    "candidate_multiplier=$CANDIDATE_MULTIPLIER" \
+    "python=$PYTHON_BIN" \
+    "git_commit=$GIT_COMMIT" \
+    "dry_run=$DRY_RUN"
+}
+
 if [ -z "$RUN_DIR" ]; then
   stamp="$(date +%Y%m%d_%H%M%S)"
   RUN_DIR="log/runs/adaptive_lrb_matrix_$(slugify "$DATASET")_${SPLIT}_${stamp}"
@@ -183,14 +232,36 @@ LOG_DIR="${RUN_DIR}/logs"
 mkdir -p "$LOG_DIR"
 
 session_stamp="$(date +%Y%m%d_%H%M%S)_$$"
+CONFIG_PATH="${RUN_DIR}/experiment_config.txt"
+CONFIG_HASH_PATH="${RUN_DIR}/experiment_config.sha256"
 MANIFEST_PATH="${RUN_DIR}/run_manifest.txt"
 CHECKPOINT_HASH_PATH="${RUN_DIR}/checkpoint_sha256.txt"
 EXIT_CODES_PATH="${RUN_DIR}/exit_codes.csv"
+GIT_STATUS_PATH="${RUN_DIR}/git_status_porcelain.txt"
 if [ "$REUSING_RUN_DIR" -eq 1 ]; then
   MANIFEST_PATH="${RUN_DIR}/run_manifest_resume_${session_stamp}.txt"
   CHECKPOINT_HASH_PATH="${RUN_DIR}/checkpoint_sha256_resume_${session_stamp}.txt"
   EXIT_CODES_PATH="${RUN_DIR}/exit_codes_resume_${session_stamp}.csv"
+  GIT_STATUS_PATH="${RUN_DIR}/git_status_porcelain_resume_${session_stamp}.txt"
 fi
+
+CURRENT_CONFIG_HASH="$(emit_experiment_config | sha256sum | awk '{print $1}')"
+if [ "$REUSING_RUN_DIR" -eq 1 ]; then
+  if [ ! -f "$CONFIG_PATH" ]; then
+    echo "[adaptive-matrix] refusing unsafe resume without experiment_config.txt: $RUN_DIR" >&2
+    exit 2
+  fi
+  EXISTING_CONFIG_HASH="$(sha256sum "$CONFIG_PATH" | awk '{print $1}')"
+  if [ "$CURRENT_CONFIG_HASH" != "$EXISTING_CONFIG_HASH" ]; then
+    echo "[adaptive-matrix] resume configuration mismatch: $RUN_DIR" >&2
+    echo "[adaptive-matrix] existing=$EXISTING_CONFIG_HASH current=$CURRENT_CONFIG_HASH" >&2
+    exit 2
+  fi
+else
+  emit_experiment_config >"$CONFIG_PATH"
+  printf '%s  %s\n' "$CURRENT_CONFIG_HASH" "experiment_config.txt" >"$CONFIG_HASH_PATH"
+fi
+printf '%s\n' "$GIT_STATUS_PORCELAIN" >"$GIT_STATUS_PATH"
 
 {
   echo "created_at=$(date -Iseconds)"
@@ -203,6 +274,7 @@ fi
   echo "k=$MAIN_K"
   echo "variants=$VARIANTS_RAW"
   echo "knowledge=$KNOWLEDGE_RAW"
+  echo "sign_source=$SIGN_SOURCE"
   echo "defense_seed_mode=$DEFENSE_SEED_MODE"
   echo "defense_seed=${DEFENSE_SEED:-rng_seed}"
   echo "attack_seed=${ATTACK_SEED:-n/a}"
@@ -211,8 +283,11 @@ fi
   echo "reducers=$REDUCE_RAW"
   echo "seeds=$SEEDS_RAW"
   echo "mode=$MODE"
-  echo "git_commit=$(git rev-parse HEAD 2>/dev/null || printf n/a)"
-  echo "git_dirty=$(if git diff --quiet --ignore-submodules HEAD 2>/dev/null; then printf false; else printf true; fi)"
+  echo "experiment_config_sha256=$CURRENT_CONFIG_HASH"
+  echo "checkpoint_digest=$CHECKPOINT_DIGEST"
+  echo "git_commit=$GIT_COMMIT"
+  echo "git_dirty=$GIT_DIRTY"
+  echo "git_status_sha256=$GIT_STATUS_SHA256"
   if [ "$PYTHON_AVAILABLE" -eq 1 ]; then
     echo "python=$($PYTHON_BIN --version 2>&1 || printf unavailable)"
     echo "torch=$($PYTHON_BIN -c 'import torch; print(torch.__version__)' 2>/dev/null || printf unavailable)"
@@ -260,6 +335,7 @@ run_one() {
     --adaptive_attack defense_aware
     --adaptive_candidate_multiplier "$CANDIDATE_MULTIPLIER"
     --adaptive_lrb_knowledge "$knowledge"
+    --adaptive_lrb_sign_source "$SIGN_SOURCE"
     --adaptive_lrb_ratio_grid "$RATIO_GRID"
     --adaptive_lrb_seed_samples "$sample_count"
     --adaptive_lrb_hypothesis_reduce "$reducer"

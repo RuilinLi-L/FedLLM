@@ -14,6 +14,7 @@ from utils.lrb_defense import _layer_projection_seed
 ADAPTIVE_ATTACK_CHOICES = ("none", "auto", "defense_aware")
 ADAPTIVE_LRB_KNOWLEDGE_CHOICES = ("oracle", "ratio_hidden", "signs_hidden", "method_only")
 ADAPTIVE_LRB_HYPOTHESIS_REDUCERS = ("min", "mean")
+ADAPTIVE_LRB_SIGN_SOURCES = ("legacy_cpu", "defense_device")
 ADAPTIVE_LRB_MAX_HYPOTHESES = 1024
 _ATTACK_SEED_STRIDE = 1_000_033
 _UPDATE_SEED_STRIDE = 1_000_003
@@ -48,6 +49,9 @@ def validate_adaptive_attack_args(args):
     reducer = str(getattr(args, "adaptive_lrb_hypothesis_reduce", "min"))
     if reducer not in ADAPTIVE_LRB_HYPOTHESIS_REDUCERS:
         raise ValueError(f"Unsupported --adaptive_lrb_hypothesis_reduce: {reducer}")
+    sign_source = str(getattr(args, "adaptive_lrb_sign_source", "legacy_cpu"))
+    if sign_source not in ADAPTIVE_LRB_SIGN_SOURCES:
+        raise ValueError(f"Unsupported --adaptive_lrb_sign_source: {sign_source}")
     seed_samples = int(getattr(args, "adaptive_lrb_seed_samples", 16))
     if seed_samples <= 0:
         raise ValueError("--adaptive_lrb_seed_samples must be positive.")
@@ -281,18 +285,25 @@ def _lrb_feature_axis(args, grad: torch.Tensor, original_shape: Sequence[int]) -
     return None
 
 
-def _lrb_feature_signs(seed: int, original_shape: Sequence[int], feature_axis: int | None) -> torch.Tensor | None:
+def _lrb_feature_signs(
+    seed: int,
+    original_shape: Sequence[int],
+    feature_axis: int | None,
+    *,
+    device: torch.device | str = "cpu",
+) -> torch.Tensor | None:
     if feature_axis not in {0, 1} or len(original_shape) != 2:
         return None
     rows, cols = (int(original_shape[0]), int(original_shape[1]))
-    gen = torch.Generator(device="cpu")
+    device = torch.device(device)
+    gen = torch.Generator(device=device)
     gen.manual_seed(int(seed))
-    row_signs = torch.empty((rows,), dtype=torch.float32)
+    row_signs = torch.empty((rows,), device=device, dtype=torch.float32)
     row_signs.bernoulli_(0.5, generator=gen)
     row_signs = row_signs.mul_(2.0).sub_(1.0)
     if feature_axis == 0:
         return row_signs
-    col_signs = torch.empty((cols,), dtype=torch.float32)
+    col_signs = torch.empty((cols,), device=device, dtype=torch.float32)
     col_signs.bernoulli_(0.5, generator=gen)
     return col_signs.mul_(2.0).sub_(1.0)
 
@@ -324,6 +335,7 @@ def prepare_adaptive_attack(
         "adaptive_quantization_levels_mean": "n/a",
         "adaptive_lrb_keep_ratio_mean": "n/a",
         "adaptive_lrb_knowledge": str(getattr(args, "adaptive_lrb_knowledge", "oracle")),
+        "adaptive_lrb_sign_source": str(getattr(args, "adaptive_lrb_sign_source", "legacy_cpu")),
         "adaptive_lrb_ratio_grid": _resolved_ratio_grid_text(args),
         "adaptive_lrb_attack_seed": (
             "n/a"
@@ -345,6 +357,7 @@ def prepare_adaptive_attack(
         return args
 
     knowledge = str(getattr(args, "adaptive_lrb_knowledge", "oracle"))
+    sign_source = str(getattr(args, "adaptive_lrb_sign_source", "legacy_cpu"))
     lrb_projection_info = {}
     if defense in LRB_PROJECTION_DEFENSES and knowledge != "method_only":
         lrb_projection_info = _lrb_projection_info_for_selected(args, selected_indices)
@@ -408,7 +421,18 @@ def prepare_adaptive_attack(
                 for projection_seed in projection_seeds:
                     signs = None
                     if layer_projection_mode != "pool":
-                        signs = _lrb_feature_signs(projection_seed, original_shape, feature_axis)
+                        sign_device = "cpu"
+                        if sign_source == "defense_device":
+                            if knowledge in {"oracle", "ratio_hidden"}:
+                                sign_device = (projection_info or {}).get("projection_device", grad.device)
+                            else:
+                                sign_device = grad.device
+                        signs = _lrb_feature_signs(
+                            projection_seed,
+                            original_shape,
+                            feature_axis,
+                            device=sign_device,
+                        )
                     hypotheses.append(
                         {
                             "keep_ratio": float(keep_ratio),
@@ -449,7 +473,12 @@ def prepare_adaptive_attack(
     if lrb_hypothesis_counts:
         info["adaptive_lrb_hypothesis_count_mean"] = _fmt_float(mean(lrb_hypothesis_counts))
         info["adaptive_lrb_ratio_knowledge"] = "exact" if knowledge in {"oracle", "signs_hidden"} else "hidden"
-        info["adaptive_lrb_sign_knowledge"] = "exact" if knowledge in {"oracle", "ratio_hidden"} else "hidden"
+        if knowledge in {"signs_hidden", "method_only"}:
+            info["adaptive_lrb_sign_knowledge"] = "hidden"
+        elif sign_source == "defense_device":
+            info["adaptive_lrb_sign_knowledge"] = "exact"
+        else:
+            info["adaptive_lrb_sign_knowledge"] = "legacy_seed_replay"
     if transforms:
         info["adaptive_span_transform"] = "+".join(sorted(set(transforms)))
 
@@ -473,6 +502,7 @@ def adaptive_attack_summary_fields(args):
             "adaptive_quantization_levels_mean": "n/a",
             "adaptive_lrb_keep_ratio_mean": "n/a",
             "adaptive_lrb_knowledge": str(getattr(args, "adaptive_lrb_knowledge", "oracle")),
+            "adaptive_lrb_sign_source": str(getattr(args, "adaptive_lrb_sign_source", "legacy_cpu")),
             "adaptive_lrb_ratio_grid": _resolved_ratio_grid_text(args),
             "adaptive_lrb_attack_seed": (
                 "n/a"
@@ -497,6 +527,7 @@ def adaptive_attack_summary_fields(args):
         ("adaptive_quantization_levels_mean", info.get("adaptive_quantization_levels_mean", "n/a")),
         ("adaptive_lrb_keep_ratio_mean", info.get("adaptive_lrb_keep_ratio_mean", "n/a")),
         ("adaptive_lrb_knowledge", info.get("adaptive_lrb_knowledge", "oracle")),
+        ("adaptive_lrb_sign_source", info.get("adaptive_lrb_sign_source", "legacy_cpu")),
         ("adaptive_lrb_ratio_grid", info.get("adaptive_lrb_ratio_grid", "n/a")),
         ("adaptive_lrb_attack_seed", info.get("adaptive_lrb_attack_seed", "n/a")),
         ("adaptive_lrb_seed_samples", info.get("adaptive_lrb_seed_samples", "n/a")),

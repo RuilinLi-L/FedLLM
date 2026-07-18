@@ -571,6 +571,21 @@ def test_lrb_static_and_per_update_seed_modes_are_reproducible():
     assert_true(not torch.allclose(out_fallback_first, out_fallback_second), "fallback update steps must change signs")
 
 
+def test_attack_entrypoints_use_global_input_indices_for_defense_steps():
+    root = Path(__file__).resolve().parent
+    attack_text = root.joinpath("attack.py").read_text(encoding="utf-8")
+    partial_text = root.joinpath("attack_partial_gradient.py").read_text(encoding="utf-8")
+    peft_text = root.joinpath("attack_peftleak.py").read_text(encoding="utf-8")
+    peft_v2_text = root.joinpath("attack_peftleak_new.py").read_text(encoding="utf-8")
+
+    assert_true("defense_rng_step=i" in attack_text, "DAGER shards must pass the global input index")
+    assert_true("defense_rng_step=recover_idx" in attack_text, "Opacus DAGER must pass its global update index")
+    assert_true("args.defense_rng_step = input_idx" in partial_text, "PTG shards must use the global input index")
+    assert_true("args.defense_rng_step = recover_idx" in partial_text, "Opacus PTG must use the global update index")
+    assert_true("args.defense_rng_step = input_idx" in peft_text, "PEFTLeak shards must use the global input index")
+    assert_true("args.defense_rng_step = int(input_index)" in peft_v2_text, "PEFTLeak v2 shards must use the global input index")
+
+
 def test_lrb_matrix_projection_path_matches_cpu_reference():
     cases = [
         (torch.arange(1, 13, dtype=torch.float32).view(3, 4), (2, 3)),
@@ -718,6 +733,7 @@ def test_lrb_projection_only_fast_path_matches_manual_projection_and_metadata():
         assert_true(info["active"] is True, "LRB metadata should mark active layers")
         assert_true(abs(info["keep_ratio"] - keep_ratio) <= 1e-12, "LRB metadata should preserve keep ratio")
         assert_true(info["projection_seed"] == seed, "LRB metadata should preserve projection seed")
+        assert_true(info["projection_device"] == str(grad.device), "LRB metadata should preserve projection device")
         assert_true(info["projection_mode"] == "signed_pool", "LRB metadata should preserve projection mode")
         assert_true(info["shape"] == tuple(int(dim) for dim in grad.shape), "LRB metadata should preserve shape")
 
@@ -832,6 +848,7 @@ def main():
         test_lrb_signed_projection_is_reproducible_and_not_plain_pooling,
         test_lrb_new_projection_ablation_modes_preserve_shape,
         test_lrb_static_and_per_update_seed_modes_are_reproducible,
+        test_attack_entrypoints_use_global_input_indices_for_defense_steps,
         test_lrb_matrix_projection_path_matches_cpu_reference,
         test_lrb_signed_matrix_projection_preserves_legacy_rng_order_with_cache,
         test_lrb_adaptive_bin_bounds_use_exact_integer_math,

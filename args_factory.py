@@ -10,6 +10,7 @@ from utils.adaptive_attack import (
     ADAPTIVE_ATTACK_CHOICES,
     ADAPTIVE_LRB_HYPOTHESIS_REDUCERS,
     ADAPTIVE_LRB_KNOWLEDGE_CHOICES,
+    ADAPTIVE_LRB_SIGN_SOURCES,
     validate_adaptive_attack_args,
 )
 from utils.data import ATTACK_SPLIT_CHOICES
@@ -184,6 +185,12 @@ def get_args(argv=None):
         choices=ADAPTIVE_LRB_KNOWLEDGE_CHOICES,
         default='oracle',
         help='LRB attacker knowledge: exact metadata or hidden ratio/sign realizations.',
+    )
+    parser.add_argument(
+        '--adaptive_lrb_sign_source',
+        choices=ADAPTIVE_LRB_SIGN_SOURCES,
+        default='legacy_cpu',
+        help='legacy_cpu preserves old adaptive decoding; defense_device exactly replays signs on the defense device.',
     )
     parser.add_argument('--adaptive_lrb_ratio_grid', default='auto')
     parser.add_argument('--adaptive_lrb_attack_seed', type=int, default=None)
