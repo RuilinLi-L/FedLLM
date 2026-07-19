@@ -44,6 +44,48 @@ bash scripts/run_adaptive_lrb_matrix.sh \
   --seed_samples 16 --reduce min --seeds 101,202,303 --mode formal
 ```
 
+## Uniform Oracle Resolution Sweep（服务器执行）
+
+本实验只补充 Projection-LRB 的 uniform-ratio oracle 曲线，不重跑已有的 adaptive allocator 消融或 per-update matrix。现有 `r=0.5` signed/unsigned oracle 三种子结果复用 `adaptive_lrb_matrix_sst2_official_validation_20260718_114719`；新任务包括 `r=0.65/0.75/0.9` 的 uniform signed reconstruction，以及同协议 `none` anchor。
+
+先在服务器上检查所有委托命令：
+
+```bash
+bash -n scripts/run_adaptive_lrb_matrix.sh
+bash -n scripts/run_uniform_oracle_resolution_sweep.sh
+bash scripts/run_uniform_oracle_resolution_sweep.sh \
+  --checkpoint ./models/gpt2_sst2_clean_num_epochs_2/final \
+  --python /data2/ky/envs/dager/bin/python \
+  --run_root log/runs/uniform_oracle_resolution_sst2_official_validation \
+  --dry_run
+```
+
+确认 checkpoint、Python 和输出路径后执行；脚本会先完成四个 2-input smoke，再顺序执行 12 个正式运行，并通过 `--skip_existing` 支持从已完成日志继续：
+
+```bash
+bash scripts/run_uniform_oracle_resolution_sweep.sh \
+  --checkpoint ./models/gpt2_sst2_clean_num_epochs_2/final \
+  --python /data2/ky/envs/dager/bin/python \
+  --run_root log/runs/uniform_oracle_resolution_sst2_official_validation
+```
+
+正式运行完成后执行准入、三种子 sample SD 和 paired cluster bootstrap：
+
+```bash
+/data2/ky/envs/dager/bin/python scripts/analyze_uniform_oracle_resolution.py \
+  --existing-r05 'log/同预算 white-box baselines/new/adaptive_lrb_matrix_sst2_official_validation_20260718_114719' \
+  --sweep-root log/runs/uniform_oracle_resolution_sst2_official_validation \
+  --output-dir analysis/uniform_oracle_resolution
+```
+
+分析脚本要求每个条件恰好包含 seeds `101/202/303`、`result_status=ok`、100/100 inputs 和唯一日志，否则直接失败。输出包括：
+
+- `uniform_oracle_resolution_summary.csv`：Candidate recall、Top-B、L1、L2、R1+R2 的 mean 与 sample SD；
+- `uniform_oracle_resolution_paired_bootstrap.csv`：相邻 ratios 及 `r=0.5 -> none` 的 paired cluster bootstrap 95% CI；
+- `uniform_oracle_resolution_results.md`：表格、审计日志与预注册解释分支。
+
+只有输出 `interpretation_branch=resolution_supported` 时，正文才写“resolution reduction contributes to defense-aware suppression”；否则必须采用 `span_mismatch_only` 分支。
+
 ## 每更新随机 signs 与 EOT-style 压力测试
 
 ```bash

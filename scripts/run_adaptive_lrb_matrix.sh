@@ -46,7 +46,7 @@ Matrix options:
   --batch_size N                default: 2
   --model_path PATH             default: gpt2
   --k FLOAT                     default: 0.5
-  --variants CSV                LRB presets
+  --variants CSV                LRB presets, plus none for an undefended anchor
   --knowledge CSV               oracle,ratio_hidden,signs_hidden,method_only
   --sign_source MODE            legacy_cpu|defense_device (default: defense_device)
   --defense_seed_mode MODE      static|per_update
@@ -154,10 +154,18 @@ fi
 
 for variant in "${VARIANTS[@]}"; do
   case "$variant" in
-    identity_lrb|sign_only|clip_only|proj_only|proj_clip|full_lrb|pool_full|rule_only|empirical_only|uniform_all_sensitive|proj_rule_only|proj_empirical_only|proj_uniform|proj_uniform_pool|proj_uniform_nearest|proj_uniform_stride|signed_bottleneck|proj_no_empirical) ;;
+    none|identity_lrb|sign_only|clip_only|proj_only|proj_clip|full_lrb|pool_full|rule_only|empirical_only|uniform_all_sensitive|proj_rule_only|proj_empirical_only|proj_uniform|proj_uniform_pool|proj_uniform_nearest|proj_uniform_stride|signed_bottleneck|proj_no_empirical) ;;
     *) echo "[adaptive-matrix] unsupported variant: $variant" >&2; exit 2 ;;
   esac
 done
+if printf '%s\n' "${VARIANTS[@]}" | grep -qx 'none'; then
+  for knowledge in "${KNOWLEDGE[@]}"; do
+    if [ "$knowledge" != "oracle" ]; then
+      echo "[adaptive-matrix] the none anchor only supports --knowledge oracle." >&2
+      exit 2
+    fi
+  done
+fi
 for knowledge in "${KNOWLEDGE[@]}"; do
   case "$knowledge" in oracle|ratio_hidden|signs_hidden|method_only) ;; *) echo "[adaptive-matrix] invalid knowledge: $knowledge" >&2; exit 2 ;; esac
   if { [ "$knowledge" = "signs_hidden" ] || [ "$knowledge" = "method_only" ]; } && [ -z "$ATTACK_SEED" ]; then
@@ -329,9 +337,6 @@ run_one() {
     --l1_filter all --l2_filter non-overlap
     --model_path "$MODEL_PATH" --finetuned_path "$CHECKPOINT"
     --device "$DEVICE" --task seq_class --algo sgd
-    --defense lrb --defense_lrb_preset "$variant"
-    --defense_lrb_keep_ratio_sensitive "$MAIN_K"
-    --defense_lrb_seed_mode "$DEFENSE_SEED_MODE"
     --adaptive_attack defense_aware
     --adaptive_candidate_multiplier "$CANDIDATE_MULTIPLIER"
     --adaptive_lrb_knowledge "$knowledge"
@@ -341,7 +346,16 @@ run_one() {
     --adaptive_lrb_hypothesis_reduce "$reducer"
     --rng_seed "$seed" --log_file "$logfile"
   )
-  if [ -n "$DEFENSE_SEED" ]; then command+=( --defense_lrb_seed "$DEFENSE_SEED" ); fi
+  if [ "$variant" = "none" ]; then
+    command+=( --defense none )
+  else
+    command+=(
+      --defense lrb --defense_lrb_preset "$variant"
+      --defense_lrb_keep_ratio_sensitive "$MAIN_K"
+      --defense_lrb_seed_mode "$DEFENSE_SEED_MODE"
+    )
+    if [ -n "$DEFENSE_SEED" ]; then command+=( --defense_lrb_seed "$DEFENSE_SEED" ); fi
+  fi
   if [ -n "$ATTACK_SEED" ]; then command+=( --adaptive_lrb_attack_seed "$ATTACK_SEED" ); fi
 
   echo "[adaptive-matrix] run: $label" >&2
