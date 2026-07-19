@@ -1019,7 +1019,7 @@ def _run_source_opacus_dpsgd(args, tracker, start_time, lm_model=None, lm_tokeni
         should_reconstruct = recover_idx >= args.start_input
         if should_reconstruct:
             input_start = time.time()
-            args.defense_rng_step = tracker["n_inputs_completed"]
+            args.defense_rng_step = recover_idx
             decoded = train_wrapper.tokenizer.batch_decode(
                 batch["input_ids"].detach().cpu().tolist(),
                 skip_special_tokens=True,
@@ -1102,7 +1102,7 @@ def main(argv=None):
         references = []
         for input_idx in range(args.start_input, min(args.n_inputs, args.end_input)):
             input_start = time.time()
-            args.defense_rng_step = tracker["n_inputs_completed"]
+            args.defense_rng_step = input_idx
             print(f"[ptg] Running input #{input_idx} of {args.n_inputs}.", flush=True)
             pred, ref, attack_result, selected_names = reconstruct(
                 args,

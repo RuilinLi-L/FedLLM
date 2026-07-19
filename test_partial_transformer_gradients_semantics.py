@@ -356,6 +356,39 @@ def test_ptg_use_embedding_cli_aliases_set_shared_flag():
         assert_true(args.ptg_use_embedding_status == "not_evaluated", "status should be initialized before attack")
 
 
+def test_ptg_full_lrb_preset_retains_projection_clip_and_noise():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--dataset",
+            "sst2",
+            "--split",
+            "test",
+            "--n_inputs",
+            "1",
+            "--finetuned_path",
+            "dummy",
+            "--defense",
+            "lrb",
+            "--defense_lrb_preset",
+            "full_lrb",
+            "--defense_lrb_keep_ratio_sensitive",
+            "0.5",
+        ]
+    )
+    _validate_args(args)
+
+    assert_true(args.defense == "lrb", "PTG full_lrb should route through the LRB defense")
+    assert_true(args.defense_lrb_preset == "full_lrb", "PTG should retain the full_lrb preset label")
+    assert_true(args.defense_lrb_keep_ratio_sensitive == 0.5, "full_lrb should preserve the requested sensitive keep ratio")
+    assert_true(args.defense_lrb_keep_ratio_other == 0.75, "full_lrb should retain its other-layer keep ratio")
+    assert_true(args.defense_lrb_clip_scale_sensitive == 0.5, "full_lrb should enable sensitive-layer clipping")
+    assert_true(args.defense_lrb_clip_scale_other == 1.0, "full_lrb should retain other-layer clipping")
+    assert_true(args.defense_lrb_noise_sensitive == 0.03, "full_lrb should enable sensitive residual noise")
+    assert_true(args.defense_lrb_noise_other == 0.005, "full_lrb should enable other-layer residual noise")
+    assert_true(args.defense_lrb_projection == "signed_pool", "full_lrb should use signed low-resolution projection")
+
+
 def test_strict_source_selector_rejects_packed_gpt2_attention():
     grads = (torch.ones(2, 2), torch.ones(2, 2))
     names = [
@@ -820,6 +853,7 @@ def main():
         test_ptg_use_embedding_scans_resized_embedding_rows,
         test_ptg_use_embedding_falls_back_without_visible_embedding_grad,
         test_ptg_use_embedding_cli_aliases_set_shared_flag,
+        test_ptg_full_lrb_preset_retains_projection_clip_and_noise,
         test_strict_source_selector_rejects_packed_gpt2_attention,
         test_source_mode_defaults_to_partial_bert_and_requires_lm,
         test_ptg_swap_objective_uses_lm_only_for_source_mode,

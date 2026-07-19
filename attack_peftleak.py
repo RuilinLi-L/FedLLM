@@ -722,7 +722,7 @@ def main(argv=None):
         references = []
         for input_idx in range(args.start_input, min(args.n_inputs, args.end_input)):
             input_start = time.time()
-            args.defense_rng_step = tracker["n_inputs_completed"]
+            args.defense_rng_step = input_idx
             sample = dataset[input_idx]
             print(f"[peftleak] Running input #{input_idx} of {args.n_inputs}.", flush=True)
             attack_result = reconstruct(args, sample, model_wrapper, ratio_stats=ratio_stats)

@@ -252,3 +252,40 @@ fi
 `ptg_tradeoff.*` 只有在同一次收集同时传入可匹配的 utility logs 时才会得到可解释的 join；PTG `batch_size=1` 不会自动匹配 batch 不同的 utility 结果。先用 `ptg_raw.*` 报告 PTG 隐私，再以同一 defense operating point 和兼容元数据补充 utility logs。
 
 PTG 结果始终是 supplementary evidence，不替代 full-gradient DAGER 的主要证据。
+
+## 8. 配对 Utility：先比较同等效用下的隐私
+
+不得仅凭第 7 节的 privacy-only 数值判定 Projection-LRB、compression、noise 或 DP-SGD-style 的整体优劣。当前三种子 PTG privacy 使用 batch=1；为避免 collector 拒绝配对，并保持 DP-SGD-style 的有效噪声尺度一致，正式 utility 也默认使用 batch=1、同一 fine-tuned checkpoint、同一 defense operating point 和 seeds `101/202/303`。
+
+专用 runner 为 `scripts/run_ptg_utility_sst2_3seed.sh`。P0 先运行 8 个点：`none`、Projection-LRB@0.2/@0.5/@0.75、compression@2/@4、noise@5e-4、DP-SGD-style@5e-4，共 24 次训练。先 dry-run：
+
+```bash
+bash scripts/run_ptg_utility_sst2_3seed.sh --profile p0 --dry-run
+```
+
+正式串行运行：
+
+```bash
+bash scripts/run_ptg_utility_sst2_3seed.sh \
+  --profile p0 \
+  --privacy-root log/runs/ptg_gpt2_first2_privacy_3seed_20260714
+```
+
+runner 默认传入 `--skip_final_save`，只保留 utility 指标和汇总表，不保存每次训练后的 GPT-2 权重。需要保留 checkpoint 时显式添加 `--keep-models`。中断后使用同一个 `--log-dir` 重启，已有 `result_status=ok` 的日志会跳过。
+
+多 GPU 时用独立 worker 目录并添加 `--skip-clean`，只单独运行一次 clean。例如：
+
+```bash
+# clean worker
+bash scripts/run_ptg_utility_sst2_3seed.sh --baseline none --gpu 0
+
+# two expensive Projection-LRB workers
+bash scripts/run_ptg_utility_sst2_3seed.sh \
+  --baseline proj_only_0.2 --skip-clean --gpu 1
+bash scripts/run_ptg_utility_sst2_3seed.sh \
+  --baseline proj_only_0.75 --skip-clean --gpu 2
+```
+
+每个 worker 可用 `--seeds 101`、`--seeds 202` 或 `--seeds 303` 进一步按 seed 拆分。不要让多个进程共享同一个 `--log-dir`；完成后将所有 utility raw logs 与 privacy raw logs 一起交给 `scripts/collect_experiment_logs.py` 汇总。
+
+P0 完成后按 accuracy drop 的重叠区间比较 privacy，而不是直接比较最低 `rec_token`。只有当 Pareto 边界仍不清楚时，再运行 `--profile p1`，补 Projection-LRB@0.65/@0.9、top-k@0.05/@0.1/@0.3 和 compression@8/@16。

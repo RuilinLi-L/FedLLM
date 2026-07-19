@@ -489,7 +489,7 @@ def main(argv=None):
 
         for input_index in range(int(args.start_input), min(int(args.n_inputs), int(args.end_input))):
             input_start = time.time()
-            args.defense_rng_step = int(tracker["n_inputs_completed"])
+            args.defense_rng_step = int(input_index)
             print(f"[peftleak:v2] Running input #{input_index} of {args.n_inputs}.", flush=True)
             if args.peftleak_attack_mode == "ratio":
                 result = _run_adapter_ratio(args, model_wrapper, installed, private_dataset[input_index], ignored_token_ids)

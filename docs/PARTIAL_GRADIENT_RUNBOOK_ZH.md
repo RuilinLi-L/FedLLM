@@ -325,7 +325,7 @@ PTG 结果进入论文表的最低门槛：
 ### 2.4 PTG Projection-LRB
 
 ```bash
-./scripts/ptg_baselines.sh sst2 1 gpt2 10 \
+./scripts/ptg_baselines.sh sst2 1 gpt2 100 \
   --exposure first2,qkv_only \
   --baseline_defense proj_only \
   --baseline_param 0.9 \
@@ -338,7 +338,7 @@ PTG 结果进入论文表的最低门槛：
 ### 2.5 PTG top-k
 
 ```bash
-./scripts/ptg_baselines.sh sst2 1 gpt2 10 \
+./scripts/ptg_baselines.sh sst2 1 gpt2 100 \
   --exposure first2,qkv_only \
   --baseline_defense topk \
   --baseline_param 0.1 \
