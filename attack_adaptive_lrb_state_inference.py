@@ -72,7 +72,17 @@ def _custom_args(argv: Sequence[str]):
     custom.budgets = tuple(int(part) for part in custom.state_budgets.split(",") if part.strip())
     if not custom.m_values or not custom.budgets:
         raise ValueError("--state-m-values and --state-budgets must be non-empty CSV lists.")
-    return custom, get_args(base_argv)
+    # ``get_args`` accepts an argv argument in the current repository.  Some
+    # long-lived server worktrees still carry an older implementation that
+    # ignores that argument and reparses ``sys.argv`` instead.  Keep both views
+    # synchronized during this private handoff so ``--state-*`` options cannot
+    # leak into the legacy DAGER parser in either case.
+    original_sys_argv = sys.argv
+    try:
+        sys.argv = [original_sys_argv[0], *base_argv]
+        return custom, get_args(base_argv)
+    finally:
+        sys.argv = original_sys_argv
 
 
 def _validate_protocol(args, state_args) -> None:
