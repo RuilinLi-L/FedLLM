@@ -482,6 +482,19 @@ def prepare_adaptive_attack(
     if transforms:
         info["adaptive_span_transform"] = "+".join(sorted(set(transforms)))
 
+    # A standalone state-inference experiment may install an estimated state
+    # immediately before a normal DAGER decode.  Keep this opt-in hook private
+    # and late in the function so every legacy caller retains the exact state
+    # construction above.  The override is intentionally consumed only by the
+    # new entrypoint; normal attack.py runs never set this attribute.
+    override = getattr(args, "_state_inference_override", None)
+    if override is not None:
+        state = override
+        info["adaptive_span_transform"] = "lrb_state_inference_projection"
+        info["adaptive_lrb_knowledge"] = "state_inference_v1"
+        info["adaptive_lrb_ratio_knowledge"] = "estimated"
+        info["adaptive_lrb_sign_knowledge"] = "estimated"
+
     setattr(args, "adaptive_attack_info", info)
     setattr(args, "adaptive_attack_state", state)
     return args
