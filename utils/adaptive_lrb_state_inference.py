@@ -90,7 +90,12 @@ def sign_agreement_mod_global_flip(estimated: torch.Tensor, truth: torch.Tensor)
     """Agreement modulo the global sign symmetry of S P(Sx)."""
     if estimated.numel() != truth.numel():
         raise ValueError("Estimated and true sign vectors must have equal length.")
-    equal = (estimated.reshape(-1).sign() == truth.reshape(-1).sign()).float().mean()
+    # This is a post-hoc audit only. Estimator signs live on the fitting device
+    # while captured truth is deliberately retained on CPU, so compare detached
+    # CPU signs rather than moving private audit tensors into the GPU workflow.
+    estimated_signs = estimated.detach().reshape(-1).sign().to(device="cpu")
+    truth_signs = truth.detach().reshape(-1).sign().to(device="cpu")
+    equal = (estimated_signs == truth_signs).float().mean()
     return float(torch.maximum(equal, 1.0 - equal).item())
 
 

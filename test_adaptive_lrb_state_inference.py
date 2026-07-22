@@ -60,6 +60,13 @@ def test_global_flip_is_equivalent():
     assert math.isclose(sign_agreement_mod_global_flip(torch.tensor([1.0, 1.0, -1.0, -1.0]), truth), 0.5)
 
 
+def test_global_flip_accepts_cross_device_audit_tensors():
+    if not torch.cuda.is_available():
+        return
+    truth = torch.tensor([1.0, -1.0, 1.0, -1.0])
+    assert math.isclose(sign_agreement_mod_global_flip((-truth).to("cuda"), truth), 1.0)
+
+
 def test_fit_state_accepts_observed_only_object():
     basis = torch.eye(4)[:2]
     candidates = torch.eye(4).unsqueeze(0)
@@ -161,6 +168,7 @@ def main():
         test_defense_device_feature_operator_parity,
         test_hard_sign_ste_has_gradient,
         test_global_flip_is_equivalent,
+        test_global_flip_accepts_cross_device_audit_tensors,
         test_fit_state_accepts_observed_only_object,
         test_captured_updates_keep_only_selected_cpu_gradients,
         test_observation_microbatch_matches_full_mean_update,
