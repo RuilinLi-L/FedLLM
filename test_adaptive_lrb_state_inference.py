@@ -14,6 +14,8 @@ from utils.adaptive_lrb_state_inference import (
     fit_state,
     hard_sign_ste,
     sign_agreement_mod_global_flip,
+    stage_grads_for_decode,
+    stage_selected_grads_cpu,
 )
 
 
@@ -65,6 +67,17 @@ def test_fit_state_accepts_observed_only_object():
     assert len(trace) == 1 and math.isfinite(trace[0])
 
 
+def test_captured_updates_keep_only_selected_cpu_gradients():
+    grads = (torch.ones(2, 2), torch.ones(2, 2) * 2, torch.ones(2, 2) * 3)
+    staged = stage_selected_grads_cpu(grads, (0, 2))
+    assert staged[0] is not None and staged[1] is None and staged[2] is not None
+    assert staged[0].device.type == "cpu" and staged[2].device.type == "cpu"
+    assert torch.equal(staged[0], grads[0]) and torch.equal(staged[2], grads[2])
+    restored = stage_grads_for_decode(staged, torch.device("cpu"))
+    assert restored[1] is None
+    assert torch.equal(restored[0], grads[0]) and torch.equal(restored[2], grads[2])
+
+
 def main():
     for test in (
         test_integer_q_matches_existing_signed_pool,
@@ -72,6 +85,7 @@ def main():
         test_hard_sign_ste_has_gradient,
         test_global_flip_is_equivalent,
         test_fit_state_accepts_observed_only_object,
+        test_captured_updates_keep_only_selected_cpu_gradients,
     ):
         test()
     print("state-inference semantic tests passed")

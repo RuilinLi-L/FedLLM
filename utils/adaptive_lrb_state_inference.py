@@ -106,6 +106,34 @@ class StateInferenceObservation:
     candidate_values: tuple[torch.Tensor, ...]
 
 
+def stage_selected_grads_cpu(grads, indices: Sequence[int]) -> tuple[torch.Tensor | None, ...]:
+    """Persist only selected defended matrices in host memory.
+
+    The state-inference protocol's span fitting and decoder use only the
+    selected DAGER matrices. Retaining all full GPT-2 gradients for 100 target
+    updates exhausts device memory; retaining exact CPU copies of the selected
+    matrices does not change the fit or decode input values.
+    """
+    selected = {int(index) for index in indices}
+    staged: list[torch.Tensor | None] = []
+    for index, grad in enumerate(grads):
+        if index in selected:
+            if grad is None:
+                raise RuntimeError(f"Selected DAGER gradient {index} is missing.")
+            staged.append(grad.detach().to(device="cpu", copy=True))
+        else:
+            staged.append(None)
+    return tuple(staged)
+
+
+def stage_grads_for_decode(grads, device: torch.device) -> tuple[torch.Tensor | None, ...]:
+    """Materialize one captured CPU update on the attack device for decoding."""
+    return tuple(
+        None if grad is None else grad.to(device=device, non_blocking=False)
+        for grad in grads
+    )
+
+
 class StaticStateEstimator(nn.Module):
     """Shared signs plus per-update continuous pooled widths."""
 
@@ -178,8 +206,9 @@ def fit_state(
             for layer_index, (basis, candidates, logits, q_value) in enumerate(
                 zip(observation.span_bases, observation.candidate_values, estimator.sign_logits, estimator.q_values(update_index))
             ):
-                transformed = continuous_signed_pool(candidates, q_value, logits, temperature=temperature)
-                distances = span_distance(basis, transformed)
+                device = logits.device
+                transformed = continuous_signed_pool(candidates.to(device), q_value, logits, temperature=temperature)
+                distances = span_distance(basis.to(device), transformed)
                 flat = distances.reshape(-1)
                 losses.append(-softmin_temperature * torch.logsumexp(-flat / softmin_temperature, dim=0))
         loss = torch.stack(losses).mean()

@@ -29,6 +29,8 @@ from utils.adaptive_lrb_state_inference import (
     fit_state,
     q_audit,
     sign_agreement_mod_global_flip,
+    stage_grads_for_decode,
+    stage_selected_grads_cpu,
     state_override,
 )
 from utils.data import TextDataset
@@ -188,11 +190,12 @@ def _capture_update(args, wrapper: ModelWrapper, sample, update_index: int, cand
     if any(values.shape[-1] != width for values, width in zip(candidate_values, widths)):
         raise RuntimeError("Public candidate bank width no longer matches selected DAGER gradients.")
     q_values, signs, modes = _audit_state(args, defended, selected)
+    staged_grads = _stage_selected_grads_cpu(defended, selected)
     return CapturedUpdate(
         sample=sample,
-        defended_grads=tuple(defended),
+        defended_grads=staged_grads,
         observation=StateInferenceObservation(
-            span_bases=tuple(base.detach() for base in span_bases),
+            span_bases=tuple(base.detach().to(device="cpu", copy=True) for base in span_bases),
             candidate_values=tuple(value.detach() for value in candidate_values),
         ),
         feature_sketches=_feature_sketch(args, defended, selected),
@@ -304,15 +307,19 @@ def _evaluate_condition(
         else:
             args._state_inference_override = None
         args.result_tracker = dagger_attack._init_result_tracker(args)
-        predicted, reference = dagger_attack.reconstruct(
-            args,
-            torch.device(args.device),
-            update.sample,
-            metric,
-            wrapper,
-            precomputed_true_grads=update.defended_grads,
-            defense_rng_step=update_index,
-        )
+        decode_grads = _stage_grads_for_decode(update.defended_grads, torch.device(args.device))
+        try:
+            predicted, reference = dagger_attack.reconstruct(
+                args,
+                torch.device(args.device),
+                update.sample,
+                metric,
+                wrapper,
+                precomputed_true_grads=decode_grads,
+                defense_rng_step=update_index,
+            )
+        finally:
+            del decode_grads
         predictions.extend(predicted)
         references.extend(reference)
         l1_recovery.extend(args.result_tracker.get("rec_l1_mean_values", []))
