@@ -9,6 +9,7 @@ cd "$ROOT"
 CHECKPOINT=""
 PYTHON_BIN="${PYTHON:-python}"
 DEVICE="cuda"
+CACHE_DIR="./models_cache"
 RUN_DIR=""
 MODE="formal"
 SKIP_EXISTING=0
@@ -22,6 +23,7 @@ Options:
   --checkpoint PATH    required GPT-2 SST-2 checkpoint
   --python PATH        Python executable (default: python)
   --device DEVICE      attack device (default: cuda)
+  --cache-dir PATH     Hugging Face dataset cache (default: ./models_cache)
   --run-dir PATH       new, empty output root
   --mode smoke|formal  smoke uses 2 fit updates, 1 held-out update, and 2 public batches
   --skip-existing      resume only logs whose state summaries are complete
@@ -37,6 +39,8 @@ while [ "$#" -gt 0 ]; do
     --python=*) PYTHON_BIN="${1#*=}"; shift ;;
     --device) DEVICE="$2"; shift 2 ;;
     --device=*) DEVICE="${1#*=}"; shift ;;
+    --cache-dir) CACHE_DIR="$2"; shift 2 ;;
+    --cache-dir=*) CACHE_DIR="${1#*=}"; shift ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --run-dir=*) RUN_DIR="${1#*=}"; shift ;;
     --mode) MODE="$2"; shift 2 ;;
@@ -57,6 +61,10 @@ case "$MODE" in smoke|formal) ;; *) echo "[state-inference] invalid --mode: $MOD
 if [ "$DRY_RUN" -eq 0 ]; then
   if ! "$PYTHON_BIN" -c 'import torch, datasets, transformers; assert torch.cuda.is_available()' >/dev/null 2>&1; then
     echo "[state-inference] Python must provide CUDA torch, datasets, and transformers; activate the project dager environment or pass --python." >&2
+    exit 2
+  fi
+  if ! HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1 "$PYTHON_BIN" -c 'from datasets import load_dataset; import sys; split = load_dataset("glue", "sst2", cache_dir=sys.argv[1])["validation"]; assert len(split) > 0' "$CACHE_DIR"; then
+    echo "[state-inference] SST-2 validation is not available in --cache-dir=$CACHE_DIR. Populate that cache or pass the correct --cache-dir before running." >&2
     exit 2
   fi
 fi
@@ -118,6 +126,7 @@ fi
   printf 'budgets=%s\n' "$BUDGETS"
   printf 'calibration_batches=%s\n' "$CALIBRATION_BATCHES"
   printf 'candidate_count=%s\n' "$CANDIDATES"
+  printf 'cache_dir=%s\n' "$CACHE_DIR"
   printf 'seeds=%s\n' "${SEEDS[*]}"
 } >"$RUN_DIR/run_manifest.txt"
 
@@ -136,6 +145,7 @@ for seed in "${SEEDS[@]}"; do
     "$PYTHON_BIN" attack_adaptive_lrb_state_inference.py
     --dataset sst2 --split official_validation --n_inputs "$TARGET_INPUTS" --batch_size 2
     --l1_filter all --l2_filter non-overlap --model_path gpt2 --finetuned_path "$CHECKPOINT"
+    --cache_dir "$CACHE_DIR"
     --device "$DEVICE" --task seq_class --algo sgd --n_layers 2
     --defense lrb --defense_lrb_preset proj_only --defense_lrb_keep_ratio_sensitive 0.5
     --defense_lrb_seed_mode static --defense_lrb_seed 700001
