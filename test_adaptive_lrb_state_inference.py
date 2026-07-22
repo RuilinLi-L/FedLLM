@@ -106,6 +106,19 @@ def test_defense_device_feature_operator_parity():
     assert torch.equal(defended, candidate_side), "defense_device signs must match the candidate-side operator"
 
 
+def test_defense_device_cuda_feature_operator_parity():
+    if not torch.cuda.is_available():
+        return
+    values = torch.arange(8, dtype=torch.float32, device="cuda").reshape(1, 8)
+    layer_seed = _layer_projection_seed(700001, 4)
+    signs = _lrb_feature_signs(layer_seed, values.shape, 1, device=values.device)
+    defended = _project_low_resolution(values, 0.5, seed=layer_seed, mode="signed_pool")
+    candidate_side = _project_last_dim_signed_pool(
+        values, 0.5, seed=layer_seed, mode="signed_pool", feature_signs=signs
+    )
+    assert torch.equal(defended, candidate_side), "CUDA defense signs must match the candidate-side operator"
+
+
 def test_hard_sign_ste_has_gradient():
     logits = torch.tensor([-0.2, 0.3, 1.1], requires_grad=True)
     output = hard_sign_ste(logits).sum()
@@ -284,6 +297,15 @@ def test_oracle_gate_returns_before_state_fitting_loop():
     assert 'fields["result_status"] = "oracle_gate_stopped"' in source
 
 
+def test_oracle_replays_captured_defense_metadata_on_the_original_device():
+    source = Path("attack_adaptive_lrb_state_inference.py").read_text(encoding="utf-8")
+    assert "oracle_layer_info: tuple[dict, ...]" in source
+    assert 'device=replay_item["projection_device"]' in source
+    assert 'args.adaptive_lrb_knowledge = "oracle"' in source
+    assert "args.lrb_defense_layer_info = [dict(item) for item in update.oracle_layer_info]" in source
+    assert "def _oracle_override" not in source
+
+
 def test_public_calibration_skips_dager_decomposition():
     source = Path("attack_adaptive_lrb_state_inference.py").read_text(encoding="utf-8")
     start = source.index("def _capture_public_calibration_record")
@@ -301,6 +323,7 @@ def main():
     for test in (
         test_integer_q_matches_existing_signed_pool,
         test_defense_device_feature_operator_parity,
+        test_defense_device_cuda_feature_operator_parity,
         test_hard_sign_ste_has_gradient,
         test_global_flip_is_equivalent,
         test_global_flip_accepts_cross_device_audit_tensors,
@@ -315,6 +338,7 @@ def main():
         test_reconstruct_precomputed_expansions_is_opt_in,
         test_runner_uses_server_legacy_roots_and_requires_them,
         test_oracle_gate_returns_before_state_fitting_loop,
+        test_oracle_replays_captured_defense_metadata_on_the_original_device,
         test_public_calibration_skips_dager_decomposition,
         test_dataset_exposes_read_only_sample_provenance,
     ):

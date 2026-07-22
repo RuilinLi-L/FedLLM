@@ -57,6 +57,7 @@ class CapturedUpdate:
     audit_q: tuple[int, ...]
     audit_signs: tuple[torch.Tensor, ...]
     audit_projection_modes: tuple[str, ...]
+    oracle_layer_info: tuple[dict, ...]
 
 
 def _custom_args(argv: Sequence[str]):
@@ -166,9 +167,9 @@ def _feature_sketch(args, grads, indices: Sequence[int]) -> tuple[torch.Tensor, 
 
 def _audit_state(
     args, grads, indices: Sequence[int]
-) -> tuple[tuple[int, ...], tuple[torch.Tensor, ...], tuple[str, ...]]:
+) -> tuple[tuple[int, ...], tuple[torch.Tensor, ...], tuple[str, ...], tuple[dict, ...]]:
     info_by_index = {int(item["idx"]): item for item in getattr(args, "lrb_defense_layer_info", []) if item.get("active")}
-    q_values, signs, modes = [], [], []
+    q_values, signs, modes, oracle_layer_info = [], [], [], []
     for index in indices:
         item = info_by_index.get(int(index))
         if item is None:
@@ -178,14 +179,21 @@ def _audit_state(
         width = int(oriented.shape[-1])
         q_values.append(max(1, int(round(float(item["keep_ratio"]) * width))))
         modes.append(str(item["projection_mode"]))
+        replay_item = dict(item)
+        replay_item["projection_device"] = str(replay_item.get("projection_device", grad.device))
+        replay_item["shape"] = tuple(int(dim) for dim in replay_item["shape"])
         axis = _lrb_feature_axis(args, grad, tuple(item["shape"]))
         vector = _lrb_feature_signs(
-            int(item["projection_seed"]), tuple(item["shape"]), axis, device="cpu"
+            int(replay_item["projection_seed"]),
+            replay_item["shape"],
+            axis,
+            device=replay_item["projection_device"],
         )
         if vector is None or int(vector.numel()) != width:
             raise RuntimeError("Could not derive feature-axis audit signs for the selected DAGER matrix.")
         signs.append(vector.cpu())
-    return tuple(q_values), tuple(signs), tuple(modes)
+        oracle_layer_info.append(replay_item)
+    return tuple(q_values), tuple(signs), tuple(modes), tuple(oracle_layer_info)
 
 
 def _capture_update(
@@ -210,7 +218,7 @@ def _capture_update(
     widths = tuple(int(_oriented_grad_for_span(args, defended[index]).shape[-1]) for index in selected)
     if any(values.shape[-1] != width for values, width in zip(candidate_values, widths)):
         raise RuntimeError("Public candidate bank width no longer matches selected DAGER gradients.")
-    q_values, signs, modes = _audit_state(args, defended, selected)
+    q_values, signs, modes, oracle_layer_info = _audit_state(args, defended, selected)
     staged_grads = stage_selected_grads_cpu(defended, selected) if retain_decode_grads else None
     return CapturedUpdate(
         sample=sample,
@@ -225,6 +233,7 @@ def _capture_update(
         audit_q=q_values,
         audit_signs=signs,
         audit_projection_modes=modes,
+        oracle_layer_info=oracle_layer_info,
     )
 
 
@@ -243,7 +252,7 @@ def _capture_public_calibration_record(args, wrapper: ModelWrapper, sample, upda
     if selected != EXPECTED_DAGER_INDICES:
         raise RuntimeError(f"Expected selected DAGER indices {EXPECTED_DAGER_INDICES}; got {selected}.")
     widths = tuple(int(_oriented_grad_for_span(args, defended[index]).shape[-1]) for index in selected)
-    q_values, signs, _ = _audit_state(args, defended, selected)
+    q_values, signs, _, _ = _audit_state(args, defended, selected)
     record = PublicCalibrationRecord(
         feature_sketches=_feature_sketch(args, defended, selected),
         ratios=tuple(q / width for q, width in zip(q_values, widths)),
@@ -313,26 +322,6 @@ def _state_summary(**fields) -> None:
     print("===== STATE INFERENCE SUMMARY END =====", flush=True)
 
 
-def _oracle_override(update: CapturedUpdate) -> dict:
-    """Create the explicit diagnostic state only at oracle decode time.
-
-    This helper deliberately consumes the audited state after fitting.  It is
-    never passed to the estimator or its public initializer.
-    """
-    layers = {}
-    for position, (q_value, width, signs, mode) in enumerate(
-        zip(update.audit_q, update.feature_widths, update.audit_signs, update.audit_projection_modes)
-    ):
-        layers[position] = {
-            "lrb_keep_ratio": float(q_value) / float(width),
-            "lrb_projection_mode": mode,
-            "lrb_projection_seed": -1,
-            "lrb_feature_signs": signs,
-            "lrb_feature_axis": "oracle_audit",
-        }
-    return {"layers": layers, "profile": "state_inference_v1_oracle"}
-
-
 def _evaluate_condition(
     args,
     wrapper,
@@ -363,10 +352,18 @@ def _evaluate_condition(
         update = captured[update_index]
         if update.defended_grads is None:
             raise RuntimeError(f"Held-out update {update_index} is missing its CPU-staged decode gradients.")
+        original_knowledge = args.adaptive_lrb_knowledge
+        original_layer_info = getattr(args, "lrb_defense_layer_info", None)
         if attack_variant == "state_estimator":
             args._state_inference_override = state_override(estimator, update_index)
         elif attack_variant == "oracle":
-            args._state_inference_override = _oracle_override(update)
+            # Replay the normal legacy oracle construction from the exact
+            # per-update defense metadata captured with these gradients.  In
+            # particular, prepare_adaptive_attack will redraw signs on the
+            # defense's original CUDA device rather than on CPU.
+            args._state_inference_override = None
+            args.adaptive_lrb_knowledge = "oracle"
+            args.lrb_defense_layer_info = [dict(item) for item in update.oracle_layer_info]
         else:
             args._state_inference_override = None
         args.result_tracker = dagger_attack._init_result_tracker(args)
@@ -388,6 +385,9 @@ def _evaluate_condition(
             )
         finally:
             del decode_grads, decode_expansions
+            args._state_inference_override = None
+            args.adaptive_lrb_knowledge = original_knowledge
+            args.lrb_defense_layer_info = original_layer_info
         predictions.extend(predicted)
         references.extend(reference)
         l1_recovery.extend(args.result_tracker.get("rec_l1_mean_values", []))
