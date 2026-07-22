@@ -182,6 +182,7 @@ def fit_state(
     temperature_start: float = 2.0,
     temperature_end: float = 0.25,
     softmin_temperature: float = 0.05,
+    progress_callback=None,
 ) -> list[float]:
     """Fit from observed span consistency only; returns the unlabelled loss trace."""
     if update_indices is None:
@@ -196,13 +197,18 @@ def fit_state(
         return []
     optimizer = torch.optim.Adam(estimator.parameters(), lr=float(learning_rate))
     trace: list[float] = []
+    loss_terms_per_step = sum(len(observation.span_bases) for observation in observations)
+    if loss_terms_per_step <= 0:
+        raise ValueError("State fitting needs at least one observed layer basis.")
     for step in range(int(steps)):
         progress = step / max(steps - 1, 1)
         temperature = temperature_start + progress * (temperature_end - temperature_start)
-        losses = []
+        optimizer.zero_grad(set_to_none=True)
+        detached_step_loss = 0.0
         for update_index, observation in zip(update_indices, observations):
             if len(observation.span_bases) != len(estimator.sign_logits):
                 raise ValueError("Observation layer count does not match estimator.")
+            observation_losses = []
             for layer_index, (basis, candidates, logits, q_value) in enumerate(
                 zip(observation.span_bases, observation.candidate_values, estimator.sign_logits, estimator.q_values(update_index))
             ):
@@ -210,12 +216,14 @@ def fit_state(
                 transformed = continuous_signed_pool(candidates.to(device), q_value, logits, temperature=temperature)
                 distances = span_distance(basis.to(device), transformed)
                 flat = distances.reshape(-1)
-                losses.append(-softmin_temperature * torch.logsumexp(-flat / softmin_temperature, dim=0))
-        loss = torch.stack(losses).mean()
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+                observation_losses.append(-softmin_temperature * torch.logsumexp(-flat / softmin_temperature, dim=0))
+            observation_loss = torch.stack(observation_losses).sum() / float(loss_terms_per_step)
+            observation_loss.backward()
+            detached_step_loss += float(observation_loss.detach().cpu())
         optimizer.step()
-        trace.append(float(loss.detach().cpu()))
+        trace.append(detached_step_loss)
+        if progress_callback is not None:
+            progress_callback(step + 1, int(steps), detached_step_loss)
     return trace
 
 

@@ -674,6 +674,7 @@ def reconstruct(
     model_wrapper: ModelWrapper,
     precomputed_true_grads=None,
     defense_rng_step=None,
+    precomputed_matrices_expansions=None,
 ):
     global total_correct_tokens, total_tokens, total_correct_maxB_tokens
 
@@ -705,7 +706,12 @@ def reconstruct(
     prediction, predicted_sentences, predicted_sentences_scores = [], [], []
     #import pdb;pdb.set_trace() 
     with torch.no_grad():
-        B, R_Qs = model_wrapper.get_matrices_expansions(true_grads, B=None, tol=args.rank_tol)
+        if precomputed_matrices_expansions is None:
+            B, R_Qs = model_wrapper.get_matrices_expansions(true_grads, B=None, tol=args.rank_tol)
+        else:
+            B, R_Qs = precomputed_matrices_expansions
+            if B is None or len(R_Qs) < args.n_layers:
+                raise ValueError("Precomputed DAGER expansions must provide B and every selected layer basis.")
         prepare_adaptive_attack(
             args,
             true_grads,

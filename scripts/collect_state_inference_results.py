@@ -52,7 +52,22 @@ def validate(root: Path, rows: list[dict[str, str]]) -> list[str]:
     if not manifest_path.exists():
         return ["missing run_manifest.txt"]
     manifest = parse_manifest(manifest_path)
-    required = {"protocol", "eval_count", "m_values", "budgets", "seeds"}
+    required = {
+        "protocol",
+        "eval_count",
+        "m_values",
+        "budgets",
+        "seeds",
+        "calibration_batches",
+        "selected_gradients",
+        "defense_lrb_seed_mode",
+        "defense_lrb_seed",
+        "adaptive_lrb_sign_source",
+        "decode_gradient_storage",
+        "dager_expansions_source",
+        "dager_decomp_device",
+        "public_calibration_decomposition",
+    }
     missing = sorted(required.difference(manifest))
     if missing:
         errors.append(f"run manifest is missing fields: {','.join(missing)}")
@@ -82,6 +97,34 @@ def validate(root: Path, rows: list[dict[str, str]]) -> list[str]:
             errors.append(f"seed {row.get('rng_seed', 'unknown')} has incomplete held-out updates")
         if row.get("n_inputs_requested") != manifest.get("eval_count"):
             errors.append(f"seed {row.get('rng_seed', 'unknown')} does not use manifest held-out count")
+        row_expectations = {
+            "state_lifecycle": "static",
+            "state_selected_gradients": manifest.get("selected_gradients"),
+            "defense_lrb_seed_mode": manifest.get("defense_lrb_seed_mode"),
+            "defense_lrb_seed": manifest.get("defense_lrb_seed"),
+            "adaptive_lrb_sign_source": manifest.get("adaptive_lrb_sign_source"),
+            "calibration_batches": manifest.get("calibration_batches"),
+            "state_decode_gradient_storage": manifest.get("decode_gradient_storage"),
+            "state_dager_expansions_source": manifest.get("dager_expansions_source"),
+            "state_public_calibration_decomposition": manifest.get("public_calibration_decomposition"),
+            "state_truth_used_for_fit": "false",
+        }
+        for field, expected in row_expectations.items():
+            if row.get(field) != expected:
+                errors.append(
+                    f"seed {row.get('rng_seed', 'unknown')} has {field}={row.get(field)!r}; expected {expected!r}"
+                )
+        expected_truth_for_decode = "true" if row.get("state_attack_variant") == "oracle" else "false"
+        if row.get("state_truth_used_for_decode") != expected_truth_for_decode:
+            errors.append(
+                f"seed {row.get('rng_seed', 'unknown')} has invalid state_truth_used_for_decode"
+            )
+        calibration_hash = row.get("calibration_hash", "")
+        if len(calibration_hash) != 64 or any(char not in "0123456789abcdef" for char in calibration_hash.lower()):
+            errors.append(f"seed {row.get('rng_seed', 'unknown')} has invalid calibration index hash")
+        target_hash = row.get("target_index_hash", "")
+        if len(target_hash) != 64 or any(char not in "0123456789abcdef" for char in target_hash.lower()):
+            errors.append(f"seed {row.get('rng_seed', 'unknown')} has invalid target index hash")
 
     for seed in expected_seeds:
         if exit_codes.get(seed) != "0":
@@ -97,6 +140,8 @@ def validate(root: Path, rows: list[dict[str, str]]) -> list[str]:
         }
         if estimator_conditions != expected_estimator:
             errors.append(f"seed {seed} has incomplete estimator M/budget coverage")
+        if sum(row.get("state_attack_variant") == "state_estimator" for row in seed_rows) != len(expected_estimator):
+            errors.append(f"seed {seed} has duplicate or extra estimator conditions")
         for variant in ("method_only", "oracle"):
             if sum(row.get("state_attack_variant") == variant for row in seed_rows) != 1:
                 errors.append(f"seed {seed} must have exactly one {variant} diagnostic")

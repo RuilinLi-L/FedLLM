@@ -8,6 +8,7 @@ through the private opt-in state override hook.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import importlib
 import sys
@@ -47,7 +48,8 @@ dagger_attack = None
 @dataclass
 class CapturedUpdate:
     sample: tuple
-    defended_grads: tuple
+    defended_grads: tuple | None
+    rank_B: int
     observation: StateInferenceObservation
     feature_sketches: tuple[torch.Tensor, ...]
     feature_widths: tuple[int, ...]
@@ -71,6 +73,7 @@ def _custom_args(argv: Sequence[str]):
     parser.add_argument("--state-learning-rate", type=float, default=0.05)
     parser.add_argument("--state-min-ratio", type=float, default=0.2)
     parser.add_argument("--state-max-ratio", type=float, default=0.9)
+    parser.add_argument("--state-progress-every", type=int, default=8)
     custom, base_argv = parser.parse_known_args(argv)
     custom.m_values = tuple(int(part) for part in custom.state_m_values.split(",") if part.strip())
     custom.budgets = tuple(int(part) for part in custom.state_budgets.split(",") if part.strip())
@@ -119,6 +122,10 @@ def _validate_protocol(args, state_args) -> None:
         raise ValueError("Target cohort does not include the requested held-out evaluation range.")
     if max(state_args.m_values) > state_args.state_fit_end:
         raise ValueError("Every M must fit inside --state-fit-end.")
+    if state_args.state_fit_end > state_args.state_eval_start:
+        raise ValueError("State-fitting updates must not overlap the held-out evaluation range.")
+    if state_args.state_progress_every <= 0:
+        raise ValueError("--state-progress-every must be positive.")
 
 
 def _batch_for_sample(args, wrapper: ModelWrapper, sample):
@@ -177,12 +184,22 @@ def _audit_state(
     return tuple(q_values), tuple(signs), tuple(modes)
 
 
-def _capture_update(args, wrapper: ModelWrapper, sample, update_index: int, candidate_values) -> CapturedUpdate:
+def _capture_update(
+    args,
+    wrapper: ModelWrapper,
+    sample,
+    update_index: int,
+    candidate_values,
+    *,
+    retain_decode_grads: bool = False,
+) -> CapturedUpdate:
     batch, labels = _batch_for_sample(args, wrapper, sample)
     args.defense_rng_step = int(update_index)
     raw_grads = wrapper.compute_grads(batch, labels)
     defended = apply_defense(raw_grads, args, model_wrapper=wrapper, batch=batch, labels=labels)
-    _, span_bases = wrapper.get_matrices_expansions(defended, B=None, tol=args.rank_tol)
+    rank_B, span_bases = wrapper.get_matrices_expansions(defended, B=None, tol=args.rank_tol)
+    if rank_B is None:
+        raise RuntimeError("State inference requires a valid captured DAGER rank.")
     selected = tuple(int(index) for index in args.dager_selected_gradient_indices)
     if selected != EXPECTED_DAGER_INDICES:
         raise RuntimeError(f"Expected selected DAGER indices {EXPECTED_DAGER_INDICES}; got {selected}.")
@@ -190,10 +207,11 @@ def _capture_update(args, wrapper: ModelWrapper, sample, update_index: int, cand
     if any(values.shape[-1] != width for values, width in zip(candidate_values, widths)):
         raise RuntimeError("Public candidate bank width no longer matches selected DAGER gradients.")
     q_values, signs, modes = _audit_state(args, defended, selected)
-    staged_grads = stage_selected_grads_cpu(defended, selected)
+    staged_grads = stage_selected_grads_cpu(defended, selected) if retain_decode_grads else None
     return CapturedUpdate(
         sample=sample,
         defended_grads=staged_grads,
+        rank_B=int(rank_B),
         observation=StateInferenceObservation(
             span_bases=tuple(base.detach().to(device="cpu", copy=True) for base in span_bases),
             candidate_values=tuple(value.detach() for value in candidate_values),
@@ -206,15 +224,54 @@ def _capture_update(args, wrapper: ModelWrapper, sample, update_index: int, cand
     )
 
 
-def _hash_public_batches(dataset: TextDataset) -> str:
+def _capture_public_calibration_record(args, wrapper: ModelWrapper, sample, update_index: int):
+    """Capture only the public initializer inputs, without a DAGER SVD.
+
+    Public calibration consumes feature sketches and attacker-generated state
+    labels.  Computing span bases here was both unused and the dominant cost of
+    the original 512-batch calibration phase.
+    """
+    batch, labels = _batch_for_sample(args, wrapper, sample)
+    args.defense_rng_step = int(update_index)
+    raw_grads = wrapper.compute_grads(batch, labels)
+    defended = apply_defense(raw_grads, args, model_wrapper=wrapper, batch=batch, labels=labels)
+    selected = tuple(int(index) for index in args.dager_selected_gradient_indices)
+    if selected != EXPECTED_DAGER_INDICES:
+        raise RuntimeError(f"Expected selected DAGER indices {EXPECTED_DAGER_INDICES}; got {selected}.")
+    widths = tuple(int(_oriented_grad_for_span(args, defended[index]).shape[-1]) for index in selected)
+    q_values, signs, _ = _audit_state(args, defended, selected)
+    record = PublicCalibrationRecord(
+        feature_sketches=_feature_sketch(args, defended, selected),
+        ratios=tuple(q / width for q, width in zip(q_values, widths)),
+        signs=signs,
+    )
+    return record, widths
+
+
+def _hash_dataset_indices(dataset: TextDataset) -> str:
     digest = hashlib.sha256()
-    for sequences in dataset.seqs:
-        digest.update("\x1e".join(sequences).encode("utf-8", errors="replace"))
-        digest.update(b"\n")
+    for index in dataset.selected_indices:
+        digest.update(int(index).to_bytes(8, byteorder="little", signed=False))
     return digest.hexdigest()
 
 
-def _public_calibration(args, wrapper: ModelWrapper, state_args, feature_widths, candidate_values):
+def _progress(phase: str, completed: int, total: int, every: int, **fields) -> None:
+    if completed == 1 or completed == total or completed % every == 0:
+        suffix = " ".join(f"{key}={value}" for key, value in fields.items())
+        print(
+            f"[state-inference] phase={phase} progress={completed}/{total}"
+            + (f" {suffix}" if suffix else ""),
+            flush=True,
+        )
+
+
+def _release_device_cache(args) -> None:
+    gc.collect()
+    if str(args.device).startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _public_calibration(args, wrapper: ModelWrapper, state_args, feature_widths):
     # split=val still draws only the SST-2 train partition; it is kept separate
     # from the official-validation target cohort and never exposes target text.
     np.random.seed(int(state_args.state_calibration_seed))
@@ -227,22 +284,22 @@ def _public_calibration(args, wrapper: ModelWrapper, state_args, feature_widths,
     try:
         for index in range(len(dataset.seqs)):
             args.defense_lrb_seed = int(state_args.state_calibration_seed) + 1_000_003 * index
-            captured = _capture_update(args, wrapper, dataset[index], 0, candidate_values)
-            if captured.feature_widths != tuple(feature_widths):
+            record, widths = _capture_public_calibration_record(args, wrapper, dataset[index], 0)
+            if widths != tuple(feature_widths):
                 raise RuntimeError("Public calibration changed the selected DAGER feature widths.")
-            records.append(
-                PublicCalibrationRecord(
-                    feature_sketches=captured.feature_sketches,
-                    ratios=tuple(q / width for q, width in zip(captured.audit_q, captured.feature_widths)),
-                    signs=captured.audit_signs,
-                )
+            records.append(record)
+            _progress(
+                "public_calibration",
+                index + 1,
+                len(dataset.seqs),
+                int(state_args.state_progress_every),
             )
     finally:
         args.defense_lrb_seed = original_seed
         args.defense_rng_step = original_step
     initializer = PublicCalibrationInitializer(feature_widths)
     initializer.fit(records)
-    return initializer, _hash_public_batches(dataset)
+    return initializer, _hash_dataset_indices(dataset)
 
 
 def _state_summary(**fields) -> None:
@@ -300,6 +357,8 @@ def _evaluate_condition(
     t0 = time.time()
     for update_index in range(start, end):
         update = captured[update_index]
+        if update.defended_grads is None:
+            raise RuntimeError(f"Held-out update {update_index} is missing its CPU-staged decode gradients.")
         if attack_variant == "state_estimator":
             args._state_inference_override = state_override(estimator, update_index)
         elif attack_variant == "oracle":
@@ -308,6 +367,10 @@ def _evaluate_condition(
             args._state_inference_override = None
         args.result_tracker = dagger_attack._init_result_tracker(args)
         decode_grads = stage_grads_for_decode(update.defended_grads, torch.device(args.device))
+        decode_expansions = (
+            update.rank_B,
+            tuple(base.to(args.device, non_blocking=False) for base in update.observation.span_bases),
+        )
         try:
             predicted, reference = dagger_attack.reconstruct(
                 args,
@@ -317,34 +380,58 @@ def _evaluate_condition(
                 wrapper,
                 precomputed_true_grads=decode_grads,
                 defense_rng_step=update_index,
+                precomputed_matrices_expansions=decode_expansions,
             )
         finally:
-            del decode_grads
+            del decode_grads, decode_expansions
         predictions.extend(predicted)
         references.extend(reference)
         l1_recovery.extend(args.result_tracker.get("rec_l1_mean_values", []))
         l1_topb_recovery.extend(args.result_tracker.get("rec_l1_maxb_mean_values", []))
         l2_recovery.extend(args.result_tracker.get("rec_l2_mean_values", []))
+        _progress(
+            f"decode_{attack_variant}",
+            update_index - start + 1,
+            end - start,
+            int(state_args.state_progress_every),
+        )
     args._state_inference_override = None
     metrics = metric.compute(predictions=predictions, references=references)
     if attack_variant == "state_estimator":
-        q_rows = [
-            q_audit([value.item() for value in estimator.q_values(update_index)], captured[update_index].audit_q)
+        estimated_q_rows = [
+            [value.item() for value in estimator.q_values(update_index)]
             for update_index in range(start, end)
+        ]
+        q_rows = [
+            q_audit(estimated_q, captured[update_index].audit_q)
+            for estimated_q, update_index in zip(estimated_q_rows, range(start, end))
+        ]
+        ratio_errors = [
+            sum(
+                abs(float(estimated) - float(truth)) / float(width)
+                for estimated, truth, width in zip(
+                    estimated_q,
+                    captured[update_index].audit_q,
+                    captured[update_index].feature_widths,
+                )
+            )
+            / len(captured[update_index].feature_widths)
+            for estimated_q, update_index in zip(estimated_q_rows, range(start, end))
         ]
         sign_scores = [
             sign_agreement_mod_global_flip(estimate, truth)
             for estimate, truth in zip(estimator.hard_signs(), captured[start].audit_signs)
         ]
-        q_exact, q_error, sign_agreement = (
+        q_exact, q_error, ratio_error, sign_agreement = (
             f"{sum(row['q_exact_match'] for row in q_rows) / len(q_rows):.6f}",
             f"{sum(row['q_abs_error_mean'] for row in q_rows) / len(q_rows):.6f}",
+            f"{sum(ratio_errors) / len(ratio_errors):.6f}",
             f"{sum(sign_scores) / len(sign_scores):.6f}",
         )
     elif attack_variant == "oracle":
-        q_exact, q_error, sign_agreement = "1.000000", "0.000000", "1.000000"
+        q_exact, q_error, ratio_error, sign_agreement = "1.000000", "0.000000", "0.000000", "1.000000"
     else:
-        q_exact = q_error = sign_agreement = "n/a"
+        q_exact = q_error = ratio_error = sign_agreement = "n/a"
     token_total = max(int(dagger_attack.total_tokens), 1)
     return {
         "protocol": STATE_INFERENCE_PROTOCOL,
@@ -363,11 +450,16 @@ def _evaluate_condition(
         "dagger_l2_recovery_mean": f"{sum(l2_recovery) / max(len(l2_recovery), 1):.6f}",
         "state_q_exact_match": q_exact,
         "state_q_abs_error_mean": q_error,
+        "state_ratio_abs_error_mean": ratio_error,
         "state_sign_agreement_mod_global_flip": sign_agreement,
         "attack_time_seconds": f"{time.time() - t0:.3f}",
         "state_truth_used_for_fit": "false",
         "state_truth_used_for_decode": str(attack_variant == "oracle").lower(),
         "state_target_fit_visibility": "observed_dager_spans_only",
+        "state_selected_gradients": ";".join(str(index) for index in EXPECTED_DAGER_INDICES),
+        "state_decode_gradient_storage": "held_out_selected_cpu",
+        "state_dager_expansions_source": "captured_precomputed",
+        "state_public_calibration_decomposition": "skipped",
     }
 
 
@@ -384,13 +476,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         target_dataset = TextDataset(
             args.device, args.dataset, args.split, int(state_args.state_target_inputs), args.batch_size, args.cache_dir
         )
+        target_index_hash = _hash_dataset_indices(target_dataset)
         wrapper = ModelWrapper(args)
         candidates = _candidate_bank(args, wrapper, state_args.state_candidate_count, state_args.state_candidate_seed)
-        captured = [_capture_update(args, wrapper, target_dataset[index], index, candidates) for index in range(len(target_dataset.seqs))]
+        eval_start = int(state_args.state_eval_start)
+        eval_end = eval_start + int(state_args.state_eval_count)
+        captured = []
+        for index in range(len(target_dataset.seqs)):
+            captured.append(
+                _capture_update(
+                args,
+                wrapper,
+                target_dataset[index],
+                index,
+                candidates,
+                retain_decode_grads=eval_start <= index < eval_end,
+            )
+            )
+            _progress(
+                "target_capture",
+                index + 1,
+                len(target_dataset.seqs),
+                int(state_args.state_progress_every),
+            )
+        retained_updates = sum(update.defended_grads is not None for update in captured)
+        if retained_updates != int(state_args.state_eval_count):
+            raise RuntimeError(
+                f"Expected CPU decode gradients for {state_args.state_eval_count} held-out updates; "
+                f"retained {retained_updates}."
+            )
         widths = captured[0].feature_widths
         if any(update.feature_widths != widths for update in captured):
             raise RuntimeError("Selected DAGER widths changed within the target cohort.")
-        initializer, calibration_hash = _public_calibration(args, wrapper, state_args, widths, candidates)
+        _release_device_cache(args)
+        initializer, calibration_hash = _public_calibration(args, wrapper, state_args, widths)
+        _release_device_cache(args)
         target_sketches = [update.feature_sketches for update in captured]
 
         # These two diagnostics decode the same fixed blind updates as every
@@ -423,10 +543,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "calibration_partition": "sst2_train_legacy_val",
                     "calibration_batches": state_args.state_calibration_batches,
                     "calibration_hash": calibration_hash,
+                    "target_index_hash": target_index_hash,
                     "state_fit_loss_last": "n/a",
                 }
             )
             _state_summary(**fields)
+            _release_device_cache(args)
 
         for m_value in state_args.m_values:
             fit_indices = tuple(range(int(m_value)))
@@ -447,6 +569,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     update_indices=fit_indices,
                     steps=int(budget),
                     learning_rate=state_args.state_learning_rate,
+                    progress_callback=lambda completed, total, loss, m=m_value, b=budget: _progress(
+                        "state_fit",
+                        completed,
+                        total,
+                        int(state_args.state_progress_every),
+                        m=m,
+                        budget=b,
+                        loss=f"{loss:.8f}",
+                    ),
                 )
                 fields = _evaluate_condition(
                     args,
@@ -473,10 +604,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "calibration_partition": "sst2_train_legacy_val",
                         "calibration_batches": state_args.state_calibration_batches,
                         "calibration_hash": calibration_hash,
+                        "target_index_hash": target_index_hash,
                         "state_fit_loss_last": "n/a" if not trace else f"{trace[-1]:.8f}",
                     }
                 )
                 _state_summary(**fields)
+                del estimator
+                _release_device_cache(args)
         return 0
     except Exception as exc:
         _state_summary(protocol=STATE_INFERENCE_PROTOCOL, result_status="failed", error_type=type(exc).__name__, error_message=str(exc))

@@ -11,7 +11,7 @@ PYTHON_BIN="${PYTHON:-python}"
 DEVICE="cuda"
 CACHE_DIR="./models_cache"
 RUN_DIR=""
-MODE="formal"
+MODE="gate"
 SKIP_EXISTING=0
 DRY_RUN=0
 
@@ -25,7 +25,9 @@ Options:
   --device DEVICE      attack device (default: cuda)
   --cache-dir PATH     Hugging Face dataset cache (default: ./models_cache)
   --run-dir PATH       new, empty output root
-  --mode smoke|formal  smoke uses 2 fit updates, 1 held-out update, and 2 public batches
+  --mode smoke|gate|formal
+                       gate is the recommended GPU P0: one seed, 16 fit updates,
+                       5 held-out updates, and one estimator condition
   --skip-existing      resume only logs whose state summaries are complete
   --dry-run            print commands without executing
 EOF
@@ -56,7 +58,7 @@ if [ -z "$CHECKPOINT" ] || [ ! -e "$CHECKPOINT" ]; then
   echo "[state-inference] --checkpoint must reference an existing checkpoint" >&2
   exit 2
 fi
-case "$MODE" in smoke|formal) ;; *) echo "[state-inference] invalid --mode: $MODE" >&2; exit 2 ;; esac
+case "$MODE" in smoke|gate|formal) ;; *) echo "[state-inference] invalid --mode: $MODE" >&2; exit 2 ;; esac
 
 if [ "$DRY_RUN" -eq 0 ]; then
   if ! "$PYTHON_BIN" -c 'import torch, datasets, transformers; assert torch.cuda.is_available()' >/dev/null 2>&1; then
@@ -76,12 +78,18 @@ if [ -e "$RUN_DIR" ] && [ "$SKIP_EXISTING" -ne 1 ]; then
   echo "[state-inference] refusing to reuse existing run root: $RUN_DIR" >&2
   exit 2
 fi
+LEGACY_ROOTS=(
+  "log/runs/adaptive_lrb_matrix_sst2_official_validation_20260718_114719"
+  "log/runs/adaptive_lrb_matrix_sst2_official_validation_20260718_114758"
+)
+for root in "${LEGACY_ROOTS[@]}"; do
+  if [ ! -d "$root" ]; then
+    echo "[state-inference] required legacy result root is missing: $root" >&2
+    exit 2
+  fi
+done
 mkdir -p "$RUN_DIR/logs"
 
-LEGACY_ROOTS=(
-  "log/同预算 white-box baselines/new/adaptive_lrb_matrix_sst2_official_validation_20260718_114719"
-  "log/同预算 white-box baselines/new/adaptive_lrb_matrix_sst2_official_validation_20260718_114758"
-)
 manifest() {
   for root in "${LEGACY_ROOTS[@]}"; do
     if [ -d "$root" ]; then
@@ -102,6 +110,20 @@ if [ "$MODE" = "smoke" ]; then
   BUDGETS=0,1
   CALIBRATION_BATCHES=2
   CANDIDATES=32
+  DECODER_CANDIDATE_MULTIPLIER=10
+  PROGRESS_EVERY=1
+  SEEDS=(1101)
+elif [ "$MODE" = "gate" ]; then
+  TARGET_INPUTS=21
+  FIT_END=16
+  EVAL_START=16
+  EVAL_COUNT=5
+  M_VALUES=16
+  BUDGETS=100
+  CALIBRATION_BATCHES=64
+  CANDIDATES=512
+  DECODER_CANDIDATE_MULTIPLIER=50
+  PROGRESS_EVERY=4
   SEEDS=(1101)
 else
   TARGET_INPUTS=100
@@ -112,8 +134,13 @@ else
   BUDGETS=0,100,400
   CALIBRATION_BATCHES=512
   CANDIDATES=2048
+  DECODER_CANDIDATE_MULTIPLIER=100
+  PROGRESS_EVERY=8
   SEEDS=(1101 1202 1303)
 fi
+M_COUNT=$(printf '%s\n' "$M_VALUES" | awk -F, '{print NF}')
+BUDGET_COUNT=$(printf '%s\n' "$BUDGETS" | awk -F, '{print NF}')
+EXPECTED_CONDITIONS=$((2 + M_COUNT * BUDGET_COUNT))
 
 {
   printf 'protocol=state_inference_v1\n'
@@ -126,16 +153,34 @@ fi
   printf 'budgets=%s\n' "$BUDGETS"
   printf 'calibration_batches=%s\n' "$CALIBRATION_BATCHES"
   printf 'candidate_count=%s\n' "$CANDIDATES"
+  printf 'decoder_candidate_multiplier=%s\n' "$DECODER_CANDIDATE_MULTIPLIER"
   printf 'cache_dir=%s\n' "$CACHE_DIR"
+  printf 'selected_gradients=4;16\n'
+  printf 'defense_lrb_seed_mode=static\n'
+  printf 'defense_lrb_seed=700001\n'
+  printf 'adaptive_lrb_sign_source=defense_device\n'
+  printf 'decode_gradient_storage=held_out_selected_cpu\n'
+  printf 'dager_expansions_source=captured_precomputed\n'
+  printf 'dager_decomp_device=cuda\n'
+  printf 'public_calibration_decomposition=skipped\n'
   printf 'seeds=%s\n' "${SEEDS[*]}"
 } >"$RUN_DIR/run_manifest.txt"
 
-printf 'seed,exit_code\n' >"$RUN_DIR/exit_codes.csv"
+if [ ! -e "$RUN_DIR/exit_codes.csv" ]; then
+  printf 'seed,exit_code\n' >"$RUN_DIR/exit_codes.csv"
+fi
 for seed in "${SEEDS[@]}"; do
   logfile="$RUN_DIR/logs/static_state_seed${seed}.txt"
-  if [ -e "$logfile" ] && [ "$SKIP_EXISTING" -eq 1 ] && grep -q '^result_status=ok$' "$logfile"; then
-    echo "[state-inference] skip complete seed $seed" >&2
-    continue
+  if [ -e "$logfile" ] && [ "$SKIP_EXISTING" -eq 1 ]; then
+    completed_conditions=$(grep -c '^result_status=ok$' "$logfile" || true)
+    failed_conditions=$(grep -c '^result_status=failed$' "$logfile" || true)
+    if [ "$completed_conditions" -eq "$EXPECTED_CONDITIONS" ] && [ "$failed_conditions" -eq 0 ]; then
+      echo "[state-inference] skip complete seed $seed" >&2
+      if ! grep -q "^${seed},0$" "$RUN_DIR/exit_codes.csv"; then
+        printf '%s,0\n' "$seed" >>"$RUN_DIR/exit_codes.csv"
+      fi
+      continue
+    fi
   fi
   if [ -e "$logfile" ]; then
     echo "[state-inference] refusing to overwrite: $logfile" >&2
@@ -146,16 +191,17 @@ for seed in "${SEEDS[@]}"; do
     --dataset sst2 --split official_validation --n_inputs "$TARGET_INPUTS" --batch_size 2
     --l1_filter all --l2_filter non-overlap --model_path gpt2 --finetuned_path "$CHECKPOINT"
     --cache_dir "$CACHE_DIR"
-    --device "$DEVICE" --task seq_class --algo sgd --n_layers 2
+    --device "$DEVICE" --dager_decomp_device cuda --task seq_class --algo sgd --n_layers 2
     --defense lrb --defense_lrb_preset proj_only --defense_lrb_keep_ratio_sensitive 0.5
     --defense_lrb_seed_mode static --defense_lrb_seed 700001
     --adaptive_attack defense_aware --adaptive_lrb_sign_source defense_device
     --adaptive_lrb_knowledge method_only --adaptive_lrb_attack_seed 900001 --adaptive_lrb_seed_samples 1
-    --adaptive_candidate_multiplier 100 --rng_seed "$seed" --log_file "$logfile"
+    --adaptive_candidate_multiplier "$DECODER_CANDIDATE_MULTIPLIER" --rng_seed "$seed" --log_file "$logfile"
     --state-target-inputs "$TARGET_INPUTS" --state-fit-end "$FIT_END"
     --state-eval-start "$EVAL_START" --state-eval-count "$EVAL_COUNT"
     --state-m-values "$M_VALUES" --state-budgets "$BUDGETS"
     --state-calibration-batches "$CALIBRATION_BATCHES" --state-candidate-count "$CANDIDATES"
+    --state-progress-every "$PROGRESS_EVERY"
   )
   echo "[state-inference] run seed=$seed" >&2
   if [ "$DRY_RUN" -eq 1 ]; then

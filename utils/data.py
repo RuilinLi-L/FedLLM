@@ -107,6 +107,9 @@ class TextDataset:
             idxs = final_idxs
         
         # Slice
+        # Read-only provenance for dedicated audit runners. Existing callers
+        # retain the same sampling and batching semantics.
+        self.selected_indices = tuple(int(index) for index in idxs[:n_samples])
         self.seqs = []
         self.labels = []
         for i in range(n_inputs):
