@@ -190,7 +190,7 @@ def _capture_update(args, wrapper: ModelWrapper, sample, update_index: int, cand
     if any(values.shape[-1] != width for values, width in zip(candidate_values, widths)):
         raise RuntimeError("Public candidate bank width no longer matches selected DAGER gradients.")
     q_values, signs, modes = _audit_state(args, defended, selected)
-    staged_grads = _stage_selected_grads_cpu(defended, selected)
+    staged_grads = stage_selected_grads_cpu(defended, selected)
     return CapturedUpdate(
         sample=sample,
         defended_grads=staged_grads,
@@ -307,7 +307,7 @@ def _evaluate_condition(
         else:
             args._state_inference_override = None
         args.result_tracker = dagger_attack._init_result_tracker(args)
-        decode_grads = _stage_grads_for_decode(update.defended_grads, torch.device(args.device))
+        decode_grads = stage_grads_for_decode(update.defended_grads, torch.device(args.device))
         try:
             predicted, reference = dagger_attack.reconstruct(
                 args,
