@@ -166,6 +166,11 @@ EXPECTED_CONDITIONS=$((2 + M_COUNT * BUDGET_COUNT))
   printf 'seeds=%s\n' "${SEEDS[*]}"
 } >"$RUN_DIR/run_manifest.txt"
 
+echo "[state-inference] plan mode=$MODE device=$DEVICE seeds=${SEEDS[*]}" >&2
+echo "[state-inference] target=$TARGET_INPUTS fit_end=$FIT_END held_out=${EVAL_START}..$((EVAL_START + EVAL_COUNT - 1))" >&2
+echo "[state-inference] M=$M_VALUES budgets=$BUDGETS calibration=$CALIBRATION_BATCHES candidates=$CANDIDATES" >&2
+echo "[state-inference] terminal progress interval=$PROGRESS_EVERY; run root=$RUN_DIR" >&2
+
 if [ ! -e "$RUN_DIR/exit_codes.csv" ]; then
   printf 'seed,exit_code\n' >"$RUN_DIR/exit_codes.csv"
 fi
@@ -203,19 +208,24 @@ for seed in "${SEEDS[@]}"; do
     --state-calibration-batches "$CALIBRATION_BATCHES" --state-candidate-count "$CANDIDATES"
     --state-progress-every "$PROGRESS_EVERY"
   )
-  echo "[state-inference] run seed=$seed" >&2
+  echo "[state-inference] start seed=$seed time=$(date '+%Y-%m-%dT%H:%M:%S%z')" >&2
+  echo "[state-inference] live log=$logfile" >&2
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '%q ' "${command[@]}"; printf '\n'
     continue
   fi
+  seed_started=$SECONDS
   set +e
-  "${command[@]}"
+  PYTHONUNBUFFERED=1 "${command[@]}"
   rc=$?
   set -e
+  seed_elapsed=$((SECONDS - seed_started))
   printf '%s,%s\n' "$seed" "$rc" >>"$RUN_DIR/exit_codes.csv"
   if [ "$rc" -ne 0 ]; then
+    echo "[state-inference] failed seed=$seed exit_code=$rc elapsed_seconds=$seed_elapsed log=$logfile" >&2
     exit "$rc"
   fi
+  echo "[state-inference] finished seed=$seed elapsed_seconds=$seed_elapsed" >&2
 done
 
 manifest >"$RUN_DIR/legacy_inputs_after.sha256"
@@ -226,5 +236,7 @@ fi
 
 if [ "$DRY_RUN" -eq 0 ]; then
   "$PYTHON_BIN" scripts/collect_state_inference_results.py --run-root "$RUN_DIR"
+  echo "[state-inference] validation=$RUN_DIR/state_inference_validation.txt" >&2
+  echo "[state-inference] results=$RUN_DIR/state_inference_results.csv" >&2
 fi
 echo "[state-inference] complete: $RUN_DIR" >&2
