@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import sys
 import time
 from dataclasses import dataclass
@@ -18,8 +19,6 @@ import numpy as np
 import torch
 from datasets import load_metric
 
-import attack as dagger_attack
-from args_factory import get_args
 from utils.adaptive_attack import _lrb_feature_axis, _lrb_feature_signs, _oriented_grad_for_span
 from utils.adaptive_lrb_state_inference import (
     STATE_INFERENCE_PROTOCOL,
@@ -38,6 +37,9 @@ from utils.models import ModelWrapper
 
 
 EXPECTED_DAGER_INDICES = (4, 16)
+# `attack.py` parses `sys.argv` at import time. Keep its import delayed
+# until the state-specific flags have been stripped in `main`.
+dagger_attack = None
 
 
 @dataclass
@@ -72,15 +74,17 @@ def _custom_args(argv: Sequence[str]):
     custom.budgets = tuple(int(part) for part in custom.state_budgets.split(",") if part.strip())
     if not custom.m_values or not custom.budgets:
         raise ValueError("--state-m-values and --state-budgets must be non-empty CSV lists.")
-    # ``get_args`` accepts an argv argument in the current repository.  Some
-    # long-lived server worktrees still carry an older implementation that
-    # ignores that argument and reparses ``sys.argv`` instead.  Keep both views
-    # synchronized during this private handoff so ``--state-*`` options cannot
-    # leak into the legacy DAGER parser in either case.
+    return custom, base_argv
+
+
+def _load_dagger_after_state_parse(base_argv: Sequence[str]):
+    """Import DAGER only after hiding this entrypoint's private CLI flags."""
+    global dagger_attack
     original_sys_argv = sys.argv
     try:
         sys.argv = [original_sys_argv[0], *base_argv]
-        return custom, get_args(base_argv)
+        dagger_attack = importlib.import_module("attack")
+        return dagger_attack
     finally:
         sys.argv = original_sys_argv
 
@@ -361,7 +365,9 @@ def _evaluate_condition(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    state_args, args = _custom_args(sys.argv[1:] if argv is None else argv)
+    state_args, base_argv = _custom_args(sys.argv[1:] if argv is None else argv)
+    dagger_module = _load_dagger_after_state_parse(base_argv)
+    args = dagger_module.args
     _validate_protocol(args, state_args)
     args.result_tracker = dagger_attack._init_result_tracker(args)
     try:
