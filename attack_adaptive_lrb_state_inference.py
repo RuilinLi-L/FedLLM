@@ -28,6 +28,7 @@ from utils.adaptive_lrb_state_inference import (
     StateInferenceObservation,
     StaticStateEstimator,
     fit_state,
+    oracle_gate_passes,
     q_audit,
     sign_agreement_mod_global_flip,
     stage_grads_for_decode,
@@ -74,6 +75,7 @@ def _custom_args(argv: Sequence[str]):
     parser.add_argument("--state-min-ratio", type=float, default=0.2)
     parser.add_argument("--state-max-ratio", type=float, default=0.9)
     parser.add_argument("--state-progress-every", type=int, default=8)
+    parser.add_argument("--state-oracle-min-r1r2", type=float, default=None)
     custom, base_argv = parser.parse_known_args(argv)
     custom.m_values = tuple(int(part) for part in custom.state_m_values.split(",") if part.strip())
     custom.budgets = tuple(int(part) for part in custom.state_budgets.split(",") if part.strip())
@@ -126,6 +128,8 @@ def _validate_protocol(args, state_args) -> None:
         raise ValueError("State-fitting updates must not overlap the held-out evaluation range.")
     if state_args.state_progress_every <= 0:
         raise ValueError("--state-progress-every must be positive.")
+    if state_args.state_oracle_min_r1r2 is not None:
+        oracle_gate_passes(0.0, state_args.state_oracle_min_r1r2)
 
 
 def _batch_for_sample(args, wrapper: ModelWrapper, sample):
@@ -517,6 +521,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # estimator condition.  The former is the unchanged finite-hypothesis
         # DAGER setting; the latter is explicitly marked as an oracle and is
         # never used while fitting state parameters.
+        oracle_gate_stopped = False
         for attack_variant in ("method_only", "oracle"):
             fields = _evaluate_condition(
                 args,
@@ -547,8 +552,42 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "state_fit_loss_last": "n/a",
                 }
             )
+            if attack_variant == "oracle" and state_args.state_oracle_min_r1r2 is not None:
+                threshold = float(state_args.state_oracle_min_r1r2)
+                oracle_r1r2 = float(fields["agg_r1fm_r2fm"])
+                gate_passed = oracle_gate_passes(oracle_r1r2, threshold)
+                fields.update(
+                    {
+                        "state_oracle_gate_enabled": "true",
+                        "state_oracle_min_r1r2": f"{threshold:.6f}",
+                        "state_oracle_gate_passed": str(gate_passed).lower(),
+                        "state_oracle_gate_reason": (
+                            "oracle_r1r2_meets_threshold"
+                            if gate_passed
+                            else "oracle_r1r2_below_threshold"
+                        ),
+                    }
+                )
+                if not gate_passed:
+                    fields["result_status"] = "oracle_gate_stopped"
+                    oracle_gate_stopped = True
             _state_summary(**fields)
             _release_device_cache(args)
+
+        if oracle_gate_stopped:
+            print(
+                "[state-inference] oracle gate stopped estimator stage: "
+                f"oracle R1+R2 is below {float(state_args.state_oracle_min_r1r2):.6f}",
+                flush=True,
+            )
+            return 0
+        if state_args.state_oracle_min_r1r2 is not None:
+            print(
+                "[state-inference] oracle gate passed; starting estimator stage "
+                f"for M={','.join(str(value) for value in state_args.m_values)} "
+                f"budget={','.join(str(value) for value in state_args.budgets)}",
+                flush=True,
+            )
 
         for m_value in state_args.m_values:
             fit_indices = tuple(range(int(m_value)))

@@ -7,6 +7,7 @@ the audit helpers, never by :func:`fit_state`.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -16,6 +17,24 @@ import torch.nn.functional as F
 
 
 STATE_INFERENCE_PROTOCOL = "state_inference_v1"
+
+
+def oracle_gate_passes(oracle_r1r2: float, minimum_r1r2: float | None) -> bool:
+    """Return whether an oracle diagnostic is strong enough to run the estimator.
+
+    A ``None`` threshold preserves the original unconditional experiment flow.
+    The helper validates both values so a malformed diagnostic cannot silently
+    enter or skip the expensive estimator stage.
+    """
+    score = float(oracle_r1r2)
+    if not math.isfinite(score):
+        raise ValueError("Oracle R1+R2 must be finite.")
+    if minimum_r1r2 is None:
+        return True
+    threshold = float(minimum_r1r2)
+    if not math.isfinite(threshold) or threshold < 0.0:
+        raise ValueError("Oracle R1+R2 gate threshold must be finite and non-negative.")
+    return score >= threshold
 
 
 def hard_sign_ste(logits: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:

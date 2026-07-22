@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import re
 from pathlib import Path
 
@@ -74,6 +75,18 @@ def validate(root: Path, rows: list[dict[str, str]]) -> list[str]:
     if manifest.get("protocol") != "state_inference_v1":
         errors.append("run manifest protocol is not state_inference_v1")
 
+    gate_threshold = None
+    raw_gate_threshold = manifest.get("oracle_min_r1r2")
+    if raw_gate_threshold not in {None, ""}:
+        try:
+            gate_threshold = float(raw_gate_threshold)
+        except (TypeError, ValueError):
+            errors.append("run manifest has invalid oracle_min_r1r2")
+        else:
+            if not math.isfinite(gate_threshold) or gate_threshold < 0.0:
+                errors.append("run manifest has invalid oracle_min_r1r2")
+                gate_threshold = None
+
     before, after = root / "legacy_inputs_before.sha256", root / "legacy_inputs_after.sha256"
     if not before.exists() or not after.exists():
         errors.append("missing pre/post legacy SHA-256 manifests")
@@ -91,7 +104,14 @@ def validate(root: Path, rows: list[dict[str, str]]) -> list[str]:
     by_seed: dict[str, list[dict[str, str]]] = {}
     for row in rows:
         by_seed.setdefault(row.get("rng_seed", ""), []).append(row)
-        if row.get("result_status") != "ok":
+        variant = row.get("state_attack_variant")
+        status = row.get("result_status")
+        gate_stop_is_valid_shape = (
+            status == "oracle_gate_stopped"
+            and variant == "oracle"
+            and gate_threshold is not None
+        )
+        if status != "ok" and not gate_stop_is_valid_shape:
             errors.append(f"seed {row.get('rng_seed', 'unknown')} has non-ok summary")
         if row.get("n_inputs_requested") != row.get("n_inputs_completed"):
             errors.append(f"seed {row.get('rng_seed', 'unknown')} has incomplete held-out updates")
@@ -131,20 +151,60 @@ def validate(root: Path, rows: list[dict[str, str]]) -> list[str]:
             errors.append(f"seed {seed} lacks a successful exit code")
         seed_rows = by_seed.get(seed, [])
         variants = {row.get("state_attack_variant") for row in seed_rows}
-        if {"method_only", "oracle", "state_estimator"}.difference(variants):
-            errors.append(f"seed {seed} is missing a required attack variant")
+        unexpected_variants = variants.difference({"method_only", "oracle", "state_estimator"})
+        if unexpected_variants:
+            errors.append(f"seed {seed} has unexpected attack variants")
+        diagnostic_rows = {
+            variant: [row for row in seed_rows if row.get("state_attack_variant") == variant]
+            for variant in ("method_only", "oracle")
+        }
+        for variant, matching_rows in diagnostic_rows.items():
+            if len(matching_rows) != 1:
+                errors.append(f"seed {seed} must have exactly one {variant} diagnostic")
+
+        estimator_rows = [row for row in seed_rows if row.get("state_attack_variant") == "state_estimator"]
         estimator_conditions = {
             (row.get("state_fit_updates"), row.get("state_budget"))
-            for row in seed_rows
-            if row.get("state_attack_variant") == "state_estimator"
+            for row in estimator_rows
         }
-        if estimator_conditions != expected_estimator:
-            errors.append(f"seed {seed} has incomplete estimator M/budget coverage")
-        if sum(row.get("state_attack_variant") == "state_estimator" for row in seed_rows) != len(expected_estimator):
-            errors.append(f"seed {seed} has duplicate or extra estimator conditions")
-        for variant in ("method_only", "oracle"):
-            if sum(row.get("state_attack_variant") == variant for row in seed_rows) != 1:
-                errors.append(f"seed {seed} must have exactly one {variant} diagnostic")
+
+        oracle_row = diagnostic_rows["oracle"][0] if len(diagnostic_rows["oracle"]) == 1 else None
+        oracle_gate_stopped = oracle_row is not None and oracle_row.get("result_status") == "oracle_gate_stopped"
+        if oracle_row is not None and gate_threshold is not None:
+            try:
+                oracle_score = float(oracle_row.get("agg_r1fm_r2fm", ""))
+                row_threshold = float(oracle_row.get("state_oracle_min_r1r2", ""))
+            except (TypeError, ValueError):
+                errors.append(f"seed {seed} has invalid oracle gate metrics")
+            else:
+                if not math.isfinite(oracle_score) or not math.isclose(row_threshold, gate_threshold):
+                    errors.append(f"seed {seed} has invalid oracle gate metrics")
+                gate_passed = oracle_score >= gate_threshold
+                expected_status = "ok" if gate_passed else "oracle_gate_stopped"
+                expected_reason = (
+                    "oracle_r1r2_meets_threshold" if gate_passed else "oracle_r1r2_below_threshold"
+                )
+                if oracle_row.get("result_status") != expected_status:
+                    errors.append(f"seed {seed} oracle result status disagrees with the gate threshold")
+                if oracle_row.get("state_oracle_gate_enabled") != "true":
+                    errors.append(f"seed {seed} does not mark the oracle gate as enabled")
+                if oracle_row.get("state_oracle_gate_passed") != str(gate_passed).lower():
+                    errors.append(f"seed {seed} has invalid oracle gate decision")
+                if oracle_row.get("state_oracle_gate_reason") != expected_reason:
+                    errors.append(f"seed {seed} has invalid oracle gate reason")
+        elif oracle_gate_stopped:
+            errors.append(f"seed {seed} stopped at an oracle gate that is not enabled in the manifest")
+
+        if oracle_gate_stopped:
+            if estimator_rows:
+                errors.append(f"seed {seed} ran estimator conditions after the oracle gate stopped")
+        else:
+            if {"method_only", "oracle", "state_estimator"}.difference(variants):
+                errors.append(f"seed {seed} is missing a required attack variant")
+            if estimator_conditions != expected_estimator:
+                errors.append(f"seed {seed} has incomplete estimator M/budget coverage")
+            if len(estimator_rows) != len(expected_estimator):
+                errors.append(f"seed {seed} has duplicate or extra estimator conditions")
     return list(dict.fromkeys(errors))
 
 

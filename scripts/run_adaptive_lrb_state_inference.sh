@@ -14,6 +14,7 @@ RUN_DIR=""
 MODE="gate"
 SKIP_EXISTING=0
 DRY_RUN=0
+ORACLE_MIN_R1R2=""
 
 usage() {
   cat <<'EOF'
@@ -25,9 +26,11 @@ Options:
   --device DEVICE      attack device (default: cuda)
   --cache-dir PATH     Hugging Face dataset cache (default: ./models_cache)
   --run-dir PATH       new, empty output root
-  --mode smoke|gate|formal
+  --mode smoke|gate|formal_pilot|formal
                        gate is the recommended GPU P0: one seed, 16 fit updates,
                        5 held-out updates, and one estimator condition
+                       formal_pilot uses the formal cohort with seed 1101 and
+                       runs M=64/budget=400 only when oracle R1+R2 >= 80
   --skip-existing      resume only logs whose state summaries are complete
   --dry-run            print commands without executing
 EOF
@@ -58,7 +61,7 @@ if [ -z "$CHECKPOINT" ] || [ ! -e "$CHECKPOINT" ]; then
   echo "[state-inference] --checkpoint must reference an existing checkpoint" >&2
   exit 2
 fi
-case "$MODE" in smoke|gate|formal) ;; *) echo "[state-inference] invalid --mode: $MODE" >&2; exit 2 ;; esac
+case "$MODE" in smoke|gate|formal_pilot|formal) ;; *) echo "[state-inference] invalid --mode: $MODE" >&2; exit 2 ;; esac
 
 if [ "$DRY_RUN" -eq 0 ]; then
   if ! "$PYTHON_BIN" -c 'import torch, datasets, transformers; assert torch.cuda.is_available()' >/dev/null 2>&1; then
@@ -125,6 +128,19 @@ elif [ "$MODE" = "gate" ]; then
   DECODER_CANDIDATE_MULTIPLIER=50
   PROGRESS_EVERY=4
   SEEDS=(1101)
+elif [ "$MODE" = "formal_pilot" ]; then
+  TARGET_INPUTS=100
+  FIT_END=64
+  EVAL_START=80
+  EVAL_COUNT=20
+  M_VALUES=64
+  BUDGETS=400
+  CALIBRATION_BATCHES=512
+  CANDIDATES=2048
+  DECODER_CANDIDATE_MULTIPLIER=100
+  PROGRESS_EVERY=8
+  SEEDS=(1101)
+  ORACLE_MIN_R1R2=80
 else
   TARGET_INPUTS=100
   FIT_END=64
@@ -163,12 +179,18 @@ EXPECTED_CONDITIONS=$((2 + M_COUNT * BUDGET_COUNT))
   printf 'dager_expansions_source=captured_precomputed\n'
   printf 'dager_decomp_device=cuda\n'
   printf 'public_calibration_decomposition=skipped\n'
+  if [ -n "$ORACLE_MIN_R1R2" ]; then
+    printf 'oracle_min_r1r2=%s\n' "$ORACLE_MIN_R1R2"
+  fi
   printf 'seeds=%s\n' "${SEEDS[*]}"
 } >"$RUN_DIR/run_manifest.txt"
 
 echo "[state-inference] plan mode=$MODE device=$DEVICE seeds=${SEEDS[*]}" >&2
 echo "[state-inference] target=$TARGET_INPUTS fit_end=$FIT_END held_out=${EVAL_START}..$((EVAL_START + EVAL_COUNT - 1))" >&2
 echo "[state-inference] M=$M_VALUES budgets=$BUDGETS calibration=$CALIBRATION_BATCHES candidates=$CANDIDATES" >&2
+if [ -n "$ORACLE_MIN_R1R2" ]; then
+  echo "[state-inference] oracle gate=R1+R2 >= $ORACLE_MIN_R1R2; estimator runs only after gate pass" >&2
+fi
 echo "[state-inference] terminal progress interval=$PROGRESS_EVERY; run root=$RUN_DIR" >&2
 
 if [ ! -e "$RUN_DIR/exit_codes.csv" ]; then
@@ -178,8 +200,17 @@ for seed in "${SEEDS[@]}"; do
   logfile="$RUN_DIR/logs/static_state_seed${seed}.txt"
   if [ -e "$logfile" ] && [ "$SKIP_EXISTING" -eq 1 ]; then
     completed_conditions=$(grep -c '^result_status=ok$' "$logfile" || true)
+    gate_stopped_conditions=$(grep -c '^result_status=oracle_gate_stopped$' "$logfile" || true)
     failed_conditions=$(grep -c '^result_status=failed$' "$logfile" || true)
-    if [ "$completed_conditions" -eq "$EXPECTED_CONDITIONS" ] && [ "$failed_conditions" -eq 0 ]; then
+    complete_full=0
+    complete_gate_stop=0
+    if [ "$completed_conditions" -eq "$EXPECTED_CONDITIONS" ] && [ "$gate_stopped_conditions" -eq 0 ]; then
+      complete_full=1
+    fi
+    if [ -n "$ORACLE_MIN_R1R2" ] && [ "$completed_conditions" -eq 1 ] && [ "$gate_stopped_conditions" -eq 1 ]; then
+      complete_gate_stop=1
+    fi
+    if { [ "$complete_full" -eq 1 ] || [ "$complete_gate_stop" -eq 1 ]; } && [ "$failed_conditions" -eq 0 ]; then
       echo "[state-inference] skip complete seed $seed" >&2
       if ! grep -q "^${seed},0$" "$RUN_DIR/exit_codes.csv"; then
         printf '%s,0\n' "$seed" >>"$RUN_DIR/exit_codes.csv"
@@ -208,6 +239,9 @@ for seed in "${SEEDS[@]}"; do
     --state-calibration-batches "$CALIBRATION_BATCHES" --state-candidate-count "$CANDIDATES"
     --state-progress-every "$PROGRESS_EVERY"
   )
+  if [ -n "$ORACLE_MIN_R1R2" ]; then
+    command+=(--state-oracle-min-r1r2 "$ORACLE_MIN_R1R2")
+  fi
   echo "[state-inference] start seed=$seed time=$(date '+%Y-%m-%dT%H:%M:%S%z')" >&2
   echo "[state-inference] live log=$logfile" >&2
   if [ "$DRY_RUN" -eq 1 ]; then

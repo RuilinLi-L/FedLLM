@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import ast
 import math
+import tempfile
 from pathlib import Path
 
 import torch
 
+from scripts.collect_state_inference_results import validate as validate_collected_results
 from utils.adaptive_attack import _lrb_feature_signs, _project_last_dim_signed_pool
 from utils.lrb_defense import _layer_projection_seed, _project_low_resolution
 from utils.adaptive_lrb_state_inference import (
@@ -15,11 +17,70 @@ from utils.adaptive_lrb_state_inference import (
     continuous_signed_pool,
     fit_state,
     hard_sign_ste,
+    oracle_gate_passes,
     sign_agreement_mod_global_flip,
     stage_grads_for_decode,
     stage_selected_grads_cpu,
     span_distance,
 )
+
+
+def _collector_row(variant: str, *, status: str = "ok", oracle_score: str = "100.000000") -> dict[str, str]:
+    row = {
+        "protocol": "state_inference_v1",
+        "result_status": status,
+        "state_lifecycle": "static",
+        "state_attack_variant": variant,
+        "state_fit_updates": "64" if variant == "state_estimator" else "n/a",
+        "state_budget": "400" if variant == "state_estimator" else "n/a",
+        "n_inputs_requested": "20",
+        "n_inputs_completed": "20",
+        "agg_r1fm_r2fm": oracle_score,
+        "rng_seed": "1101",
+        "state_selected_gradients": "4;16",
+        "defense_lrb_seed_mode": "static",
+        "defense_lrb_seed": "700001",
+        "adaptive_lrb_sign_source": "defense_device",
+        "calibration_batches": "512",
+        "state_decode_gradient_storage": "held_out_selected_cpu",
+        "state_dager_expansions_source": "captured_precomputed",
+        "state_public_calibration_decomposition": "skipped",
+        "state_truth_used_for_fit": "false",
+        "state_truth_used_for_decode": "true" if variant == "oracle" else "false",
+        "calibration_hash": "a" * 64,
+        "target_index_hash": "b" * 64,
+    }
+    return row
+
+
+def _collector_errors(rows: list[dict[str, str]], *, oracle_threshold: float | None) -> list[str]:
+    manifest = {
+        "protocol": "state_inference_v1",
+        "eval_count": "20",
+        "m_values": "64",
+        "budgets": "400",
+        "seeds": "1101",
+        "calibration_batches": "512",
+        "selected_gradients": "4;16",
+        "defense_lrb_seed_mode": "static",
+        "defense_lrb_seed": "700001",
+        "adaptive_lrb_sign_source": "defense_device",
+        "decode_gradient_storage": "held_out_selected_cpu",
+        "dager_expansions_source": "captured_precomputed",
+        "dager_decomp_device": "cuda",
+        "public_calibration_decomposition": "skipped",
+    }
+    if oracle_threshold is not None:
+        manifest["oracle_min_r1r2"] = str(oracle_threshold)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "run_manifest.txt").write_text(
+            "".join(f"{key}={value}\n" for key, value in manifest.items()), encoding="utf-8"
+        )
+        (root / "legacy_inputs_before.sha256").write_text("same\n", encoding="utf-8")
+        (root / "legacy_inputs_after.sha256").write_text("same\n", encoding="utf-8")
+        (root / "exit_codes.csv").write_text("seed,exit_code\n1101,0\n", encoding="utf-8")
+        return validate_collected_results(root, rows)
 
 
 def test_integer_q_matches_existing_signed_pool():
@@ -65,6 +126,66 @@ def test_global_flip_accepts_cross_device_audit_tensors():
         return
     truth = torch.tensor([1.0, -1.0, 1.0, -1.0])
     assert math.isclose(sign_agreement_mod_global_flip((-truth).to("cuda"), truth), 1.0)
+
+
+def test_oracle_gate_is_disabled_by_default_and_inclusive_at_threshold():
+    assert oracle_gate_passes(0.0, None)
+    assert oracle_gate_passes(80.0, 80.0)
+    assert not oracle_gate_passes(79.999999, 80.0)
+
+
+def test_collector_accepts_legacy_unconditional_coverage():
+    rows = [
+        _collector_row("method_only"),
+        _collector_row("oracle"),
+        _collector_row("state_estimator"),
+    ]
+    assert _collector_errors(rows, oracle_threshold=None) == []
+
+
+def test_collector_accepts_oracle_gate_pass_and_estimator():
+    oracle = _collector_row("oracle", oracle_score="80.000000")
+    oracle.update(
+        {
+            "state_oracle_gate_enabled": "true",
+            "state_oracle_min_r1r2": "80.000000",
+            "state_oracle_gate_passed": "true",
+            "state_oracle_gate_reason": "oracle_r1r2_meets_threshold",
+        }
+    )
+    rows = [_collector_row("method_only"), oracle, _collector_row("state_estimator")]
+    assert _collector_errors(rows, oracle_threshold=80.0) == []
+
+
+def test_collector_accepts_complete_oracle_gate_stop_without_estimator():
+    oracle = _collector_row("oracle", status="oracle_gate_stopped", oracle_score="79.999999")
+    oracle.update(
+        {
+            "state_oracle_gate_enabled": "true",
+            "state_oracle_min_r1r2": "80.000000",
+            "state_oracle_gate_passed": "false",
+            "state_oracle_gate_reason": "oracle_r1r2_below_threshold",
+        }
+    )
+    rows = [_collector_row("method_only"), oracle]
+    assert _collector_errors(rows, oracle_threshold=80.0) == []
+
+
+def test_collector_rejects_estimator_after_oracle_gate_stop():
+    oracle = _collector_row("oracle", status="oracle_gate_stopped", oracle_score="10.000000")
+    oracle.update(
+        {
+            "state_oracle_gate_enabled": "true",
+            "state_oracle_min_r1r2": "80.000000",
+            "state_oracle_gate_passed": "false",
+            "state_oracle_gate_reason": "oracle_r1r2_below_threshold",
+        }
+    )
+    errors = _collector_errors(
+        [_collector_row("method_only"), oracle, _collector_row("state_estimator")],
+        oracle_threshold=80.0,
+    )
+    assert any("ran estimator conditions after the oracle gate stopped" in error for error in errors)
 
 
 def test_fit_state_accepts_observed_only_object():
@@ -141,12 +262,26 @@ def test_runner_uses_server_legacy_roots_and_requires_them():
     assert 'if [ ! -e "$RUN_DIR/exit_codes.csv" ]' in runner
     assert 'MODE="gate"' in runner
     assert 'elif [ "$MODE" = "gate" ]' in runner
+    assert 'elif [ "$MODE" = "formal_pilot" ]' in runner
     assert "CALIBRATION_BATCHES=64" in runner
     assert "CANDIDATES=512" in runner
     assert "DECODER_CANDIDATE_MULTIPLIER=50" in runner
+    assert "ORACLE_MIN_R1R2=80" in runner
+    assert "M_VALUES=64" in runner
+    assert "BUDGETS=400" in runner
+    assert 'command+=(--state-oracle-min-r1r2 "$ORACLE_MIN_R1R2")' in runner
     assert "--dager_decomp_device cuda" in runner
     assert "EXPECTED_CONDITIONS=" in runner
     assert 'completed_conditions=$(grep -c' in runner
+
+
+def test_oracle_gate_returns_before_state_fitting_loop():
+    source = Path("attack_adaptive_lrb_state_inference.py").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--state-oracle-min-r1r2", type=float, default=None)' in source
+    gate_stop = source.index("if oracle_gate_stopped:")
+    estimator_loop = source.index("for m_value in state_args.m_values:", gate_stop)
+    assert gate_stop < estimator_loop
+    assert 'fields["result_status"] = "oracle_gate_stopped"' in source
 
 
 def test_public_calibration_skips_dager_decomposition():
@@ -169,11 +304,17 @@ def main():
         test_hard_sign_ste_has_gradient,
         test_global_flip_is_equivalent,
         test_global_flip_accepts_cross_device_audit_tensors,
+        test_oracle_gate_is_disabled_by_default_and_inclusive_at_threshold,
+        test_collector_accepts_legacy_unconditional_coverage,
+        test_collector_accepts_oracle_gate_pass_and_estimator,
+        test_collector_accepts_complete_oracle_gate_stop_without_estimator,
+        test_collector_rejects_estimator_after_oracle_gate_stop,
         test_fit_state_accepts_observed_only_object,
         test_captured_updates_keep_only_selected_cpu_gradients,
         test_observation_microbatch_matches_full_mean_update,
         test_reconstruct_precomputed_expansions_is_opt_in,
         test_runner_uses_server_legacy_roots_and_requires_them,
+        test_oracle_gate_returns_before_state_fitting_loop,
         test_public_calibration_skips_dager_decomposition,
         test_dataset_exposes_read_only_sample_provenance,
     ):
