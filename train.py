@@ -115,6 +115,7 @@ def init_result_tracker(args) -> dict:
         "dataset": args.dataset,
         "task": args.task,
         "model_path": args.model_path,
+        "finetuned_path": getattr(args, "finetuned_path", None),
         "batch_size": args.batch_size,
         "train_method": args.train_method,
         "peft_method": getattr(args, "peft_method", None),
@@ -146,6 +147,7 @@ def emit_train_result_summary(args, tracker: dict) -> None:
         ("dataset", tracker.get("dataset")),
         ("task", tracker.get("task")),
         ("model_path", tracker.get("model_path")),
+        ("finetuned_path", tracker.get("finetuned_path")),
         ("batch_size", tracker.get("batch_size")),
         ("train_method", tracker.get("train_method")),
         ("peft_method", tracker.get("peft_method")),
@@ -268,6 +270,15 @@ def build_parser():
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--model_path", type=str, default="bert-base-uncased")
+    parser.add_argument(
+        "--finetuned_path",
+        type=str,
+        default=None,
+        help=(
+            "Optional PEFT adapter checkpoint to load before training continuation. "
+            "Requires --train_method peft or lora; omit it to initialize a new adapter."
+        ),
+    )
     parser.add_argument(
         "--tokenizer_path",
         type=str,
@@ -527,6 +538,13 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     normalize_peft_args(args)
+    if args.finetuned_path is not None:
+        if not args.finetuned_path.strip():
+            parser.error("--finetuned_path must name an existing PEFT checkpoint; empty paths are not allowed.")
+        if not peft_active(args):
+            parser.error("--finetuned_path is only supported with --train_method peft or lora.")
+        if not Path(args.finetuned_path).expanduser().exists():
+            parser.error(f"--finetuned_path does not exist: {args.finetuned_path}")
     normalize_legacy_training_defense_args(args)
     normalize_dpsgd_opacus_args(args)
     apply_lrb_preset(args)
