@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import NamedTemporaryFile
 from time import perf_counter
 from typing import Any, Mapping
 
@@ -41,6 +42,7 @@ from src.dager_qwen3.layer2_decoder import Layer2DecoderConfig, decode_qwen3_rop
 from src.dager_qwen3.metrics import compute_attack_metrics, preflight_legacy_dager_rouge_backend
 from src.dager_qwen3.model_adapter import Qwen3RoPEDagerAdapter
 from src.gradient_capture import build_canonical_gradient_manifest, capture_single_example_gradients
+from src.hashing import HashingError, canonical_json_bytes
 from src.qwen3_classifier import load_local_qwen3_sequence_classifier
 from src.result_schema import ResultSchemaError, write_or_verify_jsonl
 from src.span_diagnostics import diagnose_two_q_projections
@@ -111,6 +113,136 @@ def _q_canonical_indices(manifest: Mapping[str, Any], names: tuple[str, str]) ->
     if set(result) != set(names):
         raise NoneAttackScriptError("Canonical gradient manifest does not contain both structural q_proj parameter names.")
     return result
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    """Return a mapping view for optional diagnostic fields without guessing values."""
+    return value if isinstance(value, Mapping) else {}
+
+
+def _maximum_inactive_residual(layer: Mapping[str, Any]) -> float | None:
+    """Report the largest existing per-token residual among inactive positions."""
+    values: list[float] = []
+    per_token = layer.get("per_token")
+    if not isinstance(per_token, list):
+        return None
+    for token in per_token:
+        token_record = _as_mapping(token)
+        if token_record.get("active_by_delta") is False:
+            value = token_record.get("relative_row_space_residual")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values.append(float(value))
+    return max(values) if values else None
+
+
+def _diagnostic_layer_summary(layer: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract fixed observability fields from one existing q_proj diagnostic."""
+    identity = _as_mapping(layer.get("identity"))
+    rank = _as_mapping(layer.get("rank"))
+    residual = _as_mapping(layer.get("row_space_residual"))
+    active_residual = _as_mapping(residual.get("active_tokens"))
+    negative_control = _as_mapping(layer.get("gradient_t_negative_control"))
+    negative_active_residual = _as_mapping(negative_control.get("gradient_t_active_token_residual"))
+    return {
+        "identity_relative_error": identity.get("gradient_relative_error"),
+        "relative_effective_rank": rank.get("relative_threshold_rank"),
+        "theoretical_rank_cap": rank.get("theoretical_rank_cap"),
+        "spectral_gap": rank.get("spectral_gap_suggestion"),
+        "max_active_relative_residual": active_residual.get("max"),
+        "max_inactive_relative_residual": _maximum_inactive_residual(layer),
+        "negative_control_identity_error": identity.get("gradient_t_relative_error"),
+        "negative_control_max_active_relative_residual": negative_active_residual.get("max"),
+    }
+
+
+def _diagnostic_failure_summary(
+    diagnostic: Mapping[str, Any], *, diagnostic_thresholds: Mapping[str, float]
+) -> dict[str, Any]:
+    """Summarize failures using only the already-computed diagnostic fields."""
+    layers = _as_mapping(diagnostic.get("layers"))
+    failed_checks: dict[str, list[str]] = {}
+    failure_reasons: list[str] = []
+    for layer_name in ("q0", "q1"):
+        layer = _as_mapping(layers.get(layer_name))
+        checks = _as_mapping(layer.get("checks"))
+        failures = [name for name, passed in checks.items() if passed is not True]
+        if layer and layer.get("passed") is False and not failures:
+            failures.append("layer_passed_false_without_named_check")
+        failed_checks[layer_name] = failures
+        failure_reasons.extend(f"{layer_name}.{name}" for name in failures)
+    if diagnostic.get("passed") is False and not failure_reasons:
+        failure_reasons.append("diagnostic.passed_false_without_layer_reason")
+    return {
+        "passed": bool(diagnostic.get("passed", False)),
+        "failure_reasons": failure_reasons,
+        "failed_checks": failed_checks,
+        "q0": _diagnostic_layer_summary(_as_mapping(layers.get("q0"))),
+        "q1": _diagnostic_layer_summary(_as_mapping(layers.get("q1"))),
+        "diagnostic_thresholds": dict(diagnostic_thresholds),
+    }
+
+
+def _gradient_diagnostic_sidecar_path(output_path: Path) -> Path:
+    """Derive the required sidecar name from one requested JSONL result path."""
+    return output_path.with_suffix(".gradient_diagnostic.json")
+
+
+def _write_gradient_diagnostic_failure_sidecar(
+    *,
+    output_path: Path,
+    diagnostic: Mapping[str, Any],
+    diagnostic_thresholds: Mapping[str, float],
+) -> Path:
+    """Atomically replace the failure sidecar before refusing to start DAGER."""
+    sidecar_path = _gradient_diagnostic_sidecar_path(output_path)
+    try:
+        requested_output = output_path.relative_to(REPOSITORY_ROOT).as_posix()
+    except ValueError as error:
+        raise NoneAttackScriptError(f"Diagnostic output is outside repository root: {output_path}.") from error
+    document: dict[str, Any] = {
+        "schema_version": 1,
+        "record_type": "qwen3_gradient_diagnostic_failure",
+        "status": "failed_gradient_diagnostic",
+        "attack_name": ATTACK_NAME,
+        "defense": "none",
+        "requested_output": requested_output,
+        "diagnostic_summary": _diagnostic_failure_summary(
+            diagnostic,
+            diagnostic_thresholds=diagnostic_thresholds,
+        ),
+        "gradient_diagnostic": diagnostic,
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        payload = canonical_json_bytes(document).decode("utf-8") + "\n"
+    except HashingError as error:
+        raise NoneAttackScriptError(f"Diagnostic failure sidecar is not JSON-serializable: {error}") from error
+
+    temporary_path: Path | None = None
+    try:
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=sidecar_path.parent,
+            prefix=f".{sidecar_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(payload)
+            temporary_path = Path(handle.name)
+        temporary_path.replace(sidecar_path)
+    except OSError as error:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise NoneAttackScriptError(
+            f"Unable to write required gradient diagnostic failure sidecar {sidecar_path}: {error}"
+        ) from error
+    return sidecar_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -212,7 +344,15 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         **diagnostic_controls,
     )
     if not diagnostic["passed"]:
-        raise NoneAttackScriptError("Qwen3 gradient diagnostic failed; refusing to run DAGER with an unverified orientation.")
+        sidecar_path = _write_gradient_diagnostic_failure_sidecar(
+            output_path=output_path,
+            diagnostic=diagnostic,
+            diagnostic_thresholds=diagnostic_controls,
+        )
+        raise NoneAttackScriptError(
+            "Qwen3 gradient diagnostic failed; details were written to "
+            f"{sidecar_path}. Refusing to run DAGER with an unverified orientation."
+        )
 
     attack_started = perf_counter()
     adapter = Qwen3RoPEDagerAdapter(bundle.model, bundle.tokenizer)
