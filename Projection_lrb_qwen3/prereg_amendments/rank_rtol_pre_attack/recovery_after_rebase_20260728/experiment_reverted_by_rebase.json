@@ -18,7 +18,7 @@
       0.001
     ],
     "rank_tol": [
-      0.001
+      null
     ],
     "rank_cutoff": [
       20

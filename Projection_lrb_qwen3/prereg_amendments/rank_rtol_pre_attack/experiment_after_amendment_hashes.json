@@ -1,0 +1,12 @@
+{
+  "raw_file_sha256": "de89032229c845d4e33bf36a12d8218eb34924753db619e1a30929278f0b8bfd",
+  "canonical_config_sha256": "01946fd9195c4efff9cb5f82f20e0936aba6f63ef97d385e01ae340bc4f2c70c",
+  "canonicalization": {
+    "sort_keys": true,
+    "separators": [
+      ",",
+      ":"
+    ],
+    "ensure_ascii": false
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "raw_preregistration_file_sha256": "133c22d84be6c401ff1b23d7d1cf3f54d618ee9237abeeff7072ff27a71bbd87",
+  "generator_preregistration_protocol_sha256": "f52e6d46764a969a6614e192286f512b85e880199f6bbb2b2235792157142c48",
+  "note": "The raw file-byte SHA256 and generator protocol/object SHA256 are distinct hash domains and are not expected to match."
+}

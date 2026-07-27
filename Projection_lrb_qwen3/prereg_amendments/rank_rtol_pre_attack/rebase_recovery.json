@@ -1,0 +1,16 @@
+{
+  "event": "protocol_amendment_reapplied_after_git_rebase",
+  "created_at_utc": "2026-07-27T21:12:52.449596+00:00",
+  "reverted_protocol_sha256": "7b4135f1b3d7d19f74e42bf3f81b2f4e85cb8f67a3308197882804c18a7d9978",
+  "reapplied_protocol_sha256": "f52e6d46764a969a6614e192286f512b85e880199f6bbb2b2235792157142c48",
+  "rank_tol": [
+    0.001
+  ],
+  "sample_lists_changed": false,
+  "head_seeds_changed": false,
+  "attack_reconstruction_results_observed": false,
+  "failed_runs_before_recovery": [
+    "gradient diagnostic fail-closed before DAGER search",
+    "rank_tol=None protocol fail-closed before model/gradient diagnostics"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "amendment_type": "pre_attack_protocol_correction",
+  "created_at_utc": "2026-07-27T20:28:13.882756+00:00",
+  "field": "calibration_parameter_grid.rank_tol",
+  "old_value": [
+    null
+  ],
+  "new_value": [
+    0.001
+  ],
+  "reason": "The original null value represented legacy absolute/default matrix-rank semantics. The Qwen3 BF16 adapter now uses an explicit relative SVD threshold, requiring a positive numeric rtol.",
+  "selection_basis": "1e-3 was already used by the preregistered gradient diagnostics and BF16 rank regression tests; it was not selected using DAGER recovery results.",
+  "attack_results_observed_before_amendment": false,
+  "sample_lists_changed": false,
+  "head_seeds_changed": false,
+  "attack_thresholds_changed": false,
+  "search_budgets_changed": false
+}
