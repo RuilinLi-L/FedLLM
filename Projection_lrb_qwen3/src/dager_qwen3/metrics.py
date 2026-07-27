@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import importlib.metadata
+import inspect
+import math
+import os
+from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 
@@ -15,6 +21,33 @@ class RougeMetricProtocol(Protocol):
 
     def compute(self, *, predictions: list[str], references: list[str]) -> Any:
         """Compute the existing repository ROUGE result object."""
+
+
+@dataclass(frozen=True)
+class LegacyRougeBackend:
+    """Verified provenance for the legacy cached ``datasets`` ROUGE backend."""
+
+    metric: RougeMetricProtocol
+    backend: str
+    datasets_version: str
+    metric_script_sha256: str
+    self_test_rouge_1: float
+    self_test_rouge_2: float
+
+    def json_metadata(self) -> dict[str, Any]:
+        """Return only JSON-serializable ROUGE provenance for an attack row."""
+        return {
+            "backend": self.backend,
+            "datasets_version": self.datasets_version,
+            "metric_script_sha256": self.metric_script_sha256,
+            "hf_datasets_offline": "1",
+            "hf_hub_offline": "1",
+            "self_test": {
+                "kind": "fixed_exact_match",
+                "rouge_1": self.self_test_rouge_1,
+                "rouge_2": self.self_test_rouge_2,
+            },
+        }
 
 
 @dataclass(frozen=True)
@@ -70,19 +103,53 @@ def _decoded_text(tokenizer: Any, token_ids: tuple[int, ...], eos_token_id: int)
     return text
 
 
-def load_existing_dager_rouge_metric() -> RougeMetricProtocol:
-    """Load the exact offline ROUGE metric interface used by existing DAGER scripts.
-
-    The repository's GPT-2 DAGER entrypoints use ``datasets.load_metric('rouge')``.
-    This function intentionally has no network call or simplified metric fallback:
-    if the local metric cache/package is unavailable, the attack fails explicitly.
-    """
+def _legacy_rouge_f1_from_result(result: Any, key: str) -> float:
+    """Extract one legacy ``datasets.load_metric`` F1 score with validation."""
     try:
-        from datasets import load_metric
-    except ImportError as error:
+        value = float(result[key].mid.fmeasure)
+    except Exception as error:
+        raise AttackMetricsError(f"Existing DAGER ROUGE computation failed for {key}: {error}") from error
+    if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        raise AttackMetricsError(f"Existing DAGER ROUGE {key} is not finite in [0, 1]: {value}.")
+    return value
+
+
+def _metric_script_sha256(metric: RougeMetricProtocol) -> str:
+    """Hash the exact cached legacy metric script rather than its package name."""
+    try:
+        source_file = inspect.getfile(type(metric))
+    except (OSError, TypeError) as error:
+        raise AttackMetricsError("Unable to identify the loaded legacy ROUGE metric script.") from error
+    metric_script = Path(source_file).resolve()
+    if not metric_script.is_file():
+        raise AttackMetricsError(f"Legacy ROUGE metric script is not a readable file: {metric_script}.")
+    try:
+        return hashlib.sha256(metric_script.read_bytes()).hexdigest()
+    except OSError as error:
+        raise AttackMetricsError(f"Unable to hash legacy ROUGE metric script {metric_script}: {error}") from error
+
+
+def preflight_legacy_dager_rouge_backend() -> LegacyRougeBackend:
+    """Verify the cached legacy ROUGE backend before a model is loaded.
+
+    This is intentionally the only ROUGE backend accepted by the Qwen3 attack:
+    ``datasets.load_metric('rouge')``.  Offline variables are force-set before
+    importing ``datasets`` and remain enabled for the process, so a cache miss
+    cannot turn into a download.  There is no ``evaluate`` or custom fallback.
+    """
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    try:
+        import datasets
+    except Exception as error:
         raise AttackMetricsError(
             "datasets.load_metric('rouge') is required for the existing DAGER ROUGE definition."
         ) from error
+    load_metric = getattr(datasets, "load_metric", None)
+    if not callable(load_metric):
+        raise AttackMetricsError(
+            "Installed datasets does not expose datasets.load_metric; the legacy DAGER ROUGE backend is unavailable."
+        )
     try:
         metric = load_metric("rouge")
     except Exception as error:
@@ -91,19 +158,46 @@ def load_existing_dager_rouge_metric() -> RougeMetricProtocol:
         ) from error
     if not callable(getattr(metric, "compute", None)):
         raise AttackMetricsError("datasets.load_metric('rouge') returned an object without compute().")
-    return metric
+    datasets_version = getattr(datasets, "__version__", None)
+    if not isinstance(datasets_version, str) or not datasets_version:
+        try:
+            datasets_version = importlib.metadata.version("datasets")
+        except importlib.metadata.PackageNotFoundError as error:
+            raise AttackMetricsError("Unable to determine the datasets version for ROUGE provenance.") from error
+    fixed_exact_match = "qwen3 dager legacy rouge preflight"
+    try:
+        self_test_result = metric.compute(
+            predictions=[fixed_exact_match],
+            references=[fixed_exact_match],
+        )
+        rouge_1 = _legacy_rouge_f1_from_result(self_test_result, "rouge1")
+        rouge_2 = _legacy_rouge_f1_from_result(self_test_result, "rouge2")
+    except AttackMetricsError:
+        raise
+    except Exception as error:
+        raise AttackMetricsError(f"Legacy ROUGE exact-match self-test failed: {error}") from error
+    if not math.isclose(rouge_1, 1.0, rel_tol=0.0, abs_tol=1e-12) or not math.isclose(
+        rouge_2, 1.0, rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise AttackMetricsError(
+            "Legacy ROUGE exact-match self-test did not return ROUGE-1=ROUGE-2=1.0; refusing to run attack."
+        )
+    return LegacyRougeBackend(
+        metric=metric,
+        backend="datasets.load_metric('rouge')",
+        datasets_version=datasets_version,
+        metric_script_sha256=_metric_script_sha256(metric),
+        self_test_rouge_1=rouge_1,
+        self_test_rouge_2=rouge_2,
+    )
 
 
 def _legacy_rouge_f1(metric: RougeMetricProtocol, prediction: str, reference: str, key: str) -> float:
     try:
         result = metric.compute(predictions=[prediction], references=[reference])
-        score = result[key].mid.fmeasure
-        value = float(score)
     except Exception as error:
         raise AttackMetricsError(f"Existing DAGER ROUGE computation failed for {key}: {error}") from error
-    if value < 0.0 or value > 1.0:
-        raise AttackMetricsError(f"Existing DAGER ROUGE {key} is outside [0, 1]: {value}.")
-    return value
+    return _legacy_rouge_f1_from_result(result, key)
 
 
 def compute_attack_metrics(
