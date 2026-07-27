@@ -38,7 +38,7 @@ from src.dager_qwen3.gradient_decomposition import (
 )
 from src.dager_qwen3.layer1_filter import filter_qwen3_vocab_layer1
 from src.dager_qwen3.layer2_decoder import Layer2DecoderConfig, decode_qwen3_rope_prefixes
-from src.dager_qwen3.metrics import compute_attack_metrics, load_existing_dager_rouge_metric
+from src.dager_qwen3.metrics import compute_attack_metrics, preflight_legacy_dager_rouge_backend
 from src.dager_qwen3.model_adapter import Qwen3RoPEDagerAdapter
 from src.gradient_capture import build_canonical_gradient_manifest, capture_single_example_gradients
 from src.qwen3_classifier import load_local_qwen3_sequence_classifier
@@ -155,12 +155,14 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
     """Execute capture, raw-gradient DAGER decomposition, filtering, and decoding."""
     if args.defense != "none":
         raise NoneAttackScriptError("This entrypoint only permits defense=none.")
+    # Deliberately first: an unavailable cached legacy ROUGE definition must
+    # reject the request before config/model work can begin.
+    rouge_backend = preflight_legacy_dager_rouge_backend()
     config_path = _resolve_repository_path(args.config, description="config path")
     config: ExperimentConfig = load_experiment_config(config_path)
     registered_head_seed(config, stage=args.stage, requested_seed=args.head_seed)
     sample = load_registered_sample(config=config, stage=args.stage, sample_key=args.sample_key)
     controls = load_none_attack_controls(config)
-    rouge_metric = load_existing_dager_rouge_metric()
     output_path = _resolve_repository_path(args.output, description="output path")
     outputs_root = (QWEN_ROOT / "outputs").resolve()
     try:
@@ -214,7 +216,7 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
 
     attack_started = perf_counter()
     adapter = Qwen3RoPEDagerAdapter(bundle.model, bundle.tokenizer)
-    shared_rank, shared_raw_ranks = shared_dager_rank_for_qwen3_qproj_gradients(
+    shared_rank = shared_dager_rank_for_qwen3_qproj_gradients(
         captured.q_gradients,
         feature_dim=adapter.metadata.hidden_size,
         rank_tolerance=controls.rank_tolerance,
@@ -227,7 +229,7 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         rank_tolerance=controls.rank_tolerance,
         rank_cutoff=controls.rank_cutoff,
         decomposition_device=bundle.device,
-        shared_truncated_rank=shared_rank,
+        shared_truncated_rank=shared_rank.applied_shared_rank,
     )
     q1_span = decompose_qwen3_qproj_gradient(
         captured.q_gradients[1],
@@ -235,7 +237,7 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         rank_tolerance=controls.rank_tolerance,
         rank_cutoff=controls.rank_cutoff,
         decomposition_device=bundle.device,
-        shared_truncated_rank=shared_rank,
+        shared_truncated_rank=shared_rank.applied_shared_rank,
     )
     layer1 = filter_qwen3_vocab_layer1(
         adapter=adapter,
@@ -267,7 +269,7 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         ground_truth_token_ids=sample.input_ids,
         reconstructed_token_ids=layer2.selected_token_ids,
         eos_token_id=sample.eos_token_id,
-        rouge_metric=rouge_metric,
+        rouge_metric=rouge_backend.metric,
     )
     identity = _result_identity(
         preregistration_sha256=sample.preregistration_sha256,
@@ -299,14 +301,25 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         "exact_recovery": metrics.exact_recovery,
         "rouge_1": metrics.rouge_1,
         "rouge_2": metrics.rouge_2,
+        "legacy_rouge_backend": rouge_backend.json_metadata(),
         "empty_reconstruction": metrics.empty_reconstruction,
         "layer_1_candidate_count": layer1.candidate_count,
         "layer_1_decoder_candidate_count": len(candidate_provider.token_ids),
         "layer_1_rank": q0_span.truncated_rank,
-        "layer_1_raw_rank": shared_raw_ranks[0],
+        "layer_1_effective_rank": shared_rank.q0_effective_rank,
         "layer_2_rank": q1_span.truncated_rank,
-        "layer_2_raw_rank": shared_raw_ranks[1],
-        "shared_dager_rank": shared_rank,
+        "layer_2_effective_rank": shared_rank.q1_effective_rank,
+        "rank_definition": shared_rank.rank_definition,
+        "rank_rtol": shared_rank.rank_rtol,
+        "q0_effective_rank": shared_rank.q0_effective_rank,
+        "q1_effective_rank": shared_rank.q1_effective_rank,
+        "q0_relative_threshold": shared_rank.q0_relative_threshold,
+        "q1_relative_threshold": shared_rank.q1_relative_threshold,
+        "requested_shared_rank": shared_rank.requested_shared_rank,
+        "applied_shared_rank": shared_rank.applied_shared_rank,
+        "rank_was_capped": shared_rank.rank_was_capped,
+        "rank_cap": shared_rank.rank_cap,
+        "cap_reason": shared_rank.cap_reason,
         "attack_time_seconds": attack_seconds,
         "gradient_capture_time_seconds": capture_seconds,
         "loss": captured.loss,
@@ -314,7 +327,8 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         "thresholds": {
             "l1_span_thresh": controls.l1_span_threshold,
             "l2_span_thresh": controls.l2_span_threshold,
-            "rank_tol": controls.rank_tolerance,
+            "rank_rtol": controls.rank_tolerance,
+            "rank_definition": "relative_svd_threshold",
             "rank_cutoff": controls.rank_cutoff,
             "distance_norm": "l2",
         },

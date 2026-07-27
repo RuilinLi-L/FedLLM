@@ -1,4 +1,4 @@
-"""DAGER span decomposition for the native Qwen3 ``nn.Linear`` orientation."""
+"""Relative-SVD DAGER span decomposition for native Qwen3 ``nn.Linear`` gradients."""
 
 from __future__ import annotations
 
@@ -6,140 +6,237 @@ from dataclasses import dataclass
 
 import torch
 
-from utils.functional import get_layer_decomp, torch_matrix_rank
+from utils.functional import get_layer_decomp
 
 
 class GradientDecompositionError(RuntimeError):
     """Raised when a q_proj gradient cannot define an honest DAGER span."""
 
 
+RANK_DEFINITION = "relative_svd_threshold"
+
+
+@dataclass(frozen=True)
+class RelativeSvdRank:
+    """The predeclared effective rank of one raw Qwen3 q_proj gradient."""
+
+    effective_rank: int
+    relative_threshold: float
+    largest_singular_value: float
+
+
+@dataclass(frozen=True)
+class RankApplication:
+    """One explicit application of unavoidable decomposition caps."""
+
+    requested_rank: int
+    applied_rank: int
+    rank_cap: int
+    rank_was_capped: bool
+    cap_reason: str | None
+
+
+@dataclass(frozen=True)
+class SharedDagerRank:
+    """Shared two-layer DAGER rank selected before any span basis is constructed."""
+
+    rank_definition: str
+    rank_rtol: float
+    q0_effective_rank: int
+    q1_effective_rank: int
+    q0_relative_threshold: float
+    q1_relative_threshold: float
+    requested_shared_rank: int
+    applied_shared_rank: int
+    rank_cap: int
+    rank_was_capped: bool
+    cap_reason: str | None
+
+
 @dataclass(frozen=True)
 class GradientSpan:
-    """One fixed-orientation q_proj row-space basis and its DAGER rank metadata."""
+    """A fixed-orientation q_proj row-space basis plus relative-rank metadata."""
 
     basis: torch.Tensor
-    raw_rank: int
-    truncated_rank: int
+    effective_rank: int
+    relative_threshold: float
+    largest_singular_value: float
+    requested_rank: int
+    applied_rank: int
+    rank_cap: int
+    rank_was_capped: bool
+    cap_reason: str | None
     feature_dim: int
     gradient_shape: tuple[int, int]
-    rank_tolerance: float | None
+    rank_rtol: float
     rank_cutoff: int
     orientation: str
     decomposition_device: str
 
+    @property
+    def truncated_rank(self) -> int:
+        """Compatibility alias for callers that name the applied DAGER basis width B."""
+        return self.applied_rank
 
-def _validate_rank_controls(*, rank_tolerance: float | None, rank_cutoff: int) -> None:
-    if rank_tolerance is not None and (
+
+def _validate_rank_controls(*, rank_tolerance: float, rank_cutoff: int) -> None:
+    if (
         isinstance(rank_tolerance, bool)
         or not isinstance(rank_tolerance, (int, float))
-        or float(rank_tolerance) < 0.0
         or not torch.isfinite(torch.tensor(float(rank_tolerance)))
+        or float(rank_tolerance) <= 0.0
     ):
         raise GradientDecompositionError(
-            f"rank_tolerance must be None or one finite non-negative float, got {rank_tolerance!r}."
+            f"rank_tolerance must be one finite positive relative tolerance, got {rank_tolerance!r}."
         )
     if isinstance(rank_cutoff, bool) or not isinstance(rank_cutoff, int) or rank_cutoff < 0:
         raise GradientDecompositionError(f"rank_cutoff must be a non-negative integer, got {rank_cutoff!r}.")
+
+
+def _validate_qwen3_linear_orientation(gradient: torch.Tensor, *, feature_dim: int, layer_name: str) -> int:
+    if not isinstance(gradient, torch.Tensor) or gradient.ndim != 2:
+        raise GradientDecompositionError(f"{layer_name} gradient must be one rank-2 tensor.")
+    if not gradient.is_floating_point() or not bool(torch.isfinite(gradient).all()):
+        raise GradientDecompositionError(f"{layer_name} gradient must be finite and floating point.")
+    if isinstance(feature_dim, bool) or not isinstance(feature_dim, int) or feature_dim <= 0:
+        raise GradientDecompositionError(f"feature_dim must be positive, got {feature_dim!r}.")
+    if int(gradient.shape[1]) != feature_dim:
+        raise GradientDecompositionError(
+            f"{layer_name} q_proj raw gradient must retain nn.Linear orientation [d_out, d_in]; "
+            f"got shape {tuple(gradient.shape)} and expected d_in={feature_dim} in the final dimension. "
+            "GPT-2 Conv1D-style gradient transpose is forbidden."
+        )
+    return min(int(gradient.shape[0]), int(gradient.shape[1]))
+
+
+def relative_svd_rank(gradient: torch.Tensor, *, rank_tolerance: float) -> RelativeSvdRank:
+    """Compute one effective rank from ``gradient.detach().float()`` exactly once."""
+    _validate_rank_controls(rank_tolerance=rank_tolerance, rank_cutoff=0)
+    if not isinstance(gradient, torch.Tensor) or gradient.ndim != 2:
+        raise GradientDecompositionError("Relative SVD rank requires one rank-2 gradient tensor.")
+    matrix = gradient.detach().float()
+    if not bool(torch.isfinite(matrix).all()):
+        raise GradientDecompositionError("Relative SVD rank requires finite gradient values.")
+    try:
+        singular_values = torch.linalg.svdvals(matrix)
+    except Exception as error:
+        raise GradientDecompositionError(
+            f"FP32 torch.linalg.svdvals failed: {type(error).__name__}: {error}"
+        ) from error
+    if singular_values.numel() == 0 or not bool(torch.isfinite(singular_values).all()):
+        raise GradientDecompositionError("FP32 singular-value computation returned no finite singular values.")
+    largest = float(singular_values[0].item())
+    if largest <= 0.0:
+        raise GradientDecompositionError("A zero q_proj gradient has no positive relative-SVD DAGER rank.")
+    threshold = largest * float(rank_tolerance)
+    effective_rank = int(torch.count_nonzero(singular_values >= threshold).item())
+    if effective_rank <= 0:
+        raise GradientDecompositionError(
+            f"Relative-SVD effective rank is zero at threshold={threshold} with rank_rtol={rank_tolerance}."
+        )
+    return RelativeSvdRank(
+        effective_rank=effective_rank,
+        relative_threshold=threshold,
+        largest_singular_value=largest,
+    )
+
+
+def _apply_rank_cap(
+    *, requested_rank: int,
+    feature_dim: int,
+    rank_cutoff: int,
+    matrix_rank_cap: int,
+) -> RankApplication:
+    if requested_rank <= 0:
+        raise GradientDecompositionError(f"requested rank must be positive, got {requested_rank}.")
+    feature_cap = feature_dim - rank_cutoff
+    if feature_cap <= 0:
+        raise GradientDecompositionError(
+            f"feature_dim-rank_cutoff must be positive, got {feature_dim}-{rank_cutoff}."
+        )
+    if matrix_rank_cap <= 0:
+        raise GradientDecompositionError(f"matrix rank cap must be positive, got {matrix_rank_cap}.")
+    rank_cap = min(feature_cap, matrix_rank_cap)
+    applied_rank = min(requested_rank, rank_cap)
+    reasons: list[str] = []
+    if requested_rank > feature_cap:
+        reasons.append("feature_dim_minus_rank_cutoff")
+    if requested_rank > matrix_rank_cap:
+        reasons.append("matrix_dimension")
+    return RankApplication(
+        requested_rank=requested_rank,
+        applied_rank=applied_rank,
+        rank_cap=rank_cap,
+        rank_was_capped=bool(reasons),
+        cap_reason="+".join(reasons) if reasons else None,
+    )
 
 
 def decompose_qwen3_qproj_gradient(
     gradient: torch.Tensor,
     *,
     feature_dim: int,
-    rank_tolerance: float | None,
+    rank_tolerance: float,
     rank_cutoff: int,
     decomposition_device: torch.device,
     shared_truncated_rank: int | None = None,
 ) -> GradientSpan:
-    """Build the raw ``G`` row-space basis without a GPT-2 Conv1D transpose.
+    """Build raw-``G`` right-singular DAGER basis with relative-SVD rank semantics.
 
-    Qwen3 q_proj is ``nn.Linear(d_in, d_out)`` and its PyTorch gradient has
-    shape ``[d_out, d_in]``.  Therefore the DAGER candidate representation is
-    tested against the *right* singular vectors of raw ``G``.  The legacy
-    ``torch_matrix_rank`` and ``get_layer_decomp`` helpers retain the existing
-    absolute-tolerance/rank-cutoff semantics.
+    Qwen3 ``q_proj`` uses ``nn.Linear(d_in, d_out)`` and PyTorch reports
+    ``G`` as ``[d_out, d_in]``.  The final dimension must therefore remain
+    ``d_in``; no GPT-2 Conv1D transpose is ever attempted.  The existing
+    ``get_layer_decomp`` helper remains only a basis extractor and always
+    receives the explicitly selected applied rank.
     """
     _validate_rank_controls(rank_tolerance=rank_tolerance, rank_cutoff=rank_cutoff)
-    if not isinstance(gradient, torch.Tensor) or gradient.ndim != 2:
+    matrix_rank_cap = _validate_qwen3_linear_orientation(gradient, feature_dim=feature_dim, layer_name="q_proj")
+    relative = relative_svd_rank(gradient, rank_tolerance=rank_tolerance)
+    requested_rank = relative.effective_rank if shared_truncated_rank is None else shared_truncated_rank
+    if isinstance(requested_rank, bool) or not isinstance(requested_rank, int) or requested_rank <= 0:
         raise GradientDecompositionError(
-            f"Qwen3 q_proj gradient must be rank 2, got {type(gradient).__name__} "
-            f"with shape {getattr(gradient, 'shape', None)}."
+            f"shared_truncated_rank must be absent or a positive integer, got {shared_truncated_rank!r}."
         )
-    if not gradient.is_floating_point() or not bool(torch.isfinite(gradient).all()):
-        raise GradientDecompositionError("Qwen3 q_proj gradient must be finite and floating point.")
-    if isinstance(feature_dim, bool) or not isinstance(feature_dim, int) or feature_dim <= 0:
-        raise GradientDecompositionError(f"feature_dim must be positive, got {feature_dim!r}.")
-    if int(gradient.shape[1]) != feature_dim:
-        raise GradientDecompositionError(
-            "Qwen3 q_proj raw gradient must retain nn.Linear orientation [d_out, d_in]; "
-            f"got shape {tuple(gradient.shape)} and expected d_in={feature_dim} in the final dimension. "
-            "Do not transpose it as GPT-2 Conv1D gradients are transposed."
-        )
-    rank_cap = min(int(gradient.shape[0]), int(gradient.shape[1]))
+    application = _apply_rank_cap(
+        requested_rank=requested_rank,
+        feature_dim=feature_dim,
+        rank_cutoff=rank_cutoff,
+        matrix_rank_cap=matrix_rank_cap,
+    )
     try:
-        raw_rank = torch_matrix_rank(
-            gradient,
-            tol=None if rank_tolerance is None else float(rank_tolerance),
-            device=decomposition_device,
-            upcast=True,
-        )
-    except Exception as error:
-        raise GradientDecompositionError(
-            f"DAGER rank computation failed on {decomposition_device}: {type(error).__name__}: {error}"
-        ) from error
-    if shared_truncated_rank is None:
-        truncated_rank = min(raw_rank, feature_dim - rank_cutoff, rank_cap)
-    else:
-        if (
-            isinstance(shared_truncated_rank, bool)
-            or not isinstance(shared_truncated_rank, int)
-            or shared_truncated_rank <= 0
-        ):
-            raise GradientDecompositionError(
-                f"shared_truncated_rank must be one positive integer, got {shared_truncated_rank!r}."
-            )
-        truncated_rank = shared_truncated_rank
-        if truncated_rank > min(feature_dim - rank_cutoff, rank_cap):
-            raise GradientDecompositionError(
-                f"shared_truncated_rank={truncated_rank} exceeds this layer's cap "
-                f"min(feature_dim-rank_cutoff={feature_dim-rank_cutoff}, rank_cap={rank_cap})."
-            )
-    if truncated_rank <= 0:
-        raise GradientDecompositionError(
-            "DAGER rank became non-positive after the legacy rank cutoff: "
-            f"raw_rank={raw_rank}, feature_dim={feature_dim}, rank_cutoff={rank_cutoff}, rank_cap={rank_cap}."
-        )
-    try:
-        # Upcast before invoking the legacy helper, so its documented return cast
-        # remains FP32 rather than returning a BF16 basis for span distances.
+        # Upcast before the legacy basis helper so its output remains FP32.  B
+        # is already fixed above; this call must not choose rank on its own.
         _rank, basis = get_layer_decomp(
-            gradient.detach().to(dtype=torch.float32),
-            B=truncated_rank,
-            tol=None if rank_tolerance is None else float(rank_tolerance),
+            gradient.detach().float(),
+            B=application.applied_rank,
+            tol=None,
             upcast=False,
             device=decomposition_device,
         )
     except Exception as error:
         raise GradientDecompositionError(
-            f"DAGER SVD decomposition failed on {decomposition_device}: {type(error).__name__}: {error}"
+            f"DAGER basis decomposition failed on {decomposition_device}: {type(error).__name__}: {error}"
         ) from error
-    # ``utils.functional.get_layer_decomp`` returns the legacy DAGER layout
-    # ``[rank, feature]``.  Its paired ``check_if_in_span`` einsum consumes
-    # exactly this layout, so preserve it rather than transposing the basis.
-    if basis.ndim != 2 or tuple(basis.shape) != (truncated_rank, feature_dim):
+    if basis.ndim != 2 or tuple(basis.shape) != (application.applied_rank, feature_dim):
         raise GradientDecompositionError(
-            f"Legacy DAGER decomposition returned basis shape {tuple(basis.shape)}, expected "
-            f"({truncated_rank}, {feature_dim})."
+            f"Legacy DAGER basis shape {tuple(basis.shape)} differs from expected "
+            f"({application.applied_rank}, {feature_dim})."
         )
     if not bool(torch.isfinite(basis).all()):
         raise GradientDecompositionError("DAGER basis contains non-finite values.")
     return GradientSpan(
         basis=basis.detach().to(device=gradient.device, dtype=torch.float32),
-        raw_rank=raw_rank,
-        truncated_rank=truncated_rank,
+        effective_rank=relative.effective_rank,
+        relative_threshold=relative.relative_threshold,
+        largest_singular_value=relative.largest_singular_value,
+        requested_rank=application.requested_rank,
+        applied_rank=application.applied_rank,
+        rank_cap=application.rank_cap,
+        rank_was_capped=application.rank_was_capped,
+        cap_reason=application.cap_reason,
         feature_dim=feature_dim,
         gradient_shape=(int(gradient.shape[0]), int(gradient.shape[1])),
-        rank_tolerance=None if rank_tolerance is None else float(rank_tolerance),
+        rank_rtol=float(rank_tolerance),
         rank_cutoff=rank_cutoff,
         orientation="raw_qwen3_nn_linear_gradient_right_singular_vectors",
         decomposition_device=str(decomposition_device),
@@ -150,44 +247,41 @@ def shared_dager_rank_for_qwen3_qproj_gradients(
     gradients: tuple[torch.Tensor, torch.Tensor],
     *,
     feature_dim: int,
-    rank_tolerance: float | None,
+    rank_tolerance: float,
     rank_cutoff: int,
     decomposition_device: torch.device,
-) -> tuple[int, tuple[int, int]]:
-    """Apply legacy DAGER's shared ``B=max(rank_l)`` rule to q0/q1 gradients."""
+) -> SharedDagerRank:
+    """Select q0/q1's shared rank by the predeclared relative-SVD rule only.
+
+    Captured activations, output gradients, text, and diagnostic rank caps are
+    intentionally absent from this function.  Matrix dimensions and the legacy
+    rank cutoff can only constrain the requested rank after it is recorded.
+    """
+    del decomposition_device  # Basis extraction, not rank selection, uses this device.
     _validate_rank_controls(rank_tolerance=rank_tolerance, rank_cutoff=rank_cutoff)
-    raw_ranks: list[int] = []
-    rank_cap: int | None = None
-    for layer_index, gradient in enumerate(gradients):
-        if not isinstance(gradient, torch.Tensor) or gradient.ndim != 2:
-            raise GradientDecompositionError(f"q{layer_index} gradient must be a rank-2 tensor.")
-        if int(gradient.shape[1]) != feature_dim:
-            raise GradientDecompositionError(
-                f"q{layer_index} gradient has final dimension {gradient.shape[1]}, expected d_in={feature_dim}; "
-                "its GPT-2-style transpose is forbidden."
-            )
-        if not bool(torch.isfinite(gradient).all()):
-            raise GradientDecompositionError(f"q{layer_index} gradient contains non-finite values.")
-        try:
-            rank = torch_matrix_rank(
-                gradient,
-                tol=None if rank_tolerance is None else float(rank_tolerance),
-                device=decomposition_device,
-                upcast=True,
-            )
-        except Exception as error:
-            raise GradientDecompositionError(
-                f"DAGER rank computation failed for q{layer_index}: {type(error).__name__}: {error}"
-            ) from error
-        raw_ranks.append(rank)
-        current_cap = min(int(gradient.shape[0]), int(gradient.shape[1]))
-        rank_cap = current_cap if rank_cap is None else min(rank_cap, current_cap)
-    if rank_cap is None:
-        raise GradientDecompositionError("No q_proj gradients were supplied for shared DAGER rank selection.")
-    shared_rank = min(max(raw_ranks), feature_dim - rank_cutoff, rank_cap)
-    if shared_rank <= 0:
-        raise GradientDecompositionError(
-            f"Shared DAGER rank became non-positive: raw_ranks={raw_ranks}, feature_dim={feature_dim}, "
-            f"rank_cutoff={rank_cutoff}, rank_cap={rank_cap}."
-        )
-    return shared_rank, (raw_ranks[0], raw_ranks[1])
+    if len(gradients) != 2:
+        raise GradientDecompositionError("Shared Qwen3 DAGER rank requires exactly q0 and q1 gradients.")
+    q0_matrix_cap = _validate_qwen3_linear_orientation(gradients[0], feature_dim=feature_dim, layer_name="q0")
+    q1_matrix_cap = _validate_qwen3_linear_orientation(gradients[1], feature_dim=feature_dim, layer_name="q1")
+    q0 = relative_svd_rank(gradients[0], rank_tolerance=rank_tolerance)
+    q1 = relative_svd_rank(gradients[1], rank_tolerance=rank_tolerance)
+    requested_shared_rank = max(q0.effective_rank, q1.effective_rank)
+    application = _apply_rank_cap(
+        requested_rank=requested_shared_rank,
+        feature_dim=feature_dim,
+        rank_cutoff=rank_cutoff,
+        matrix_rank_cap=min(q0_matrix_cap, q1_matrix_cap),
+    )
+    return SharedDagerRank(
+        rank_definition=RANK_DEFINITION,
+        rank_rtol=float(rank_tolerance),
+        q0_effective_rank=q0.effective_rank,
+        q1_effective_rank=q1.effective_rank,
+        q0_relative_threshold=q0.relative_threshold,
+        q1_relative_threshold=q1.relative_threshold,
+        requested_shared_rank=requested_shared_rank,
+        applied_shared_rank=application.applied_rank,
+        rank_cap=application.rank_cap,
+        rank_was_capped=application.rank_was_capped,
+        cap_reason=application.cap_reason,
+    )

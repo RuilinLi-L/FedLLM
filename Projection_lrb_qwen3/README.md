@@ -126,9 +126,20 @@ applies the GPT-2 `Conv1D` transpose.  Token candidates are the actual inputs
 to `model.model.layers[0].self_attn.q_proj`, obtained from the local embedding
 table and Qwen3's native RMSNorm.  The vocabulary is scanned in bounded chunks
 whose size comes from the predeclared `attack_budget.parallel` field.
-As in the existing DAGER decomposition, q0/q1 use one shared truncated rank
-`B = max(raw layer ranks)` after the configured rank cutoff; their individual
-raw ranks remain reported.
+For Stage 4, the existing configuration key `rank_tol` is explicitly a
+**relative rank tolerance**.  For each raw, untransposed q_proj gradient, the
+attack computes `torch.linalg.svdvals(gradient.detach().float())`, sets
+`relative_threshold = largest_singular_value * rank_tol`, and counts singular
+values greater than or equal to that threshold.  The requested shared rank is
+`max(q0_effective_rank, q1_effective_rank)`; it never uses captured `H`,
+`Delta`, true text, or a theoretical diagnostic rank cap.
+
+The legacy `feature_dim - rank_cutoff` and matrix-dimension limits may still
+constrain basis extraction.  Such a constraint is not silent: every JSONL row
+records `requested_shared_rank`, `applied_shared_rank`, `rank_cap`,
+`rank_was_capped`, and `cap_reason`, alongside the per-layer relative
+thresholds and effective ranks.  `get_layer_decomp` receives only that explicit
+applied rank to extract the legacy `[rank, feature]` basis.
 
 For layer 2, prefix representations are produced by the native Qwen3 first
 decoder-layer forward with the model's own causal-mask helper, `position_ids`,
@@ -152,15 +163,23 @@ python Projection_lrb_qwen3/scripts/run_none_attack.py \
   --output Projection_lrb_qwen3/outputs/smoke/qwen3_none_attack.jsonl
 ```
 
+Before resolving the config or loading a model, the runner performs a legacy
+ROUGE preflight.  It force-sets `HF_DATASETS_OFFLINE=1` and
+`HF_HUB_OFFLINE=1`, requires `datasets.load_metric` to exist, and loads only
+the cached `datasets.load_metric('rouge')` metric.  A fixed exact-match
+self-test must return ROUGE-1 and ROUGE-2 of exactly `1.0`; any missing cache,
+API, metric script, or self-test failure exits nonzero.  It never downloads a
+metric and never falls back to `evaluate` or a custom ROUGE implementation.
+
 The single JSONL record includes immutable sample/head provenance, true and
 reconstructed token ids/text, aligned token recovery, exact recovery, the same
-offline `datasets.load_metric('rouge')` ROUGE-1/ROUGE-2 definition as existing
-DAGER scripts, empty-reconstruction state, layer-1 candidate counts, both
-DAGER ranks, chunk timing, fixed thresholds/budgets, gradient diagnostics, and
-the final search status.  The required ROUGE metric must already be locally
-available; no network download or substitute metric is used.  Ground truth is
-read only after decoding to report metrics; it is not passed to layer filtering
-or sequence recovery.
+legacy ROUGE-1/ROUGE-2 definition as existing DAGER scripts, and
+`legacy_rouge_backend` provenance (backend identifier, `datasets` version,
+cached metric-script SHA-256, forced-offline values, and self-test result), as
+well as empty-reconstruction state, layer-1 candidate counts, both DAGER
+ranks, chunk timing, fixed thresholds/budgets, gradient diagnostics, and the
+final search status.  Ground truth is read only after decoding to report
+metrics; it is not passed to layer filtering or sequence recovery.
 
 Run the isolated tests with third-party pytest autoload disabled:
 

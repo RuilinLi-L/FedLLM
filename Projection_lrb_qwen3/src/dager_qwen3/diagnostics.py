@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -37,7 +38,7 @@ class NoneAttackControls:
 
     l1_span_threshold: float
     l2_span_threshold: float
-    rank_tolerance: float | None
+    rank_tolerance: float
     rank_cutoff: int
     vocab_chunk_size: int
     decode_batch_size: int
@@ -95,8 +96,7 @@ def load_none_attack_controls(config: ExperimentConfig) -> NoneAttackControls:
     budget = config.attack_budget
     l1 = float(_only_grid_value(grid, "l1_span_thresh"))
     l2 = float(_only_grid_value(grid, "l2_span_thresh"))
-    rank_value = _only_grid_value(grid, "rank_tol", allow_none=True)
-    rank_tolerance = None if rank_value is None else float(rank_value)
+    rank_tolerance = float(_only_grid_value(grid, "rank_tol"))
     rank_cutoff_value = _only_grid_value(grid, "rank_cutoff")
     if isinstance(rank_cutoff_value, bool) or not isinstance(rank_cutoff_value, int) or rank_cutoff_value < 0:
         raise AttackProtocolError("calibration rank_cutoff must be one non-negative integer.")
@@ -108,8 +108,10 @@ def load_none_attack_controls(config: ExperimentConfig) -> NoneAttackControls:
             raise AttackProtocolError(f"{name} must be a positive integer, got {value!r}.")
     if isinstance(max_ids, bool) or not isinstance(max_ids, int) or max_ids == 0 or max_ids < -1:
         raise AttackProtocolError("attack_budget.max_ids must be -1 or a positive integer.")
-    if not (l1 > 0.0 and l2 > 0.0):
-        raise AttackProtocolError("Locked l1_span_thresh and l2_span_thresh must both be positive.")
+    if not all(math.isfinite(value) and value > 0.0 for value in (l1, l2, rank_tolerance)):
+        raise AttackProtocolError(
+            "Locked l1_span_thresh, l2_span_thresh, and rank_tol (relative rank tolerance) must all be positive."
+        )
     # The existing DAGER configuration calls this bounded work unit ``parallel``.
     # It is used as both the chunked vocabulary scan and decoder forward batch,
     # so the scan never materializes the complete vocabulary in FP32.
