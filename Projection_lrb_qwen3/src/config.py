@@ -16,6 +16,7 @@ class PreregistrationConfigError(ValueError):
 
 REQUIRED_FIELDS = (
     "model_path",
+    "dataset_path",
     "max_length",
     "calibration_head_seed",
     "smoke_head_seed",
@@ -36,6 +37,7 @@ class ExperimentConfig:
     repository_root: Path
     project_root: Path
     model_path: Path
+    dataset_path: Path
     output_root: Path
     max_length: int
     min_effective_token_length: int
@@ -104,6 +106,14 @@ def load_experiment_config(config_path: Path) -> ExperimentConfig:
     repository_root = project_root.parent
     model_path = _resolve_from_repository(raw["model_path"], repository_root=repository_root, field_name="model_path")
     _must_be_within(model_path, repository_root, field_name="model_path")
+    dataset_path = _resolve_from_repository(
+        raw["dataset_path"], repository_root=repository_root, field_name="dataset_path"
+    )
+    _must_be_within(dataset_path, repository_root, field_name="dataset_path")
+    if not dataset_path.is_dir():
+        raise PreregistrationConfigError(
+            f"dataset_path must exist and be a directory containing a saved DatasetDict: {dataset_path}"
+        )
     output_root = _resolve_from_repository(raw["output_root"], repository_root=repository_root, field_name="output_root")
     expected_output_root = (project_root / "outputs").resolve()
     if output_root != expected_output_root:
@@ -153,6 +163,7 @@ def load_experiment_config(config_path: Path) -> ExperimentConfig:
         repository_root=repository_root,
         project_root=project_root,
         model_path=model_path,
+        dataset_path=dataset_path,
         output_root=output_root,
         max_length=max_length,
         min_effective_token_length=min_effective_token_length,

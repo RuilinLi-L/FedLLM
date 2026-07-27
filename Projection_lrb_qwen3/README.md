@@ -10,7 +10,9 @@ official GLUE SST-2 validation examples before any attack is allowed to run.
 ## Scope and protocol
 
 - Model: `models/Qwen3-1.7B-Base`, verified as a local Qwen3 model.
-- Dataset: `load_dataset("glue", "sst2", split="validation")` only.
+- Dataset: a local `datasets.DatasetDict` saved at `dataset_path`; the runner
+  reads `DatasetDict["validation"]` only and never calls `load_dataset` or a
+  network backend.  The split must contain `idx`, `sentence`, and `label`.
 - Tokenization: Qwen3 tokenizer with `add_special_tokens=False`; text tokens
   are truncated to `max_length - 1`, then one EOS token is explicitly
   appended.  Version 1 requires `max_length == 32`.
@@ -75,8 +77,8 @@ two equivalent runs have the same protocol identity.
 
 ## Tests
 
-The tests use a fake tokenizer and fake SST-2 loader; they do not download the
-model or dataset.
+The tests use a fake tokenizer and a temporary `DatasetDict.save_to_disk()`
+artifact; they never download the model or dataset.
 
 ```powershell
 python -m unittest discover -s Projection_lrb_qwen3/tests -v

@@ -71,6 +71,15 @@ def hash_file_map(paths: Iterable[Path], *, base_dir: Path) -> dict[str, str]:
     return result
 
 
+def hash_directory_contents(directory: Path) -> tuple[str, dict[str, str]]:
+    """Hash every regular file below a non-empty local data directory."""
+    if not directory.is_dir():
+        raise HashingError(f"Directory hash target does not exist or is not a directory: {directory}")
+    files = [path for path in directory.rglob("*") if path.is_file()]
+    file_hashes = hash_file_map(files, base_dir=directory)
+    return sha256_json(file_hashes), file_hashes
+
+
 def sample_key(*, original_index: int, sentence: str, label: int) -> str:
     """Return the protocol-defined, public sample ordering key."""
     material = f"glue|sst2|validation|{original_index}|{sentence}|{label}"

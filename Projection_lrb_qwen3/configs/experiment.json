@@ -1,5 +1,6 @@
 {
   "model_path": "models/Qwen3-1.7B-Base",
+  "dataset_path": "data/glue_sst2",
   "max_length": 32,
   "min_effective_token_length": 1,
   "calibration_head_seed": null,

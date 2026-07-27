@@ -7,10 +7,18 @@ import importlib.metadata
 import json
 from pathlib import Path
 import subprocess
-from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
+from dataclasses import dataclass
+from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from .config import ExperimentConfig
-from .hashing import HashingError, hash_file_map, hash_sample_list, sample_key, sha256_json
+from .hashing import (
+    HashingError,
+    hash_directory_contents,
+    hash_file_map,
+    hash_sample_list,
+    sample_key,
+    sha256_json,
+)
 from .result_schema import write_or_verify_json, write_or_verify_jsonl
 
 
@@ -29,6 +37,17 @@ class TokenizerProtocol(Protocol):
 
 STAGE_SIZES: Mapping[str, int] = {"calibration": 20, "smoke": 5, "final": 20}
 PROTOCOL_NAME = "qwen3_sst2_preregistration_v1"
+
+
+@dataclass(frozen=True)
+class LocalValidationData:
+    """Validated provenance and rows loaded from one local DatasetDict split."""
+
+    rows: list[Mapping[str, Any]]
+    validation_row_count: int
+    dataset_fingerprint: str
+    directory_contents_sha256: str
+    directory_file_sha256: Mapping[str, str]
 
 
 def _require_model_dir(config: ExperimentConfig) -> None:
@@ -69,22 +88,69 @@ def load_qwen3_tokenizer(config: ExperimentConfig) -> TokenizerProtocol:
     return tokenizer
 
 
-def load_official_sst2_validation(
-    *,
-    loader: Callable[..., Iterable[Mapping[str, Any]]] | None = None,
-) -> list[Mapping[str, Any]]:
-    """Load exactly the official GLUE SST-2 validation split."""
-    if loader is None:
-        try:
-            from datasets import load_dataset
-        except ImportError as error:
-            raise PreregistrationError("datasets is required to load GLUE SST-2 validation.") from error
-        loader = load_dataset
+def load_local_sst2_validation(config: ExperimentConfig) -> LocalValidationData:
+    """Load only ``DatasetDict['validation']`` from the configured local path."""
     try:
-        dataset = loader("glue", "sst2", split="validation")
-    except Exception as error:  # Dataset backends may raise several exception classes.
-        raise PreregistrationError(f"Unable to load official GLUE SST-2 validation split: {error}") from error
-    return list(dataset)
+        from datasets import DatasetDict, load_from_disk
+    except ImportError as error:
+        raise PreregistrationError(
+            "datasets is required to load the configured local DatasetDict; no online fallback exists."
+        ) from error
+    try:
+        dataset_dict = load_from_disk(str(config.dataset_path))
+    except Exception as error:  # datasets backends expose several error classes.
+        raise PreregistrationError(
+            f"Unable to load local DatasetDict from dataset_path={config.dataset_path}; no fallback is permitted: {error}"
+        ) from error
+    if not isinstance(dataset_dict, DatasetDict):
+        raise PreregistrationError(
+            f"dataset_path must load to a DatasetDict, got {type(dataset_dict).__name__}."
+        )
+    if "validation" not in dataset_dict:
+        raise PreregistrationError("Local DatasetDict must contain a 'validation' split.")
+    validation = dataset_dict["validation"]
+    required_columns = {"idx", "sentence", "label"}
+    missing_columns = sorted(required_columns - set(validation.column_names))
+    if missing_columns:
+        raise PreregistrationError(
+            "DatasetDict['validation'] is missing required usable columns: "
+            f"{missing_columns}. idx is mandatory; enumeration fallback is forbidden."
+        )
+    fingerprint = getattr(validation, "_fingerprint", None)
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise PreregistrationError("DatasetDict['validation'] has no usable dataset fingerprint.")
+    rows = list(validation)
+    seen_indices: set[int] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise PreregistrationError("DatasetDict['validation'] contains a non-mapping row.")
+        original_index = row.get("idx")
+        sentence = row.get("sentence")
+        label = row.get("label")
+        if isinstance(original_index, bool) or not isinstance(original_index, int):
+            raise PreregistrationError("DatasetDict['validation'] contains a non-integer idx.")
+        if original_index in seen_indices:
+            raise PreregistrationError(f"DatasetDict['validation'] contains duplicate idx={original_index}.")
+        seen_indices.add(original_index)
+        if not isinstance(sentence, str):
+            raise PreregistrationError(
+                f"DatasetDict['validation'] row idx={original_index} has a non-string sentence."
+            )
+        if isinstance(label, bool) or not isinstance(label, int):
+            raise PreregistrationError(
+                f"DatasetDict['validation'] row idx={original_index} has a non-integer label."
+            )
+    try:
+        directory_contents_sha256, directory_file_sha256 = hash_directory_contents(config.dataset_path)
+    except HashingError as error:
+        raise PreregistrationError(str(error)) from error
+    return LocalValidationData(
+        rows=rows,
+        validation_row_count=len(validation),
+        dataset_fingerprint=fingerprint,
+        directory_contents_sha256=directory_contents_sha256,
+        directory_file_sha256=directory_file_sha256,
+    )
 
 
 def _extract_input_ids(tokenizer_output: Mapping[str, Any]) -> list[int]:
@@ -111,15 +177,24 @@ def prepare_eligible_samples(
     if isinstance(eos_token_id, bool) or not isinstance(eos_token_id, int):
         raise PreregistrationError("Tokenizer eos_token_id must be one integer.")
     eligible: list[dict[str, Any]] = []
-    for original_index, row in enumerate(rows):
+    seen_original_indices: set[int] = set()
+    for row in rows:
         if not isinstance(row, Mapping):
-            raise PreregistrationError(f"Dataset row {original_index} is not a mapping.")
+            raise PreregistrationError("Dataset row is not a mapping.")
+        original_index = row.get("idx")
         sentence = row.get("sentence")
         label = row.get("label")
+        if isinstance(original_index, bool) or not isinstance(original_index, int):
+            raise PreregistrationError(
+                "Dataset row has no integer idx; enumeration fallback is forbidden."
+            )
+        if original_index in seen_original_indices:
+            raise PreregistrationError(f"DatasetDict['validation'] contains duplicate idx={original_index}.")
+        seen_original_indices.add(original_index)
         if not isinstance(sentence, str):
-            raise PreregistrationError(f"Dataset row {original_index} has a non-string sentence.")
+            raise PreregistrationError(f"Dataset row idx={original_index} has a non-string sentence.")
         if isinstance(label, bool) or not isinstance(label, int):
-            raise PreregistrationError(f"Dataset row {original_index} has a non-integer label.")
+            raise PreregistrationError(f"Dataset row idx={original_index} has a non-integer label.")
         if not sentence.strip():
             continue
         try:
@@ -131,9 +206,9 @@ def prepare_eligible_samples(
                 return_token_type_ids=False,
             )
         except Exception as error:
-            raise PreregistrationError(f"Tokenizer failed for SST-2 row {original_index}: {error}") from error
+            raise PreregistrationError(f"Tokenizer failed for SST-2 row idx={original_index}: {error}") from error
         if not isinstance(output, Mapping):
-            raise PreregistrationError(f"Tokenizer returned a non-mapping result for row {original_index}.")
+            raise PreregistrationError(f"Tokenizer returned a non-mapping result for row idx={original_index}.")
         untruncated_text_token_ids = _extract_input_ids(output)
         was_truncated = len(untruncated_text_token_ids) > config.max_length - 1
         text_token_ids = untruncated_text_token_ids[: config.max_length - 1]
@@ -142,7 +217,7 @@ def prepare_eligible_samples(
         input_ids = [*text_token_ids, eos_token_id]
         if len(input_ids) > config.max_length:
             raise PreregistrationError(
-                f"Internal truncation failure for row {original_index}: {len(input_ids)} > {config.max_length}."
+                f"Internal truncation failure for row idx={original_index}: {len(input_ids)} > {config.max_length}."
             )
         eligible.append(
             {
@@ -283,6 +358,7 @@ def build_preregistration_document(
     model_key_file_sha256: Mapping[str, str],
     tokenizer_sha256: str,
     tokenizer_key_file_sha256: Mapping[str, str],
+    local_dataset: LocalValidationData,
     created_at: str,
     commit: str,
     versions: Mapping[str, str],
@@ -299,6 +375,10 @@ def build_preregistration_document(
     identity_input = {
         "protocol": PROTOCOL_NAME,
         "dataset": {"builder": "glue", "configuration": "sst2", "split": "validation"},
+        "dataset_path": config.raw["dataset_path"],
+        "validation_row_count": local_dataset.validation_row_count,
+        "dataset_fingerprint": local_dataset.dataset_fingerprint,
+        "dataset_directory_contents_sha256": local_dataset.directory_contents_sha256,
         "config_sha256": config.config_sha256,
         "model_key_file_sha256": dict(model_key_file_sha256),
         "tokenizer_sha256": tokenizer_sha256,
@@ -310,6 +390,11 @@ def build_preregistration_document(
         "protocol": PROTOCOL_NAME,
         "preregistration_sha256": sha256_json(identity_input),
         "dataset": {"builder": "glue", "configuration": "sst2", "split": "validation"},
+        "dataset_path": config.raw["dataset_path"],
+        "validation_row_count": local_dataset.validation_row_count,
+        "dataset_fingerprint": local_dataset.dataset_fingerprint,
+        "dataset_directory_contents_sha256": local_dataset.directory_contents_sha256,
+        "dataset_directory_file_sha256": dict(local_dataset.directory_file_sha256),
         "tokenization_protocol": {
             "add_special_tokens": False,
             "explicit_eos_append": True,
@@ -361,8 +446,8 @@ def preregister_experiment(config_path: Path) -> dict[str, Any]:
 
     config = load_experiment_config(config_path)
     tokenizer = load_qwen3_tokenizer(config)
-    rows = load_official_sst2_validation()
-    eligible = prepare_eligible_samples(rows, tokenizer, config)
+    local_dataset = load_local_sst2_validation(config)
+    eligible = prepare_eligible_samples(local_dataset.rows, tokenizer, config)
     stages = allocate_stages(eligible)
     model_hashes, tokenizer_hash, tokenizer_hashes = collect_model_and_tokenizer_hashes(config)
     document = build_preregistration_document(
@@ -371,6 +456,7 @@ def preregister_experiment(config_path: Path) -> dict[str, Any]:
         model_key_file_sha256=model_hashes,
         tokenizer_sha256=tokenizer_hash,
         tokenizer_key_file_sha256=tokenizer_hashes,
+        local_dataset=local_dataset,
         created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         commit=git_commit(config.repository_root),
         versions=runtime_versions(),
@@ -395,6 +481,8 @@ def preregister_experiment(config_path: Path) -> dict[str, Any]:
         "preregistration_sha256": document["preregistration_sha256"],
         "sample_list_sha256": document["sample_list_sha256"],
         "eligible_sample_count": len(eligible),
+        "validation_row_count": local_dataset.validation_row_count,
+        "dataset_fingerprint": local_dataset.dataset_fingerprint,
         "stages": {stage: len(samples) for stage, samples in stages.items()},
         "manifest_written": manifest_written,
         "jsonl_written": jsonl_written,
