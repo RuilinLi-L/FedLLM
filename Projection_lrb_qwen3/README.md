@@ -1,12 +1,14 @@
 # Qwen3 SST-2 preregistration scaffold
 
 This directory is the isolated workspace for the Qwen3-1.7B-Base SST-2
-Projection-LRB study.  It deliberately contains **no DAGER implementation,
-attack run, training loop, PEFT path, or federated aggregation code** yet.
+Projection-LRB study.  It contains a narrow, defense-unaware Qwen3/RoPE DAGER
+implementation for `defense=none` only; there is still **no LRB application,
+defended-gradient path, training loop, PEFT path, or federated aggregation
+code**.
 
-Implemented capabilities are deterministic preregistration and one strict
-Qwen3 single-sample classification gradient diagnostic.  The diagnostic is a
-model-structure and row-space validation gate, not DAGER or an attack.
+Implemented capabilities are deterministic preregistration, one strict Qwen3
+single-sample classification gradient diagnostic, and a manifest-only
+`dager_qwen3_rope_defense_unaware` attack for the unmodified gradient.
 
 ## Scope and protocol
 
@@ -108,6 +110,63 @@ Any failed identity, relative-rank-cap, active-token residual, finite-value,
 or fixed-negative-control check writes the complete diagnostic JSON with
 `status="failed_gradient_diagnostic"` and exits nonzero; it does not continue
 to attack code.
+
+## None-only Qwen3/RoPE DAGER
+
+`scripts/run_none_attack.py` accepts no free-text argument.  It selects one
+immutable sample by `stage` and `sample_key` from the expected preregistration
+JSONL, verifies the configuration and sample-list hashes, and requires a head
+seed registered for that stage.  Its fixed attack label is
+`dager_qwen3_rope_defense_unaware`; `--defense` only accepts `none`.
+
+The first layer uses the raw Qwen3 `nn.Linear` q_proj gradient shape
+`[d_out, d_in]` directly.  Its DAGER basis has the legacy `[rank, feature]`
+layout and is obtained from the raw gradient's right-singular space; it never
+applies the GPT-2 `Conv1D` transpose.  Token candidates are the actual inputs
+to `model.model.layers[0].self_attn.q_proj`, obtained from the local embedding
+table and Qwen3's native RMSNorm.  The vocabulary is scanned in bounded chunks
+whose size comes from the predeclared `attack_budget.parallel` field.
+As in the existing DAGER decomposition, q0/q1 use one shared truncated rank
+`B = max(raw layer ranks)` after the configured rank cutoff; their individual
+raw ranks remain reported.
+
+For layer 2, prefix representations are produced by the native Qwen3 first
+decoder-layer forward with the model's own causal-mask helper, `position_ids`,
+and native RoPE position embeddings.  It does not approximate RoPE.  The
+decoder exhaustively retains only prefixes whose every layer-1 q_proj input
+passes the existing DAGER span threshold.  No language-model prior, beam,
+semantic filter, ground-truth-based choice, or defense-specific branch is
+introduced.  `attack_budget.max_ids` is the existing distance-sorted decoder
+candidate cap; `attack_budget.maxC` is the fixed prefix-search budget.
+
+Example (the sample key must be copied from the preregistered manifest):
+
+```bash
+python Projection_lrb_qwen3/scripts/run_none_attack.py \
+  --stage smoke \
+  --sample-key '<64-character sample_key>' \
+  --head-seed '<registered smoke seed>' \
+  --defense none \
+  --device cuda \
+  --dtype bfloat16 \
+  --output Projection_lrb_qwen3/outputs/smoke/qwen3_none_attack.jsonl
+```
+
+The single JSONL record includes immutable sample/head provenance, true and
+reconstructed token ids/text, aligned token recovery, exact recovery, the same
+offline `datasets.load_metric('rouge')` ROUGE-1/ROUGE-2 definition as existing
+DAGER scripts, empty-reconstruction state, layer-1 candidate counts, both
+DAGER ranks, chunk timing, fixed thresholds/budgets, gradient diagnostics, and
+the final search status.  The required ROUGE metric must already be locally
+available; no network download or substitute metric is used.  Ground truth is
+read only after decoding to report metrics; it is not passed to layer filtering
+or sequence recovery.
+
+Run the isolated tests with third-party pytest autoload disabled:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q Projection_lrb_qwen3/tests
+```
 
 ## Tests
 
