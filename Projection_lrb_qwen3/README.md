@@ -99,6 +99,11 @@ only as a BF16-noise diagnostic.  Per-token residual acceptance is restricted
 to positions active under the predeclared Delta-norm relative rule; inactive
 positions remain reported but cannot be used to force a direction failure.
 
+The fixed active-token diagnostic residual tolerances are `1e-4` for FP32 and
+`5e-4` for BF16.  These tolerances are solely for architecture and numerical-
+precision diagnostics; they are not DAGER `tau1`/`tau2` values and do not take
+part in attack-configuration calibration.
+
 Any failed identity, relative-rank-cap, active-token residual, finite-value,
 or fixed-negative-control check writes the complete diagnostic JSON with
 `status="failed_gradient_diagnostic"` and exits nonzero; it does not continue
