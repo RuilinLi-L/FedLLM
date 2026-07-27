@@ -28,10 +28,12 @@ class CapturedGradientStep:
 
     loss: float
     q_inputs: tuple[torch.Tensor, torch.Tensor]
+    q_output_gradients: tuple[torch.Tensor, torch.Tensor]
     q_gradients: tuple[torch.Tensor, torch.Tensor]
     q_parameter_names: tuple[str, str]
     q_expected_weight_shape: tuple[int, int]
     gpu_peak_memory_bytes: int
+    compute_dtype: torch.dtype
 
 
 def _config_int(model: nn.Module, name: str) -> int:
@@ -146,21 +148,27 @@ def capture_single_example_gradients(
     attention_mask: torch.Tensor,
     labels: torch.Tensor,
 ) -> CapturedGradientStep:
-    """Run one BF16 batch-size-one forward/backward and capture q0/q1 inputs."""
+    """Run one uniform-BF16-or-FP32 batch-size-one step and capture q0/q1 inputs."""
     _validate_batch(input_ids, attention_mask, labels)
     if input_ids.device.type != "cuda":
         raise GradientCaptureError("Single-example Qwen3 diagnostics require CUDA inputs.")
-    bf16_violations = [
-        name
-        for name, parameter in model.named_parameters()
-        if parameter.is_floating_point() and parameter.dtype != torch.bfloat16
-    ]
-    if bf16_violations:
+    floating_dtypes = {
+        parameter.dtype
+        for _, parameter in model.named_parameters()
+        if parameter.is_floating_point()
+    }
+    if len(floating_dtypes) != 1:
         raise GradientCaptureError(
-            f"BF16 forward/backward required, but these parameters are not BF16: {bf16_violations[:8]}"
+            f"Forward/backward requires one uniform floating dtype, got {sorted(str(dtype) for dtype in floating_dtypes)}."
+        )
+    compute_dtype = next(iter(floating_dtypes))
+    if compute_dtype not in (torch.bfloat16, torch.float32):
+        raise GradientCaptureError(
+            f"Only BF16 and FP32 diagnostics are supported, got model dtype {compute_dtype}."
         )
     q_pair = resolve_first_two_q_projections(model)
     captured_inputs: list[torch.Tensor | None] = [None, None]
+    captured_output_gradients: list[torch.Tensor | None] = [None, None]
 
     def make_hook(position: int):
         def hook(_module: nn.Module, inputs: tuple[Any, ...]) -> None:
@@ -171,7 +179,26 @@ def capture_single_example_gradients(
 
         return hook
 
-    handles = [module.register_forward_pre_hook(make_hook(position)) for position, module in enumerate(q_pair.modules)]
+    def make_backward_hook(position: int):
+        def backward_hook(
+            _module: nn.Module,
+            _grad_input: tuple[Any, ...],
+            grad_output: tuple[Any, ...],
+        ) -> None:
+            if not grad_output or not isinstance(grad_output[0], torch.Tensor):
+                raise GradientCaptureError(f"q{position} full backward hook received no tensor grad_output.")
+            if captured_output_gradients[position] is None:
+                captured_output_gradients[position] = grad_output[0].detach().clone()
+
+        return backward_hook
+
+    handles = [
+        *[module.register_forward_pre_hook(make_hook(position)) for position, module in enumerate(q_pair.modules)],
+        *[
+            module.register_full_backward_hook(make_backward_hook(position))
+            for position, module in enumerate(q_pair.modules)
+        ],
+    ]
     model.zero_grad(set_to_none=True)
     try:
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, use_cache=False)
@@ -184,11 +211,14 @@ def capture_single_example_gradients(
             handle.remove()
     if captured_inputs[0] is None or captured_inputs[1] is None:
         raise GradientCaptureError("Failed to capture the true inputs to q0 and q1.")
+    if captured_output_gradients[0] is None or captured_output_gradients[1] is None:
+        raise GradientCaptureError("Failed to capture q0/q1 output gradients through full backward hooks.")
     q_inputs = (captured_inputs[0], captured_inputs[1])
+    q_output_gradients = (captured_output_gradients[0], captured_output_gradients[1])
     q_gradients: list[torch.Tensor] = []
     hidden_size = q_pair.expected_weight_shape[1]
-    for position, (module, parameter_name, q_input) in enumerate(
-        zip(q_pair.modules, q_pair.parameter_names, q_inputs)
+    for position, (module, parameter_name, q_input, output_gradient) in enumerate(
+        zip(q_pair.modules, q_pair.parameter_names, q_inputs, q_output_gradients)
     ):
         gradient = getattr(module, "weight").grad
         if gradient is None:
@@ -198,13 +228,23 @@ def capture_single_example_gradients(
                 f"{parameter_name}.grad shape {tuple(gradient.shape)} differs from config-derived "
                 f"{q_pair.expected_weight_shape}."
             )
-        if gradient.dtype != torch.bfloat16 or q_input.dtype != torch.bfloat16:
+        if gradient.dtype != compute_dtype or q_input.dtype != compute_dtype:
             raise GradientCaptureError(
-                f"q{position} must use BF16 input and gradient, got input={q_input.dtype}, grad={gradient.dtype}."
+                f"q{position} input and gradient must use {compute_dtype}, got input={q_input.dtype}, grad={gradient.dtype}."
             )
         if q_input.ndim != 3 or q_input.shape[0] != 1 or q_input.shape[-1] != hidden_size:
             raise GradientCaptureError(
                 f"q{position} input has shape {tuple(q_input.shape)}; expected [1, sequence, {hidden_size}]."
+            )
+        if (
+            output_gradient.ndim != 3
+            or output_gradient.shape[0] != 1
+            or output_gradient.shape[1] != q_input.shape[1]
+            or output_gradient.shape[-1] != q_pair.expected_weight_shape[0]
+        ):
+            raise GradientCaptureError(
+                f"q{position} output gradient has shape {tuple(output_gradient.shape)}; expected "
+                f"[1, {q_input.shape[1]}, {q_pair.expected_weight_shape[0]}]."
             )
         q_gradients.append(gradient.detach().clone())
     torch.cuda.synchronize(input_ids.device)
@@ -212,8 +252,10 @@ def capture_single_example_gradients(
     return CapturedGradientStep(
         loss=float(loss_tensor.detach().float().cpu().item()),
         q_inputs=q_inputs,
+        q_output_gradients=q_output_gradients,
         q_gradients=(q_gradients[0], q_gradients[1]),
         q_parameter_names=q_pair.parameter_names,
         q_expected_weight_shape=q_pair.expected_weight_shape,
         gpu_peak_memory_bytes=peak_memory,
+        compute_dtype=compute_dtype,
     )

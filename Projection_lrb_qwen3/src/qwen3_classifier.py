@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 import torch
 from torch import nn
@@ -12,6 +12,9 @@ from torch import nn
 
 class Qwen3ClassifierError(RuntimeError):
     """Raised when the required local Qwen3 classification setup is unavailable."""
+
+
+ComputeDTypeName = Literal["bfloat16", "float32"]
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,7 @@ class Qwen3ClassifierBundle:
     model_path: Path
     head_seed: int
     head_parameter_names: tuple[str, ...]
+    compute_dtype: torch.dtype
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,15 @@ def _require_cuda_device(device: str | torch.device) -> torch.device:
 def _require_seed(seed: int) -> None:
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise Qwen3ClassifierError(f"head_seed must be an explicit integer, got {seed!r}.")
+
+
+def resolve_compute_dtype(dtype: ComputeDTypeName) -> torch.dtype:
+    """Map the explicit diagnostic dtype option without a fallback."""
+    if dtype == "bfloat16":
+        return torch.bfloat16
+    if dtype == "float32":
+        return torch.float32
+    raise Qwen3ClassifierError(f"Unsupported diagnostic dtype: {dtype!r}.")
 
 
 def _initialize_head(model: nn.Module, *, head_seed: int, std: float = 1e-3) -> tuple[str, ...]:
@@ -84,6 +97,7 @@ def load_local_qwen3_sequence_classifier(
     *,
     head_seed: int,
     device: str | torch.device = "cuda",
+    dtype: ComputeDTypeName = "bfloat16",
 ) -> Qwen3ClassifierBundle:
     """Load Qwen3 locally as a BF16, two-label sequence classifier.
 
@@ -91,6 +105,7 @@ def load_local_qwen3_sequence_classifier(
     """
     target_device = _require_cuda_device(device)
     _require_seed(head_seed)
+    compute_dtype = resolve_compute_dtype(dtype)
     resolved_model_path = model_path.resolve()
     if not resolved_model_path.is_dir():
         raise Qwen3ClassifierError(f"Configured local Qwen3 model directory does not exist: {resolved_model_path}")
@@ -126,7 +141,7 @@ def load_local_qwen3_sequence_classifier(
             str(resolved_model_path),
             config=model_config,
             local_files_only=True,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=compute_dtype,
         )
     except Exception as error:  # Transformers loading errors must be surfaced with path context.
         raise Qwen3ClassifierError(
@@ -137,13 +152,17 @@ def load_local_qwen3_sequence_classifier(
     model.config.use_cache = False
     model.config.pad_token_id = eos_token_id
     head_parameter_names = _initialize_head(model, head_seed=head_seed)
-    model.to(device=target_device, dtype=torch.bfloat16)
+    model.to(device=target_device, dtype=compute_dtype)
     model.train()
-    non_bf16 = [name for name, parameter in model.named_parameters() if parameter.is_floating_point() and parameter.dtype != torch.bfloat16]
-    if non_bf16:
+    wrong_dtype = [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.is_floating_point() and parameter.dtype != compute_dtype
+    ]
+    if wrong_dtype:
         raise Qwen3ClassifierError(
-            "BF16 forward/backward was requested but floating model parameters are not BF16: "
-            f"{non_bf16[:8]}"
+            f"{dtype} forward/backward was requested but floating model parameters have another dtype: "
+            f"{wrong_dtype[:8]}"
         )
     return Qwen3ClassifierBundle(
         model=model,
@@ -152,6 +171,7 @@ def load_local_qwen3_sequence_classifier(
         model_path=resolved_model_path,
         head_seed=head_seed,
         head_parameter_names=head_parameter_names,
+        compute_dtype=compute_dtype,
     )
 
 

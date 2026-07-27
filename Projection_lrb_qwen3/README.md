@@ -79,23 +79,30 @@ two equivalent runs have the same protocol identity.
 ## Qwen3 gradient diagnostic
 
 This CUDA-only command loads the local Qwen3 model through
-`AutoModelForSequenceClassification`, forces BF16 forward/backward,
+`AutoModelForSequenceClassification`, uses BF16 by default (or true FP32 with
+`--dtype float32`),
 initializes `model.score` from the required explicit head seed, and runs one
 unpadded batch-size-one step.  It hooks the true inputs to exactly
 `model.model.layers[0|1].self_attn.q_proj`, writes the canonical
-`named_parameters()` gradient manifest, and tests those inputs against the
-FP32 row space of the raw q-projection gradients.
+`named_parameters()` gradient manifest, captures q_proj output gradients, and
+checks the FP32 linear-layer identity `G = Delta.T @ H`.
 
 ```bash
 python Projection_lrb_qwen3/scripts/check_qwen3_gradient.py \
-  --sentence "a moving and funny film" --label 1 --head-seed 404 \
-  --gradient-orientation gradient
+  --sentence "a moving and funny film" --label 1 --head-seed 404
 ```
 
-The selected orientation is explicit: the command never automatically tries
-`gradient.T`.  A residual above the configured threshold writes the diagnostic
-JSON with `status="failed_span_residual"` and exits nonzero; it does not
-continue to attack code.
+The primary row-space basis is always the right-singular basis of raw `G`.
+`G.T` is computed only as a fixed negative control and is never selected as a
+repair.  `--rank-tol` is a relative tolerance, while `--rank-atol` is recorded
+only as a BF16-noise diagnostic.  Per-token residual acceptance is restricted
+to positions active under the predeclared Delta-norm relative rule; inactive
+positions remain reported but cannot be used to force a direction failure.
+
+Any failed identity, relative-rank-cap, active-token residual, finite-value,
+or fixed-negative-control check writes the complete diagnostic JSON with
+`status="failed_gradient_diagnostic"` and exits nonzero; it does not continue
+to attack code.
 
 ## Tests
 
@@ -104,6 +111,13 @@ artifact; they never download the model or dataset.
 
 ```powershell
 python -m unittest discover -s Projection_lrb_qwen3/tests -v
+```
+
+On the Linux experiment server, use the pytest plugin-isolation setting for
+the same no-network tests:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q Projection_lrb_qwen3/tests
 ```
 
 ## Future boundary
