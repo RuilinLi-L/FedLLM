@@ -4,8 +4,9 @@ This directory is the isolated workspace for the Qwen3-1.7B-Base SST-2
 Projection-LRB study.  It deliberately contains **no DAGER implementation,
 attack run, training loop, PEFT path, or federated aggregation code** yet.
 
-The only implemented capability is deterministic preregistration of the
-official GLUE SST-2 validation examples before any attack is allowed to run.
+Implemented capabilities are deterministic preregistration and one strict
+Qwen3 single-sample classification gradient diagnostic.  The diagnostic is a
+model-structure and row-space validation gate, not DAGER or an attack.
 
 ## Scope and protocol
 
@@ -22,9 +23,9 @@ official GLUE SST-2 validation examples before any attack is allowed to run.
   `SHA256("glue|sst2|validation|{original_index}|{sentence}|{label}")`.
 - Split: first 20 calibration, next 5 smoke, next 20 final.  The three sets
   must be disjoint.
-- Classification-head seeds are preregistered metadata only.  No random head
-  is created by this scaffold, and such a head must never be used as utility
-  evidence.
+- A gradient diagnostic creates a random classification head only with an
+  explicit seed and `N(0, 1e-3)` initialization.  Its output is
+  attack-transfer diagnostics only, never utility evidence.
 
 The protocol is empirical and attack-specific.  A future zero-recovery result
 must not be described as information deletion, formal privacy, or general
@@ -74,6 +75,27 @@ model/tokenizer key-file hashes, per-stage sample-list hashes, intersection
 checks, creation time, Git commit, and Python/torch/transformers versions.
 Its `preregistration_sha256` deliberately excludes the creation timestamp, so
 two equivalent runs have the same protocol identity.
+
+## Qwen3 gradient diagnostic
+
+This CUDA-only command loads the local Qwen3 model through
+`AutoModelForSequenceClassification`, forces BF16 forward/backward,
+initializes `model.score` from the required explicit head seed, and runs one
+unpadded batch-size-one step.  It hooks the true inputs to exactly
+`model.model.layers[0|1].self_attn.q_proj`, writes the canonical
+`named_parameters()` gradient manifest, and tests those inputs against the
+FP32 row space of the raw q-projection gradients.
+
+```bash
+python Projection_lrb_qwen3/scripts/check_qwen3_gradient.py \
+  --sentence "a moving and funny film" --label 1 --head-seed 404 \
+  --gradient-orientation gradient
+```
+
+The selected orientation is explicit: the command never automatically tries
+`gradient.T`.  A residual above the configured threshold writes the diagnostic
+JSON with `status="failed_span_residual"` and exits nonzero; it does not
+continue to attack code.
 
 ## Tests
 
