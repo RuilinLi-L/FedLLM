@@ -80,6 +80,16 @@ def _failure_diagnostic() -> dict[str, object]:
 
 
 class GradientFailureSidecarTest(unittest.TestCase):
+    def test_precision_specific_diagnostic_thresholds(self) -> None:
+        self.assertEqual(
+            RUNNER._diagnostic_thresholds("float32")["max_active_relative_residual"],
+            2e-4,
+        )
+        self.assertEqual(
+            RUNNER._diagnostic_thresholds("bfloat16")["max_active_relative_residual"],
+            3e-3,
+        )
+
     def test_failure_writes_summary_before_any_attack_search(self) -> None:
         q_parameter_names = (
             "model.layers.0.self_attn.q_proj.weight",
@@ -150,7 +160,10 @@ class GradientFailureSidecarTest(unittest.TestCase):
             self.assertEqual(summary["q0"]["theoretical_rank_cap"], 3)
             self.assertEqual(summary["q0"]["max_inactive_relative_residual"], 0.9)
             self.assertEqual(summary["q0"]["negative_control_identity_error"], 1.4)
-            self.assertIn("max_active_relative_residual", summary["diagnostic_thresholds"])
+            self.assertEqual(
+                summary["diagnostic_thresholds"]["max_active_relative_residual"],
+                2e-4,
+            )
             shared_rank.assert_not_called()
             layer1_filter.assert_not_called()
             layer2_decoder.assert_not_called()

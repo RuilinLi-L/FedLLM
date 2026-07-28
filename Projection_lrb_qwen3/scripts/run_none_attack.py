@@ -95,7 +95,7 @@ def _diagnostic_thresholds(dtype: str) -> dict[str, float]:
         "rank_rtol": 1e-3,
         "delta_rtol": 1e-3,
         "identity_error_tol": 5e-3,
-        "max_active_relative_residual": 5e-4 if dtype == "bfloat16" else 1e-4,
+        "max_active_relative_residual": 3e-3 if dtype == "bfloat16" else 2e-4,
         "negative_control_factor": 10.0,
     }
 

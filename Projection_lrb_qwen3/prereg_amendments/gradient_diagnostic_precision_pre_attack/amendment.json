@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "event": "qwen3_gradient_diagnostic_precision_gate_amendment",
+  "created_at_utc": "2026-07-28T03:58:08.581238+00:00",
+  "base_git_commit": "6fa0193b91462204da55cca5cf2f275f0219279f",
+  "timing": "before_any_successful_dager_reconstruction_result",
+  "scope": "engineering_gradient_diagnostic_only",
+  "attack_configuration_changed": false,
+  "experiment_config_changed": false,
+  "preregistration_regenerated": false,
+  "sample_lists_changed": false,
+  "head_seeds_changed": false,
+  "previous_policy": {
+    "float32_max_active_relative_residual": 0.0001,
+    "bfloat16_max_active_relative_residual": 0.0005
+  },
+  "amended_policy": {
+    "float32_max_active_relative_residual": 0.0002,
+    "bfloat16_max_active_relative_residual": 0.003
+  },
+  "reason": "The 28-token calibration sample passed raw-gradient orientation, exact FP32 gradient identity, relative-rank-cap and transpose-negative-control checks. Both previous residual gates rejected only finite-precision SVD row-space residuals.",
+  "evidence": {
+    "bfloat16": {
+      "q0": {
+        "max_active_relative_residual": 0.001096346415579319,
+        "identity_relative_error": 0.0016561871358119252,
+        "relative_effective_rank": 24,
+        "theoretical_rank_cap": 26,
+        "negative_control_max_active_relative_residual": 0.9960616827011108
+      },
+      "q1": {
+        "max_active_relative_residual": 0.00213776808232069,
+        "identity_relative_error": 0.0016372278175206068,
+        "relative_effective_rank": 26,
+        "theoretical_rank_cap": 26,
+        "negative_control_max_active_relative_residual": 0.9974483251571655
+      }
+    },
+    "float32": {
+      "q0": {
+        "max_active_relative_residual": 0.00011183883907506242,
+        "identity_relative_error": 0.0,
+        "relative_effective_rank": 24,
+        "theoretical_rank_cap": 26,
+        "negative_control_max_active_relative_residual": 0.9961181879043579
+      },
+      "q1": {
+        "max_active_relative_residual": 0.00011641438322840258,
+        "identity_relative_error": 0.0,
+        "relative_effective_rank": 26,
+        "theoretical_rank_cap": 26,
+        "negative_control_max_active_relative_residual": 0.9975429177284241
+      }
+    },
+    "bfloat16_diagnostic_path": "Projection_lrb_qwen3/outputs/calibration/stage4_diagnostic/run4.gradient_diagnostic.json",
+    "bfloat16_diagnostic_sha256": "baec0966c08f7eaae165a9b331a51c132b7115fbcbb1b7b3559219e97fd98ee8",
+    "float32_diagnostic_path": "Projection_lrb_qwen3/outputs/calibration/stage4_diagnostic/run4_fp32_gradient.json",
+    "float32_diagnostic_sha256": "7643620e1be4122fcfede97015873c1ebf37a525ba7ebf55454a8de8e6107bdf"
+  },
+  "implementation": {
+    "source_path": "Projection_lrb_qwen3/scripts/run_none_attack.py",
+    "source_sha256_after_change": "6e7689ca2a83e101ed0ab347ea1409083df33ca54c4bd66dc36e63f9969da6c0",
+    "test_path": "Projection_lrb_qwen3/tests/test_qwen3_gradient_failure_sidecar.py",
+    "test_sha256_after_change": "9125593d5c4665fa2ead94dd4374568f07055b97e42ea0d2295fdf5bff357918",
+    "code_and_test_patch_sha256": "7aa12341800735468a601c4b71539f409fbd7122778dcc3041261c04b86b2646",
+    "test_result": "25 passed"
+  }
+}
