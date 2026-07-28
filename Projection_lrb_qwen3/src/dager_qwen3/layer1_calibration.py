@@ -314,6 +314,8 @@ def build_sample_record(
     scan: Layer1DistanceScanResult,
     tokenizer: Any,
     gradient_diagnostic: Mapping[str, Any],
+    gradient_diagnostic_controls: Mapping[str, float] | None = None,
+    bf16_gate_profile_amendment: Mapping[str, Any] | None = None,
     gradient_capture_seconds: float,
     scan_seconds: float,
     loss: float,
@@ -332,7 +334,7 @@ def build_sample_record(
     tokenizer_hashes = preregistration.get("tokenizer_key_file_sha256")
     if not isinstance(model_hashes, Mapping) or not isinstance(tokenizer_hashes, Mapping):
         raise Layer1CalibrationError("Preregistration lacks required model/tokenizer identity hashes.")
-    return {
+    record: dict[str, Any] = {
         "schema_version": 1,
         "record_type": "qwen3_layer1_tau1_calibration_sample",
         "status": "ok",
@@ -410,6 +412,11 @@ def build_sample_record(
         "loss": loss,
         "gpu_peak_memory_bytes": gpu_peak_memory_bytes,
     }
+    if gradient_diagnostic_controls is not None:
+        record["gradient_diagnostic_controls"] = dict(gradient_diagnostic_controls)
+    if bf16_gate_profile_amendment is not None:
+        record["bf16_gate_profile_amendment"] = dict(bf16_gate_profile_amendment)
+    return record
 
 
 def write_or_verify_distance_sidecar(path: Path, distances: torch.Tensor) -> dict[str, Any]:
@@ -477,6 +484,7 @@ def aggregate_calibration_records(
     records: Sequence[Mapping[str, Any]],
     *,
     sample_output_files: Sequence[Mapping[str, str]],
+    bf16_gate_profile_amendment: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate all 20 Layer-1-only records and apply the fixed tau rule."""
     if len(records) != EXPECTED_CALIBRATION_SAMPLE_COUNT:
@@ -488,6 +496,13 @@ def aggregate_calibration_records(
         raise Layer1CalibrationError("Calibration aggregation requires unique sample keys.")
     if any(record.get("status") != "ok" or record.get("layer2_invoked") is not False for record in records):
         raise Layer1CalibrationError("Calibration aggregation refuses records that are not successful Layer-1-only observations.")
+    if bf16_gate_profile_amendment is not None and any(
+        record.get("bf16_gate_profile_amendment") != dict(bf16_gate_profile_amendment)
+        for record in records
+    ):
+        raise Layer1CalibrationError(
+            "Calibration aggregation requires every BF16 sample record to carry the same verified gate amendment."
+        )
 
     per_tau: list[dict[str, Any]] = []
     selected_tau: float | None = None
@@ -528,7 +543,7 @@ def aggregate_calibration_records(
             selected_tau = tau
 
     selection_rule_passed = selected_tau is not None
-    return {
+    aggregation: dict[str, Any] = {
         "schema_version": 1,
         "record_type": "qwen3_layer1_tau1_calibration_aggregation",
         "protocol": "qwen3_layer1_tau1_calibration_v1",
@@ -549,6 +564,9 @@ def aggregate_calibration_records(
         else "no_fixed_tau1_grid_value_satisfies_micro_active_position_recall>=0.95_and_all_samples_nonempty",
         "sample_output_files": [dict(item) for item in sample_output_files],
     }
+    if bf16_gate_profile_amendment is not None:
+        aggregation["bf16_gate_profile_amendment"] = dict(bf16_gate_profile_amendment)
+    return aggregation
 
 
 def write_or_verify_sample_record(path: Path, record: Mapping[str, Any]) -> bool:
@@ -570,6 +588,7 @@ def calibration_aggregation_identity(
     dtype: str,
     head_seed: int,
     sample_output_files: Sequence[Mapping[str, str]],
+    bf16_gate_profile_amendment: Mapping[str, Any] | None = None,
 ) -> str:
     return sha256_json(
         {
@@ -580,6 +599,9 @@ def calibration_aggregation_identity(
             "head_seed": head_seed,
             "tau_grid": list(TAU1_CALIBRATION_GRID),
             "sample_output_files": [dict(item) for item in sample_output_files],
+            "bf16_gate_profile_amendment": (
+                None if bf16_gate_profile_amendment is None else dict(bf16_gate_profile_amendment)
+            ),
         }
     )
 

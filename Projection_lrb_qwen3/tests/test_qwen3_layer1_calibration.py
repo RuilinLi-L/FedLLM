@@ -237,6 +237,26 @@ class Layer1CalibrationTest(unittest.TestCase):
         self.assertEqual(aggregate["status"], "failed")
         self.assertIn("no_fixed_tau1_grid_value", str(aggregate["failure_reason"]))
 
+    def test_aggregation_requires_and_records_one_verified_bf16_gate_amendment(self) -> None:
+        amendment = {
+            "path": "Projection_lrb_qwen3/prereg_amendments/bf16_gradient_gate_pre_attack_075/amendment.json",
+            "sha256": "a" * 64,
+            "amendment_identity_sha256": "b" * 64,
+            "selected_bfloat16_gate": 7.5e-3,
+            "fixed_candidate_grid": [3e-3, 5e-3, 7.5e-3, 1e-2],
+        }
+        records = []
+        for index in range(EXPECTED_CALIBRATION_SAMPLE_COUNT):
+            record = _sample_record(key=f"{index:064x}", per_tau=_per_tau(position_recall=1.0, candidate_count=1))
+            record["bf16_gate_profile_amendment"] = amendment
+            records.append(record)
+        aggregate = aggregate_calibration_records(
+            records,
+            sample_output_files=[],
+            bf16_gate_profile_amendment=amendment,
+        )
+        self.assertEqual(aggregate["bf16_gate_profile_amendment"], amendment)
+
     def test_sample_record_explicitly_marks_layer2_not_invoked(self) -> None:
         sample = RegisteredAttackSample(
             stage="calibration",
@@ -316,12 +336,25 @@ class Layer1CalibrationTest(unittest.TestCase):
             mock.patch.object(RUNNER, "load_experiment_config", return_value=SimpleNamespace()),
             mock.patch.object(RUNNER, "registered_head_seed"),
             mock.patch.object(RUNNER, "verify_amendment"),
-            mock.patch.object(RUNNER, "verify_bf16_gate_profile_amendment") as verify_bf16_profile,
+            mock.patch.object(
+                RUNNER,
+                "verify_bf16_gate_profile_amendment",
+                return_value={
+                    "amendment_identity_sha256": "a" * 64,
+                    "selected_bfloat16_gate": 7.5e-3,
+                    "fixed_candidate_grid": [3e-3, 5e-3, 7.5e-3, 1e-2],
+                },
+            ) as verify_bf16_profile,
+            mock.patch.object(RUNNER, "sha256_file", return_value="b" * 64),
             mock.patch.object(
                 RUNNER, "_load_preregistration", return_value={"preregistration_sha256": "p" * 64}
             ),
             mock.patch.object(RUNNER, "_select_samples", return_value=(sample,)),
-            mock.patch.object(RUNNER, "_run_one_sample", return_value=(record, Path(temporary_directory) / "sample.json")),
+            mock.patch.object(
+                RUNNER,
+                "_run_one_sample",
+                return_value=(record, Path(temporary_directory) / "sample.json"),
+            ) as run_one_sample,
             mock.patch.object(layer2_module, "decode_qwen3_rope_prefixes") as layer2,
         ):
             args = SimpleNamespace(
@@ -336,6 +369,12 @@ class Layer1CalibrationTest(unittest.TestCase):
         self.assertEqual(result["sample_count"], 1)
         self.assertIs(result["layer2_invoked"], False)
         verify_bf16_profile.assert_called_once_with(project_root=PROJECT_ROOT)
+        self.assertEqual(
+            run_one_sample.call_args.kwargs["bf16_gate_profile_amendment"][
+                "selected_bfloat16_gate"
+            ],
+            7.5e-3,
+        )
         layer2.assert_not_called()
 
     def test_amendment_hashes_the_actual_run6_failure_log(self) -> None:

@@ -29,6 +29,7 @@ from src.dager_qwen3.gradient_decomposition import (
 )
 from src.dager_qwen3.gradient_gate import diagnose_captured_q_projections
 from src.dager_qwen3.bf16_gate_profile_amendment import (
+    AMENDMENT_RELATIVE_PATH as BF16_GATE_PROFILE_AMENDMENT_RELATIVE_PATH,
     verify_amendment as verify_bf16_gate_profile_amendment,
 )
 from src.dager_qwen3.layer1_calibration import (
@@ -124,6 +125,7 @@ def _run_one_sample(
     head_seed: int,
     dtype: str,
     output_root: Path,
+    bf16_gate_profile_amendment: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any], Path]:
     """Capture one immutable update and stop after the actual Layer-1 distance scan."""
     torch.manual_seed(head_seed)
@@ -153,7 +155,7 @@ def _run_one_sample(
         )
         capture_seconds = perf_counter() - capture_started
         try:
-            diagnostic, _diagnostic_controls = diagnose_captured_q_projections(
+            diagnostic, diagnostic_controls = diagnose_captured_q_projections(
                 captured=captured,
                 tokenizer=bundle.tokenizer,
                 token_ids=sample.input_ids,
@@ -212,6 +214,8 @@ def _run_one_sample(
             scan=scan,
             tokenizer=bundle.tokenizer,
             gradient_diagnostic=diagnostic,
+            gradient_diagnostic_controls=diagnostic_controls,
+            bf16_gate_profile_amendment=bf16_gate_profile_amendment,
             gradient_capture_seconds=capture_seconds,
             scan_seconds=scan_seconds,
             loss=captured.loss,
@@ -236,8 +240,17 @@ def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
     config = load_experiment_config(config_path)
     registered_head_seed(config, stage="calibration", requested_seed=args.head_seed)
     verify_amendment(project_root=QWEN_ROOT)
+    bf16_gate_profile_amendment: dict[str, Any] | None = None
     if args.dtype == "bfloat16":
-        verify_bf16_gate_profile_amendment(project_root=QWEN_ROOT)
+        amendment = verify_bf16_gate_profile_amendment(project_root=QWEN_ROOT)
+        amendment_path = QWEN_ROOT / BF16_GATE_PROFILE_AMENDMENT_RELATIVE_PATH
+        bf16_gate_profile_amendment = {
+            "path": _relative_output_path(amendment_path),
+            "sha256": sha256_file(amendment_path),
+            "amendment_identity_sha256": amendment["amendment_identity_sha256"],
+            "selected_bfloat16_gate": amendment["selected_bfloat16_gate"],
+            "fixed_candidate_grid": amendment["fixed_candidate_grid"],
+        }
     preregistration = _load_preregistration(config)
     output_root = _resolve_repository_path(args.output_root, description="output root")
     expected_outputs_root = (QWEN_ROOT / "outputs").resolve()
@@ -256,6 +269,7 @@ def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
             head_seed=args.head_seed,
             dtype=args.dtype,
             output_root=output_root,
+            bf16_gate_profile_amendment=bf16_gate_profile_amendment,
         )
         for sample in samples
     ]
@@ -282,6 +296,7 @@ def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
     aggregation = aggregate_calibration_records(
         records,
         sample_output_files=sample_output_files,
+        bf16_gate_profile_amendment=bf16_gate_profile_amendment,
     )
     aggregation["calibration_aggregation_identity_sha256"] = calibration_aggregation_identity(
         preregistration_sha256=str(preregistration["preregistration_sha256"]),
@@ -289,6 +304,7 @@ def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
         dtype=args.dtype,
         head_seed=args.head_seed,
         sample_output_files=sample_output_files,
+        bf16_gate_profile_amendment=bf16_gate_profile_amendment,
     )
     aggregation["git_commit"] = _git_commit()
     aggregation_path = output_root / "aggregation.json"
