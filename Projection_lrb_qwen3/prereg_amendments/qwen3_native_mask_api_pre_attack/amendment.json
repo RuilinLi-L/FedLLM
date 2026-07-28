@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "event": "qwen3_native_mask_api_compatibility_amendment",
+  "created_at_utc": "2026-07-28T04:30:38.503317+00:00",
+  "timing": "before_any_successful_dager_reconstruction_result",
+  "base_git_commit": "5b2fd4f407a8a14536f5b074031f392ca4900507",
+  "transformers_version": "4.57.6",
+  "scope": "qwen3_model_adapter_engineering_compatibility",
+  "attack_configuration_changed": false,
+  "experiment_config_changed": false,
+  "preregistration_regenerated": false,
+  "sample_lists_changed": false,
+  "head_seeds_changed": false,
+  "failure_observed": "Installed Qwen3 backbone lacks _update_causal_mask; DAGER stopped before vocabulary/prefix recovery.",
+  "implementation": {
+    "current_public_api": [
+      "transformers.masking_utils.create_causal_mask",
+      "transformers.masking_utils.create_sliding_window_causal_mask"
+    ],
+    "legacy_private_api_retained_as_compatibility_path": "_update_causal_mask",
+    "approximate_handwritten_mask_added": false,
+    "layer0_attention_type_selects_native_mask": true
+  },
+  "evidence": {
+    "failed_run_log": "Projection_lrb_qwen3/outputs/calibration/stage4_diagnostic/run5.log",
+    "failed_run_log_sha256": "00e001ba2a42c7665a375986a6bcd465b93cfe30346a6fd841020b457925523d",
+    "source_path": "Projection_lrb_qwen3/src/dager_qwen3/model_adapter.py",
+    "source_sha256": "5a3d4bfb879266c5b078914a90c4727d395f9bf363e5d50d2479390af8bdcf46",
+    "public_api_test_path": "Projection_lrb_qwen3/tests/test_qwen3_public_mask_api.py",
+    "public_api_test_sha256": "301534fc860c29c08146bf28646ff7e834fb4b2f37d371eb177a901899dc2a20",
+    "legacy_api_test_path": "Projection_lrb_qwen3/tests/test_qwen3_layer1_true_token.py",
+    "legacy_api_test_sha256": "fdde4487c0a83274ee84f3b1f4357fd2dfb5a6a58592d7d5f5b2e22599c0e784",
+    "targeted_tests": "2 passed",
+    "full_tests": "26 passed"
+  }
+}

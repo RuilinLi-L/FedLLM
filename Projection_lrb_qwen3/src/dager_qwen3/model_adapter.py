@@ -9,6 +9,11 @@ from typing import Any, Mapping
 import torch
 from torch import nn
 
+from transformers.masking_utils import (
+    create_causal_mask,
+    create_sliding_window_causal_mask,
+)
+
 from src.gradient_capture import GradientCaptureError, QProjectionPair, resolve_first_two_q_projections
 
 
@@ -104,10 +109,6 @@ class Qwen3RoPEDagerAdapter:
             raise ModelAdapterError("Expected Qwen3 RMSNorm at model.model.layers[0].input_layernorm.")
         if not isinstance(getattr(layers[1], "input_layernorm", None), nn.Module):
             raise ModelAdapterError("Expected Qwen3 RMSNorm at model.model.layers[1].input_layernorm.")
-        if not callable(getattr(backbone, "_update_causal_mask", None)):
-            raise ModelAdapterError(
-                "Installed Qwen3 backbone lacks _update_causal_mask; refusing to construct an approximate mask."
-            )
         self.backbone = backbone
         self.layers = layers
         self.embed_tokens = embed_tokens
@@ -182,22 +183,71 @@ class Qwen3RoPEDagerAdapter:
         attention_mask: torch.Tensor,
         hidden_states: torch.Tensor,
         cache_position: torch.Tensor,
+        position_ids: torch.Tensor,
     ) -> torch.Tensor | None:
-        result = _call_with_supported_keywords(
-            self.backbone._update_causal_mask,
-            {
+        """Construct the native version-specific Qwen3 mask for decoder layer 0."""
+
+        legacy_update = getattr(self.backbone, "_update_causal_mask", None)
+        if callable(legacy_update):
+            result = _call_with_supported_keywords(
+                legacy_update,
+                {
+                    "attention_mask": attention_mask,
+                    "input_tensor": hidden_states,
+                    "cache_position": cache_position,
+                    "past_key_values": None,
+                    "output_attentions": False,
+                    "use_cache": False,
+                },
+                context="_update_causal_mask",
+            )
+        else:
+            config = getattr(
+                self.backbone,
+                "config",
+                getattr(self.model, "config", None),
+            )
+            if config is None:
+                raise ModelAdapterError(
+                    "Native Qwen3 causal-mask construction requires a model config."
+                )
+
+            mask_kwargs = {
+                "config": config,
+                "input_embeds": hidden_states,
                 "attention_mask": attention_mask,
-                "input_tensor": hidden_states,
                 "cache_position": cache_position,
                 "past_key_values": None,
-                "output_attentions": False,
-                "use_cache": False,
-            },
-            context="_update_causal_mask",
-        )
+                "position_ids": position_ids,
+            }
+
+            causal_mask_mapping: dict[str, torch.Tensor | None] = {
+                "full_attention": create_causal_mask(**mask_kwargs),
+            }
+
+            if bool(getattr(self.backbone, "has_sliding_layers", False)):
+                causal_mask_mapping["sliding_attention"] = (
+                    create_sliding_window_causal_mask(**mask_kwargs)
+                )
+
+            attention_type = getattr(
+                self.layers[0],
+                "attention_type",
+                None,
+            )
+            if attention_type not in causal_mask_mapping:
+                raise ModelAdapterError(
+                    "Unsupported native Qwen3 layer-0 attention type "
+                    f"{attention_type!r}; available masks are "
+                    f"{sorted(causal_mask_mapping)}."
+                )
+
+            result = causal_mask_mapping[attention_type]
+
         if result is not None and not isinstance(result, torch.Tensor):
             raise ModelAdapterError(
-                f"Native Qwen3 _update_causal_mask returned {type(result).__name__}, expected Tensor or None."
+                "Native Qwen3 causal-mask construction returned "
+                f"{type(result).__name__}, expected Tensor or None."
             )
         return result
 
@@ -259,6 +309,7 @@ class Qwen3RoPEDagerAdapter:
                 attention_mask=attention_mask,
                 hidden_states=hidden_states,
                 cache_position=cache_position,
+                position_ids=position_ids,
             )
             layer0_output = self._native_layer0_forward(
                 hidden_states=hidden_states,
