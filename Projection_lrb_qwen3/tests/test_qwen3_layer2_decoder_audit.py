@@ -104,7 +104,7 @@ class Layer2DecoderAuditTest(unittest.TestCase):
         self.assertEqual((audit[0].distance_min, audit[0].distance_max), (0.6, 0.78))
         self.assertAlmostEqual(float(audit[0].distance_median), 0.69)
 
-    def test_equality_verdict_is_audit_only_and_completed_prefix_order_is_preserved(self) -> None:
+    def test_equality_verdict_is_audit_only_and_survivor_order_is_preserved(self) -> None:
         # The mocked evaluator supplies the pre-existing predicate verdict.  The
         # audit must not recompute or alter it merely because a reported mean
         # distance is exactly the threshold.
@@ -115,7 +115,8 @@ class Layer2DecoderAuditTest(unittest.TestCase):
         )
         self.assertEqual(result.selected_token_ids, (9,))
         self.assertEqual([item.token_ids for item in result.completed_prefixes], [(9,)])
-        self.assertEqual(result.termination_reason, "completed_prefix_found")
+        self.assertEqual(result.termination_reason, "layer2_survivors_reported")
+        self.assertEqual([item.token_ids for item in result.survivor_prefixes], [(9,)])
         self.assertEqual(result.per_length_distance_audit[0].passing_count, 1)
         self.assertEqual(result.per_length_distance_audit[0].rejected_count, 1)
 
@@ -170,10 +171,11 @@ class Layer2DecoderAuditTest(unittest.TestCase):
         )
         self.assertEqual(result.per_length_survivor_counts, ((1, 1), (2, 0)))
         self.assertEqual([item.token_ids for item in result.completed_prefixes], [(9,), (1, 9)])
-        self.assertEqual(result.selected_token_ids, (9,))
+        self.assertEqual([item.token_ids for item in result.survivor_prefixes], [(1,), (9,), (1, 9)])
+        self.assertEqual(result.selected_token_ids, (1,))
         self.assertEqual(result.per_length_distance_audit[0].passing_count, 2)
         self.assertEqual(result.per_length_distance_audit[1].passing_count, 1)
-        self.assertEqual(result.termination_reason, "completed_prefix_found")
+        self.assertEqual(result.termination_reason, "layer2_survivors_reported")
 
     def test_budget_exhaustion_is_reported_without_changing_existing_counts(self) -> None:
         result = self._decode(
@@ -206,6 +208,7 @@ class Layer2RunnerSerializationTest(unittest.TestCase):
                 ),
             ),
             termination_reason="no_layer2_survivor_at_length_1",
+            survivor_prefixes=(),
         )
         fields = layer2_audit_json_fields(layer2)
         self.assertEqual(fields["termination_reason"], "no_layer2_survivor_at_length_1")

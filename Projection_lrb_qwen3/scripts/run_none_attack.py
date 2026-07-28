@@ -87,6 +87,12 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
     # All protocol controls are verified before ROUGE/model/CUDA work.
     config = load_experiment_config(_resolve(args.config, description="config"), require_dataset_path=False)
     registered_head_seed(config, stage=args.stage, requested_seed=args.head_seed)
+    calibration_head_seed = frozen_tau1.get("calibration_head_seed")
+    if isinstance(calibration_head_seed, int) and calibration_head_seed != args.head_seed:
+        raise NoneAttackScriptError(
+            "Frozen tau1 calibration head state does not match this attack head_seed; "
+            "cross-head transfer is not a standard-DAGER control."
+        )
     sample = load_registered_sample(config=config, stage=args.stage, sample_key=args.sample_key)
     controls = load_none_attack_controls(config, frozen_tau1=float(frozen_tau1["selected_tau1"]))
     output = _resolve(args.output, description="output")

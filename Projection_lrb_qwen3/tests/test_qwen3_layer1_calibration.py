@@ -86,8 +86,7 @@ def _span() -> GradientSpan:
     return GradientSpan(
         basis=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
         effective_rank=1,
-        relative_threshold=0.1,
-        largest_singular_value=1.0,
+        absolute_tolerance=1e-3,
         requested_rank=1,
         applied_rank=1,
         rank_cap=2,
@@ -95,7 +94,6 @@ def _span() -> GradientSpan:
         cap_reason=None,
         feature_dim=2,
         gradient_shape=(2, 2),
-        rank_rtol=1e-3,
         rank_cutoff=0,
         orientation="raw_qwen3_nn_linear_gradient_right_singular_vectors",
         decomposition_device="cpu",
@@ -184,7 +182,7 @@ class Layer1CalibrationTest(unittest.TestCase):
         expected = [
             (int(token_id), float(distance))
             for token_id, distance in zip(scan.token_ids.tolist(), scan.distances.tolist())
-            if distance <= tau
+            if distance < tau
         ]
         expected = sorted(expected, key=lambda item: (item[1], item[0]))
         self.assertEqual(list(result.token_ids), [token_id for token_id, _ in expected])
@@ -213,6 +211,24 @@ class Layer1CalibrationTest(unittest.TestCase):
         ]
         metrics = evaluate_tau_grid(scan=_scan(), active_positions=active)
         self.assertEqual([item.candidate_count for item in metrics], sorted(item.candidate_count for item in metrics))
+
+    def test_distance_equal_to_tau_is_rejected_by_calibration_and_attack_filter(self) -> None:
+        scan = Layer1DistanceScanResult(
+            token_ids=torch.arange(3, dtype=torch.long),
+            distances=torch.tensor([0.0009, 0.0010, 0.0011], dtype=torch.float32),
+            distance_norm="l2",
+            chunk_size=3,
+            chunk_diagnostics=(VocabularyDistanceChunkDiagnostic(0, 3, 0.01, 3),),
+        )
+        filtered = filter_qwen3_layer1_distance_scan(scan, threshold=0.001)
+        self.assertEqual(filtered.token_ids, (0,))
+        metrics = evaluate_tau_grid(
+            scan=scan,
+            active_positions=[{"position": 0, "token_id": 0}, {"position": 1, "token_id": 1}],
+        )
+        metric = next(item for item in metrics if item.tau == 0.001)
+        self.assertEqual(metric.candidate_count, 1)
+        self.assertEqual(metric.active_position_hits, 1)
 
     def test_selection_uses_smallest_passing_tau(self) -> None:
         records: list[dict[str, object]] = []
@@ -287,12 +303,10 @@ class Layer1CalibrationTest(unittest.TestCase):
             config_sha256="c" * 64,
         )
         shared = SharedDagerRank(
-            rank_definition="relative_svd_threshold",
-            rank_rtol=1e-3,
+            rank_definition="absolute_matrix_rank_atol_rtol_zero",
+            rank_atol=1e-3,
             q0_effective_rank=1,
             q1_effective_rank=1,
-            q0_relative_threshold=0.1,
-            q1_relative_threshold=0.1,
             requested_shared_rank=1,
             applied_shared_rank=1,
             rank_cap=2,

@@ -9,10 +9,16 @@ from typing import Any, Mapping
 import torch
 from torch import nn
 
-from transformers.masking_utils import (
-    create_causal_mask,
-    create_sliding_window_causal_mask,
-)
+try:
+    from transformers.masking_utils import (
+        create_causal_mask,
+        create_sliding_window_causal_mask,
+    )
+except ImportError:
+    # Layer-0-only structural checks remain useful without Transformers.  The
+    # native Layer-1 path below fails explicitly if these APIs are needed.
+    create_causal_mask = None
+    create_sliding_window_causal_mask = None
 
 from src.gradient_capture import GradientCaptureError, QProjectionPair, resolve_first_two_q_projections
 
@@ -202,6 +208,10 @@ class Qwen3RoPEDagerAdapter:
                 context="_update_causal_mask",
             )
         else:
+            if create_causal_mask is None:
+                raise ModelAdapterError(
+                    "transformers.masking_utils is required for the native Qwen3 Layer-1 forward path."
+                )
             config = getattr(
                 self.backbone,
                 "config",
@@ -226,6 +236,10 @@ class Qwen3RoPEDagerAdapter:
             }
 
             if bool(getattr(self.backbone, "has_sliding_layers", False)):
+                if create_sliding_window_causal_mask is None:
+                    raise ModelAdapterError(
+                        "transformers.masking_utils lacks create_sliding_window_causal_mask for this Qwen3 model."
+                    )
                 causal_mask_mapping["sliding_attention"] = (
                     create_sliding_window_causal_mask(**mask_kwargs)
                 )

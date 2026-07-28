@@ -75,10 +75,8 @@ def _dager_dependency_stubs() -> dict[str, ModuleType]:
         applied_shared_rank=2,
         q0_effective_rank=2,
         q1_effective_rank=2,
-        rank_definition="relative_svd_threshold",
-        rank_rtol=1e-3,
-        q0_relative_threshold=0.1,
-        q1_relative_threshold=0.1,
+        rank_definition="absolute_matrix_rank_atol_rtol_zero",
+        rank_atol=1e-3,
         requested_shared_rank=2,
         rank_was_capped=False,
         rank_cap=2,
@@ -87,7 +85,9 @@ def _dager_dependency_stubs() -> dict[str, ModuleType]:
     decomposition.decompose_qwen3_qproj_gradient = lambda *_args, **_kwargs: SimpleNamespace(truncated_rank=2)
 
     layer1_filter = ModuleType("src.dager_qwen3.layer1_filter")
-    layer1_filter.filter_qwen3_vocab_layer1 = lambda **_kwargs: SimpleNamespace(candidate_count=1)
+    layer1_filter.filter_qwen3_vocab_layer1 = lambda **_kwargs: SimpleNamespace(
+        candidate_count=1, token_ids=(9,), distances=(0.1,)
+    )
 
     layer2_decoder = ModuleType("src.dager_qwen3.layer2_decoder")
     layer2_decoder.Layer2DecoderConfig = lambda **kwargs: kwargs
@@ -110,6 +110,7 @@ def _dager_dependency_stubs() -> dict[str, ModuleType]:
         reconstructed_token_text=("reconstructed",),
         reconstructed_text="reconstructed",
         token_recovery=1.0,
+        legacy_l1_token_membership=1.0,
         exact_recovery=True,
         rouge_1=1.0,
         rouge_2=1.0,
@@ -270,6 +271,7 @@ class ProjectionLrbPairSmokeTest(unittest.TestCase):
             reconstructed_token_text=(),
             reconstructed_text="",
             token_recovery=0.0,
+            legacy_l1_token_membership=0.0,
             exact_recovery=False,
             rouge_1=0.0,
             rouge_2=0.0,

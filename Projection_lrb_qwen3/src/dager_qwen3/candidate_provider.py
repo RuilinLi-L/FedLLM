@@ -47,10 +47,19 @@ class RoPECandidateProvider:
         # This is the existing DAGER decoder cap: layer-1 candidates are already
         # sorted by span distance, and only then may the configured max_ids bound
         # the sequence decoder's Cartesian expansion.
-        kept = len(result.token_ids) if max_ids < 0 else min(len(result.token_ids), max_ids)
+        # The root RoPE path records EOS as a sentence boundary and removes it
+        # from the shared decoder vocabulary.  Qwen3 therefore reports all
+        # threshold-passing survivors instead of treating EOS as the only
+        # acceptable reconstruction terminator.
+        non_eos = tuple(
+            (token_id, distance)
+            for token_id, distance in zip(result.token_ids, result.distances)
+            if token_id != eos_token_id
+        )
+        kept = len(non_eos) if max_ids < 0 else min(len(non_eos), max_ids)
         return cls(
-            token_ids=result.token_ids[:kept],
-            distances=result.distances[:kept],
+            token_ids=tuple(token_id for token_id, _ in non_eos[:kept]),
+            distances=tuple(distance for _, distance in non_eos[:kept]),
             eos_token_id=eos_token_id,
         )
 

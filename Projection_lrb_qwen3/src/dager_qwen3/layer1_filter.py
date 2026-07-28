@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 
 from utils.functional import check_if_in_span
 
 from .gradient_decomposition import GradientSpan
-from .model_adapter import Qwen3RoPEDagerAdapter
+if TYPE_CHECKING:
+    from .model_adapter import Qwen3RoPEDagerAdapter
 
 
 class Layer1FilterError(RuntimeError):
@@ -193,7 +194,9 @@ def filter_qwen3_layer1_distance_scan(
         or not float(threshold) > 0.0
     ):
         raise Layer1FilterError(f"l1 threshold must be finite and positive, got {threshold!r}.")
-    passed = scan.distances <= float(threshold)
+    # Root DAGER's ``get_top_B_in_span`` uses a strict predicate.  Keeping the
+    # same boundary here makes calibration and reconstruction comparable.
+    passed = scan.distances < float(threshold)
     selected_ids = scan.token_ids[passed]
     selected_distances = scan.distances[passed]
     diagnostics: list[VocabularyChunkDiagnostic] = []

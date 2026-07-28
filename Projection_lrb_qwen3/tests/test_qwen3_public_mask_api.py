@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 
 import torch
-from transformers import Qwen3Config, Qwen3ForSequenceClassification
+try:
+    from transformers import Qwen3Config, Qwen3ForSequenceClassification
+except ImportError:
+    Qwen3Config = None
+    Qwen3ForSequenceClassification = None
 
 from Projection_lrb_qwen3.src.dager_qwen3.model_adapter import (
     Qwen3RoPEDagerAdapter,
@@ -15,6 +19,7 @@ class _Tokenizer:
 
 
 class Qwen3PublicMaskApiTest(unittest.TestCase):
+    @unittest.skipUnless(Qwen3Config is not None, "transformers with Qwen3 support is required")
     def test_layer1_input_matches_native_qwen3_forward(self) -> None:
         torch.manual_seed(20260728)
 

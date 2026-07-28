@@ -46,6 +46,63 @@ class NoneAttackCoreControls:
     max_sequence_length: int
 
 
+def _qproj_input_identity_diagnostic(
+    *,
+    adapter: Any,
+    input_ids: Any,
+    attention_mask: Any,
+    captured: Any,
+) -> dict[str, Any]:
+    """Fail closed unless candidate forwards reproduce the captured q0/q1 inputs."""
+    import torch
+
+    expected_q0 = adapter.layer0_qproj_inputs_for_token_ids(input_ids.reshape(-1)).reshape_as(captured.q_inputs[0])
+    cpu_state_after_capture = torch.random.get_rng_state()
+    cuda_state_after_capture = torch.cuda.get_rng_state(input_ids.device)
+    try:
+        torch.random.set_rng_state(captured.cpu_rng_state_before_forward)
+        torch.cuda.set_rng_state(captured.cuda_rng_state_before_forward, input_ids.device)
+        expected_q1 = adapter.layer1_qproj_inputs_from_prefixes(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+    finally:
+        torch.random.set_rng_state(cpu_state_after_capture)
+        torch.cuda.set_rng_state(cuda_state_after_capture, input_ids.device)
+
+    tolerance = 5e-4 if captured.compute_dtype == torch.bfloat16 else 1e-4
+    result: dict[str, Any] = {
+        "record_type": "qwen3_qproj_input_identity",
+        "source": "same_gradient_capture_forward_rng_state_replay",
+        "tolerance": tolerance,
+        "layers": {},
+    }
+    passed = True
+    for name, expected, observed in zip(("q0", "q1"), (expected_q0, expected_q1), captured.q_inputs):
+        if expected.shape != observed.shape:
+            raise NoneAttackCoreError(
+                f"{name} adapter input shape {tuple(expected.shape)} differs from captured shape {tuple(observed.shape)}."
+            )
+        expected_fp32 = expected.detach().float()
+        observed_fp32 = observed.detach().float()
+        absolute = (expected_fp32 - observed_fp32).abs()
+        max_abs = float(absolute.max().item())
+        max_rel = float((absolute / observed_fp32.abs().clamp_min(1e-12)).max().item())
+        layer_passed = bool(torch.allclose(expected_fp32, observed_fp32, rtol=0.0, atol=tolerance))
+        result["layers"][name] = {
+            "shape": list(observed.shape),
+            "dtype": str(observed.dtype),
+            "max_abs_error": max_abs,
+            "max_relative_error": max_rel,
+            "passed": layer_passed,
+        }
+        passed = passed and layer_passed
+    result["passed"] = passed
+    if not passed:
+        raise NoneAttackCoreError("Qwen3 adapter q0/q1 inputs do not match the gradient-capture forward.")
+    return result
+
+
 def q_canonical_indices(manifest: Mapping[str, Any], names: tuple[str, str]) -> dict[str, int]:
     """Resolve the two structural q-projection positions in canonical order."""
     entries = manifest.get("entries")
@@ -144,6 +201,12 @@ def execute_none_only_dager(
         if diagnostic.get("passed") is not True:
             raise GradientDiagnosticFailure(diagnostic, diagnostic_controls)
         adapter = Qwen3RoPEDagerAdapter(bundle.model, bundle.tokenizer)
+        qproj_input_identity = _qproj_input_identity_diagnostic(
+            adapter=adapter,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            captured=captured,
+        )
         canonical = build_canonical_gradient_manifest(bundle.model)
         parameter_names = tuple(str(entry["name"]) for entry in canonical["entries"])
         canonical_gradients = tuple(
@@ -181,6 +244,7 @@ def execute_none_only_dager(
             },
             "diagnostic_status": "ok",
             "gradient_diagnostic": diagnostic,
+            "qproj_input_identity": qproj_input_identity,
             "adapter": {
                 "execution_path": adapter.metadata.execution_path,
                 "hidden_size": adapter.metadata.hidden_size,
@@ -296,6 +360,7 @@ def execute_dager_from_observed_q_gradients(
         tokenizer=tokenizer,
         ground_truth_token_ids=sample.input_ids,
         reconstructed_token_ids=layer2.selected_token_ids,
+        layer1_candidate_token_ids=layer1.token_ids,
         eos_token_id=sample.eos_token_id,
         rouge_metric=rouge_backend.metric,
     )
@@ -310,6 +375,9 @@ def execute_dager_from_observed_q_gradients(
         "reconstructed_token_text": list(metrics.reconstructed_token_text),
         "reconstructed_text": metrics.reconstructed_text,
         "token_recovery": metrics.token_recovery,
+        "token_recovery_semantics": "first_layer2_survivor_position_match_for_reporting_only",
+        "legacy_l1_token_membership": metrics.legacy_l1_token_membership,
+        "legacy_l1_token_membership_semantics": "root_attack_rec_token_excluding_terminal_eos",
         "exact_recovery": metrics.exact_recovery,
         "rouge_1": metrics.rouge_1,
         "rouge_2": metrics.rouge_2,
@@ -322,11 +390,9 @@ def execute_dager_from_observed_q_gradients(
         "layer_2_rank": q1_span.truncated_rank,
         "layer_2_effective_rank": shared_rank.q1_effective_rank,
         "rank_definition": shared_rank.rank_definition,
-        "rank_rtol": shared_rank.rank_rtol,
+        "rank_atol": shared_rank.rank_atol,
         "q0_effective_rank": shared_rank.q0_effective_rank,
         "q1_effective_rank": shared_rank.q1_effective_rank,
-        "q0_relative_threshold": shared_rank.q0_relative_threshold,
-        "q1_relative_threshold": shared_rank.q1_relative_threshold,
         "requested_shared_rank": shared_rank.requested_shared_rank,
         "applied_shared_rank": shared_rank.applied_shared_rank,
         "rank_was_capped": shared_rank.rank_was_capped,
@@ -336,8 +402,8 @@ def execute_dager_from_observed_q_gradients(
         "thresholds": {
             "l1_span_thresh": controls.tau1,
             "l2_span_thresh": controls.tau2,
-            "rank_rtol": controls.rank_tolerance,
-            "rank_definition": "relative_svd_threshold",
+            "rank_atol": controls.rank_tolerance,
+            "rank_definition": "absolute_matrix_rank_atol_rtol_zero",
             "rank_cutoff": controls.rank_cutoff,
             "distance_norm": "l2",
         },
@@ -352,6 +418,7 @@ def execute_dager_from_observed_q_gradients(
             "per_length_survivor_counts": [list(value) for value in layer2.per_length_survivor_counts],
         },
         "layer_2_completed_prefix_count": len(layer2.completed_prefixes),
+        "selected_survivor_rule": "first_threshold_passing_prefix_in_enumeration_order",
         "selected_layer_2_mean_span_distance": layer2.selected_mean_span_distance,
         **layer2_audit_json_fields(layer2),
         "q_proj": {

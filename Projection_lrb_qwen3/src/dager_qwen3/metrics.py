@@ -55,6 +55,7 @@ class AttackMetrics:
     """Ground-truth reporting metrics; none of these values influence decoding."""
 
     token_recovery: float
+    legacy_l1_token_membership: float
     exact_recovery: bool
     rouge_1: float
     rouge_2: float
@@ -205,12 +206,14 @@ def compute_attack_metrics(
     tokenizer: Any,
     ground_truth_token_ids: Sequence[int],
     reconstructed_token_ids: Sequence[int],
+    layer1_candidate_token_ids: Sequence[int],
     eos_token_id: int,
     rouge_metric: RougeMetricProtocol,
 ) -> AttackMetrics:
     """Report metrics after decoding; ground truth is never passed to DAGER search."""
     ground_truth = _require_token_ids("ground_truth_token_ids", ground_truth_token_ids)
     reconstructed = _require_token_ids("reconstructed_token_ids", reconstructed_token_ids)
+    layer1_candidates = _require_token_ids("layer1_candidate_token_ids", layer1_candidate_token_ids)
     if not ground_truth:
         raise AttackMetricsError("Ground-truth preregistered token sequence must not be empty.")
     if ground_truth[-1] != eos_token_id:
@@ -221,8 +224,18 @@ def compute_attack_metrics(
         int(predicted == expected)
         for predicted, expected in zip(reconstructed, ground_truth)
     )
+    # ``attack.py`` defines rec_token as token membership in the Layer-1
+    # candidate set and excludes the terminal EOS in its decoder path.
+    recoverable_tokens = ground_truth[:-1]
+    candidate_set = set(layer1_candidates)
+    legacy_l1_token_membership = (
+        sum(int(token_id in candidate_set) for token_id in recoverable_tokens) / len(recoverable_tokens)
+        if recoverable_tokens
+        else 0.0
+    )
     return AttackMetrics(
         token_recovery=aligned_matches / len(ground_truth),
+        legacy_l1_token_membership=legacy_l1_token_membership,
         exact_recovery=reconstructed == ground_truth,
         rouge_1=_legacy_rouge_f1(rouge_metric, reconstructed_text, ground_truth_text, "rouge1"),
         rouge_2=_legacy_rouge_f1(rouge_metric, reconstructed_text, ground_truth_text, "rouge2"),

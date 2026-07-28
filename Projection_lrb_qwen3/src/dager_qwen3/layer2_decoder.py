@@ -71,6 +71,7 @@ class Layer2DecodeResult:
     selected_token_ids: tuple[int, ...]
     selected_mean_span_distance: float | None
     completed_prefixes: tuple[DecodedPrefix, ...]
+    survivor_prefixes: tuple[DecodedPrefix, ...]
     evaluated_prefix_count: int
     search_budget_exhausted: bool
     per_length_survivor_counts: tuple[tuple[int, int], ...]
@@ -165,7 +166,7 @@ def _summarize_length_distances(
 def _termination_reason(
     *,
     candidate_provider: RoPECandidateProvider,
-    completed: list[DecodedPrefix],
+    survivors: list[DecodedPrefix],
     exhausted: bool,
     distance_audit: list[Layer2LengthDistanceAudit],
     max_sequence_length: int,
@@ -175,8 +176,8 @@ def _termination_reason(
         return "no_layer1_candidates"
     if exhausted:
         return "search_budget_exhausted"
-    if completed:
-        return "completed_prefix_found"
+    if survivors:
+        return "layer2_survivors_reported"
     for item in distance_audit:
         if item.passing_count == 0:
             return f"no_layer2_survivor_at_length_{item.prefix_length}"
@@ -204,6 +205,14 @@ def layer2_audit_json_fields(result: Layer2DecodeResult) -> dict[str, Any]:
             for item in result.per_length_distance_audit
         ],
         "termination_reason": result.termination_reason,
+        "layer_2_survivor_count": len(result.survivor_prefixes),
+        "layer_2_survivors": [
+            {
+                "token_ids": list(item.token_ids),
+                "mean_span_distance": item.mean_span_distance,
+            }
+            for item in result.survivor_prefixes
+        ],
     }
 
 
@@ -214,7 +223,7 @@ def decode_qwen3_rope_prefixes(
     candidate_provider: RoPECandidateProvider,
     config: Layer2DecoderConfig,
 ) -> Layer2DecodeResult:
-    """Recover EOS-terminated prefixes through standard DAGER span thresholding.
+    """Report all standard-DAGER threshold-passing prefixes in enumeration order.
 
     Each prefix is formed by the shared RoPE candidate vocabulary, evaluated by
     native Qwen3 layer-0 forward, and retained only when *every* q1 input lies
@@ -230,6 +239,7 @@ def decode_qwen3_rope_prefixes(
     started = perf_counter()
     survivors: list[DecodedPrefix] = []
     completed: list[DecodedPrefix] = []
+    reportable_survivors: list[DecodedPrefix] = []
     evaluated = 0
     exhausted = False
     survivor_counts: list[tuple[int, int]] = []
@@ -271,6 +281,7 @@ def decode_qwen3_rope_prefixes(
                 if not passed:
                     continue
                 accepted = DecodedPrefix(token_ids, score)
+                reportable_survivors.append(accepted)
                 if accepted.token_ids[-1] == candidate_provider.eos_token_id:
                     completed.append(accepted)
                 elif sequence_length < config.max_sequence_length:
@@ -291,6 +302,7 @@ def decode_qwen3_rope_prefixes(
                 if not passed:
                     continue
                 accepted = DecodedPrefix(token_ids, score)
+                reportable_survivors.append(accepted)
                 if accepted.token_ids[-1] == candidate_provider.eos_token_id:
                     completed.append(accepted)
                 elif sequence_length < config.max_sequence_length:
@@ -309,18 +321,22 @@ def decode_qwen3_rope_prefixes(
         # This is exhaustive threshold-filtered expansion, not beam search:
         # the next iteration streams every accepted prefix/token pair in chunks.
         survivors = next_survivors
-    selected = completed[0] if completed else None
+    # This field is only a deterministic reporting convenience.  The complete
+    # survivor list is serialized for attacker-side evaluation; absence of EOS
+    # no longer turns a non-empty survivor set into an empty reconstruction.
+    selected = reportable_survivors[0] if reportable_survivors else None
     return Layer2DecodeResult(
         selected_token_ids=() if selected is None else selected.token_ids,
         selected_mean_span_distance=None if selected is None else selected.mean_span_distance,
         completed_prefixes=tuple(completed),
+        survivor_prefixes=tuple(reportable_survivors),
         evaluated_prefix_count=evaluated,
         search_budget_exhausted=exhausted,
         per_length_survivor_counts=tuple(survivor_counts),
         per_length_distance_audit=tuple(distance_audit),
         termination_reason=_termination_reason(
             candidate_provider=candidate_provider,
-            completed=completed,
+            survivors=reportable_survivors,
             exhausted=exhausted,
             distance_audit=distance_audit,
             max_sequence_length=config.max_sequence_length,

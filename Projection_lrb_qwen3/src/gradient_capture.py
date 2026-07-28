@@ -34,6 +34,8 @@ class CapturedGradientStep:
     q_expected_weight_shape: tuple[int, int]
     gpu_peak_memory_bytes: int
     compute_dtype: torch.dtype
+    cpu_rng_state_before_forward: torch.Tensor
+    cuda_rng_state_before_forward: torch.Tensor
 
 
 def _config_int(model: nn.Module, name: str) -> int:
@@ -201,6 +203,11 @@ def capture_single_example_gradients(
     ]
     model.zero_grad(set_to_none=True)
     try:
+        # Replaying this state lets the adapter prove that its q0/q1 inputs
+        # match the very forward that produced the attacked gradients, even if
+        # a supported model retains train-mode stochastic operators.
+        cpu_rng_state_before_forward = torch.random.get_rng_state().clone()
+        cuda_rng_state_before_forward = torch.cuda.get_rng_state(input_ids.device).clone()
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, use_cache=False)
         loss_tensor = getattr(outputs, "loss", None)
         if not isinstance(loss_tensor, torch.Tensor) or loss_tensor.ndim != 0:
@@ -258,4 +265,6 @@ def capture_single_example_gradients(
         q_expected_weight_shape=q_pair.expected_weight_shape,
         gpu_peak_memory_bytes=peak_memory,
         compute_dtype=compute_dtype,
+        cpu_rng_state_before_forward=cpu_rng_state_before_forward,
+        cuda_rng_state_before_forward=cuda_rng_state_before_forward,
     )

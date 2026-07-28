@@ -189,7 +189,8 @@ def evaluate_tau_grid(
     active_unique_total = len(active_unique_ids)
     result: list[TauSampleMetrics] = []
     for tau in values:
-        passing = scan.distances <= tau
+        # Calibration must use the same strict Layer-1 predicate as the attack.
+        passing = scan.distances < tau
         candidate_count = int(torch.count_nonzero(passing).item())
         active_position_hits = sum(bool(passing[int(token_id)].item()) for token_id in active_token_ids)
         active_unique_hits = sum(bool(passing[token_id].item()) for token_id in active_unique_ids)
@@ -365,7 +366,7 @@ def build_sample_record(
             "q0": shared_rank.q0_effective_rank,
             "q1": shared_rank.q1_effective_rank,
             "rank_definition": shared_rank.rank_definition,
-            "rank_rtol": shared_rank.rank_rtol,
+            "rank_atol": shared_rank.rank_atol,
         },
         "shared_rank": {
             "requested": shared_rank.requested_shared_rank,
