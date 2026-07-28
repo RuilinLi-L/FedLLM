@@ -46,7 +46,8 @@ class NoneAttackCoreControls:
     max_sequence_length: int
 
 
-def _q_canonical_indices(manifest: Mapping[str, Any], names: tuple[str, str]) -> dict[str, int]:
+def q_canonical_indices(manifest: Mapping[str, Any], names: tuple[str, str]) -> dict[str, int]:
+    """Resolve the two structural q-projection positions in canonical order."""
     entries = manifest.get("entries")
     if not isinstance(entries, list):
         raise NoneAttackCoreError("Canonical gradient manifest lacks entries.")
@@ -59,6 +60,38 @@ def _q_canonical_indices(manifest: Mapping[str, Any], names: tuple[str, str]) ->
     if set(result) != set(names):
         raise NoneAttackCoreError("Canonical gradient manifest does not contain both structural q_proj names.")
     return result
+
+
+def q_projection_observations_from_canonical_tuple(
+    *,
+    canonical_gradients: tuple[Any | None, ...],
+    canonical_parameter_names: tuple[str, ...],
+    q_parameter_names: tuple[str, str],
+    q_canonical_indices: Mapping[str, int],
+) -> tuple[Any, Any]:
+    """Read the two q-projection observations only through canonical indices.
+
+    The paired Projection-LRB smoke keeps the complete named-gradient tuple,
+    including ``None`` positions, through its transform.  This helper makes the
+    subsequent q-projection selection auditable and prevents a q-only defense
+    shortcut.
+    """
+    if len(canonical_gradients) != len(canonical_parameter_names):
+        raise NoneAttackCoreError("Canonical gradient tuple and name tuple have different lengths.")
+    observations: list[Any] = []
+    for name in q_parameter_names:
+        index = q_canonical_indices.get(name)
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(canonical_gradients):
+            raise NoneAttackCoreError(f"Canonical q_proj index is invalid for {name!r}.")
+        if canonical_parameter_names[index] != name:
+            raise NoneAttackCoreError(
+                f"Canonical q_proj index {index} resolves to {canonical_parameter_names[index]!r}, not {name!r}."
+            )
+        gradient = canonical_gradients[index]
+        if gradient is None:
+            raise NoneAttackCoreError(f"Canonical q_proj gradient is None for {name!r}.")
+        observations.append(gradient)
+    return observations[0], observations[1]
 
 
 def execute_none_only_dager(
@@ -75,19 +108,11 @@ def execute_none_only_dager(
     try:
         import torch
 
-        from .candidate_provider import RoPECandidateProvider
-        from .gradient_decomposition import (
-            decompose_qwen3_qproj_gradient,
-            shared_dager_rank_for_qwen3_qproj_gradients,
-        )
         from .gradient_gate import decode_token_texts, diagnostic_thresholds
-        from .layer1_filter import filter_qwen3_vocab_layer1
-        from .layer2_decoder import Layer2DecoderConfig, decode_qwen3_rope_prefixes, layer2_audit_json_fields
         from .model_adapter import Qwen3RoPEDagerAdapter
         from src.gradient_capture import build_canonical_gradient_manifest, capture_single_example_gradients
         from src.qwen3_classifier import load_local_qwen3_sequence_classifier
         from src.span_diagnostics import diagnose_two_q_projections
-        from .metrics import compute_attack_metrics
     except Exception as error:
         raise NoneAttackCoreError(f"Qwen3 standard-DAGER dependencies are unavailable: {error}") from error
     torch.manual_seed(head_seed)
@@ -117,117 +142,37 @@ def execute_none_only_dager(
         )
         if diagnostic.get("passed") is not True:
             raise GradientDiagnosticFailure(diagnostic, diagnostic_controls)
-        attack_started = perf_counter()
         adapter = Qwen3RoPEDagerAdapter(bundle.model, bundle.tokenizer)
-        shared_rank = shared_dager_rank_for_qwen3_qproj_gradients(
-            captured.q_gradients,
-            feature_dim=adapter.metadata.hidden_size,
-            rank_tolerance=controls.rank_tolerance,
-            rank_cutoff=controls.rank_cutoff,
-            decomposition_device=bundle.device,
-        )
-        q0_span = decompose_qwen3_qproj_gradient(
-            captured.q_gradients[0], feature_dim=adapter.metadata.hidden_size,
-            rank_tolerance=controls.rank_tolerance, rank_cutoff=controls.rank_cutoff,
-            decomposition_device=bundle.device, shared_truncated_rank=shared_rank.applied_shared_rank,
-        )
-        q1_span = decompose_qwen3_qproj_gradient(
-            captured.q_gradients[1], feature_dim=adapter.metadata.hidden_size,
-            rank_tolerance=controls.rank_tolerance, rank_cutoff=controls.rank_cutoff,
-            decomposition_device=bundle.device, shared_truncated_rank=shared_rank.applied_shared_rank,
-        )
-        layer1 = filter_qwen3_vocab_layer1(
-            adapter=adapter, span=q0_span, threshold=controls.tau1,
-            vocab_chunk_size=controls.parallel, distance_norm="l2",
-        )
-        candidate_provider = RoPECandidateProvider.from_layer1_result(
-            layer1, eos_token_id=sample.eos_token_id, max_ids=controls.max_candidate_ids
-        )
-        layer2 = decode_qwen3_rope_prefixes(
-            adapter=adapter,
-            span=q1_span,
-            candidate_provider=candidate_provider,
-            config=Layer2DecoderConfig(
-                max_sequence_length=controls.max_sequence_length,
-                threshold=controls.tau2,
-                distance_norm="l2",
-                search_budget=controls.max_search_candidates,
-                decode_batch_size=controls.parallel,
-            ),
-        )
-        attack_seconds = perf_counter() - attack_started
-        metrics = compute_attack_metrics(
-            tokenizer=bundle.tokenizer,
-            ground_truth_token_ids=sample.input_ids,
-            reconstructed_token_ids=layer2.selected_token_ids,
-            eos_token_id=sample.eos_token_id,
-            rouge_metric=rouge_backend.metric,
-        )
         canonical = build_canonical_gradient_manifest(bundle.model)
+        parameter_names = tuple(str(entry["name"]) for entry in canonical["entries"])
+        canonical_gradients = tuple(
+            parameter.grad.detach().clone() if parameter.grad is not None else None
+            for _, parameter in bundle.model.named_parameters()
+        )
+        canonical_indices = q_canonical_indices(canonical, captured.q_parameter_names)
+        observed_gradients = q_projection_observations_from_canonical_tuple(
+            canonical_gradients=canonical_gradients,
+            canonical_parameter_names=parameter_names,
+            q_parameter_names=captured.q_parameter_names,
+            q_canonical_indices=canonical_indices,
+        )
+        if any(not torch.equal(observed, captured_gradient) for observed, captured_gradient in zip(observed_gradients, captured.q_gradients)):
+            raise NoneAttackCoreError("Canonical q_proj observations differ from the captured q_proj gradients.")
+        result = execute_dager_from_observed_q_gradients(
+            adapter=adapter,
+            tokenizer=bundle.tokenizer,
+            sample=sample,
+            observed_q_gradients=observed_gradients,
+            q_parameter_names=captured.q_parameter_names,
+            q_canonical_indices=canonical_indices,
+            controls=controls,
+            rouge_backend=rouge_backend,
+        )
         return {
-            "status": "search_budget_exhausted" if layer2.search_budget_exhausted else "ok",
-            "tau1": controls.tau1,
-            "tau2": controls.tau2,
-            "ground_truth_token_ids": list(sample.input_ids),
-            "ground_truth_token_text": list(metrics.ground_truth_token_text),
-            "ground_truth_text": metrics.ground_truth_text,
-            "reconstructed_token_ids": list(layer2.selected_token_ids),
-            "reconstructed_token_text": list(metrics.reconstructed_token_text),
-            "reconstructed_text": metrics.reconstructed_text,
-            "token_recovery": metrics.token_recovery,
-            "exact_recovery": metrics.exact_recovery,
-            "rouge_1": metrics.rouge_1,
-            "rouge_2": metrics.rouge_2,
-            "legacy_rouge_backend": rouge_backend.json_metadata(),
-            "empty_reconstruction": metrics.empty_reconstruction,
-            "layer_1_candidate_count": layer1.candidate_count,
-            "layer_1_decoder_candidate_count": len(candidate_provider.token_ids),
-            "layer_1_rank": q0_span.truncated_rank,
-            "layer_1_effective_rank": shared_rank.q0_effective_rank,
-            "layer_2_rank": q1_span.truncated_rank,
-            "layer_2_effective_rank": shared_rank.q1_effective_rank,
-            "rank_definition": shared_rank.rank_definition,
-            "rank_rtol": shared_rank.rank_rtol,
-            "q0_effective_rank": shared_rank.q0_effective_rank,
-            "q1_effective_rank": shared_rank.q1_effective_rank,
-            "q0_relative_threshold": shared_rank.q0_relative_threshold,
-            "q1_relative_threshold": shared_rank.q1_relative_threshold,
-            "requested_shared_rank": shared_rank.requested_shared_rank,
-            "applied_shared_rank": shared_rank.applied_shared_rank,
-            "rank_was_capped": shared_rank.rank_was_capped,
-            "rank_cap": shared_rank.rank_cap,
-            "cap_reason": shared_rank.cap_reason,
-            "attack_time_seconds": attack_seconds,
+            **result,
             "gradient_capture_time_seconds": capture_seconds,
             "loss": captured.loss,
             "gpu_peak_memory_bytes": captured.gpu_peak_memory_bytes,
-            "thresholds": {
-                "l1_span_thresh": controls.tau1,
-                "l2_span_thresh": controls.tau2,
-                "rank_rtol": controls.rank_tolerance,
-                "rank_definition": "relative_svd_threshold",
-                "rank_cutoff": controls.rank_cutoff,
-                "distance_norm": "l2",
-            },
-            "search_budget": {
-                "maxC": controls.max_search_candidates,
-                "parallel": controls.parallel,
-                "vocab_chunk_size": controls.parallel,
-                "max_ids": controls.max_candidate_ids,
-                "max_length": controls.max_sequence_length,
-                "evaluated_prefix_count": layer2.evaluated_prefix_count,
-                "search_budget_exhausted": layer2.search_budget_exhausted,
-                "per_length_survivor_counts": [list(value) for value in layer2.per_length_survivor_counts],
-            },
-            "layer_2_completed_prefix_count": len(layer2.completed_prefixes),
-            "selected_layer_2_mean_span_distance": layer2.selected_mean_span_distance,
-            **layer2_audit_json_fields(layer2),
-            "q_proj": {
-                "parameter_names": list(captured.q_parameter_names),
-                "canonical_indices": _q_canonical_indices(canonical, captured.q_parameter_names),
-                "gradient_shapes": [list(gradient.shape) for gradient in captured.q_gradients],
-                "orientation": "raw_qwen3_nn_linear_gradient_right_singular_vectors",
-            },
             "canonical_gradient_summary": {
                 "gradient_tensor_count": canonical["gradient_tensor_count"],
                 "gradient_numel": canonical["gradient_numel"],
@@ -245,3 +190,159 @@ def execute_none_only_dager(
             del bundle
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+
+def execute_dager_from_observed_q_gradients(
+    *,
+    adapter: Any,
+    tokenizer: Any,
+    sample: SampleProtocol,
+    observed_q_gradients: tuple[Any, Any],
+    q_parameter_names: tuple[str, str],
+    q_canonical_indices: Mapping[str, int],
+    controls: NoneAttackCoreControls,
+    rouge_backend: Any,
+) -> dict[str, Any]:
+    """Decode two observed q-projection gradients with standard DAGER only.
+
+    This core deliberately accepts only the two observed tensors and normal
+    DAGER controls.  It receives no LRB seed, preset, layer metadata, or
+    transform state, so both the raw and Projection-LRB branches are decoded
+    through the exact same defense-unaware path.
+    """
+    if len(observed_q_gradients) != 2:
+        raise NoneAttackCoreError("Standard DAGER requires exactly two observed q_proj gradients.")
+    try:
+        from .candidate_provider import RoPECandidateProvider
+        from .gradient_decomposition import (
+            decompose_qwen3_qproj_gradient,
+            shared_dager_rank_for_qwen3_qproj_gradients,
+        )
+        from .layer1_filter import filter_qwen3_vocab_layer1
+        from .layer2_decoder import Layer2DecoderConfig, decode_qwen3_rope_prefixes, layer2_audit_json_fields
+        from .metrics import compute_attack_metrics
+    except Exception as error:
+        raise NoneAttackCoreError(f"Qwen3 standard-DAGER decoder dependencies are unavailable: {error}") from error
+    attack_started = perf_counter()
+    q0_gradient, q1_gradient = observed_q_gradients
+    shared_rank = shared_dager_rank_for_qwen3_qproj_gradients(
+        (q0_gradient, q1_gradient),
+        feature_dim=adapter.metadata.hidden_size,
+        rank_tolerance=controls.rank_tolerance,
+        rank_cutoff=controls.rank_cutoff,
+        decomposition_device=adapter.device,
+    )
+    q0_span = decompose_qwen3_qproj_gradient(
+        q0_gradient,
+        feature_dim=adapter.metadata.hidden_size,
+        rank_tolerance=controls.rank_tolerance,
+        rank_cutoff=controls.rank_cutoff,
+        decomposition_device=adapter.device,
+        shared_truncated_rank=shared_rank.applied_shared_rank,
+    )
+    q1_span = decompose_qwen3_qproj_gradient(
+        q1_gradient,
+        feature_dim=adapter.metadata.hidden_size,
+        rank_tolerance=controls.rank_tolerance,
+        rank_cutoff=controls.rank_cutoff,
+        decomposition_device=adapter.device,
+        shared_truncated_rank=shared_rank.applied_shared_rank,
+    )
+    layer1 = filter_qwen3_vocab_layer1(
+        adapter=adapter,
+        span=q0_span,
+        threshold=controls.tau1,
+        vocab_chunk_size=controls.parallel,
+        distance_norm="l2",
+    )
+    candidate_provider = RoPECandidateProvider.from_layer1_result(
+        layer1,
+        eos_token_id=sample.eos_token_id,
+        max_ids=controls.max_candidate_ids,
+    )
+    layer2 = decode_qwen3_rope_prefixes(
+        adapter=adapter,
+        span=q1_span,
+        candidate_provider=candidate_provider,
+        config=Layer2DecoderConfig(
+            max_sequence_length=controls.max_sequence_length,
+            threshold=controls.tau2,
+            distance_norm="l2",
+            search_budget=controls.max_search_candidates,
+            decode_batch_size=controls.parallel,
+        ),
+    )
+    metrics = compute_attack_metrics(
+        tokenizer=tokenizer,
+        ground_truth_token_ids=sample.input_ids,
+        reconstructed_token_ids=layer2.selected_token_ids,
+        eos_token_id=sample.eos_token_id,
+        rouge_metric=rouge_backend.metric,
+    )
+    return {
+        "status": "search_budget_exhausted" if layer2.search_budget_exhausted else "ok",
+        "tau1": controls.tau1,
+        "tau2": controls.tau2,
+        "ground_truth_token_ids": list(sample.input_ids),
+        "ground_truth_token_text": list(metrics.ground_truth_token_text),
+        "ground_truth_text": metrics.ground_truth_text,
+        "reconstructed_token_ids": list(layer2.selected_token_ids),
+        "reconstructed_token_text": list(metrics.reconstructed_token_text),
+        "reconstructed_text": metrics.reconstructed_text,
+        "token_recovery": metrics.token_recovery,
+        "exact_recovery": metrics.exact_recovery,
+        "rouge_1": metrics.rouge_1,
+        "rouge_2": metrics.rouge_2,
+        "legacy_rouge_backend": rouge_backend.json_metadata(),
+        "empty_reconstruction": metrics.empty_reconstruction,
+        "layer_1_candidate_count": layer1.candidate_count,
+        "layer_1_decoder_candidate_count": len(candidate_provider.token_ids),
+        "layer_1_rank": q0_span.truncated_rank,
+        "layer_1_effective_rank": shared_rank.q0_effective_rank,
+        "layer_2_rank": q1_span.truncated_rank,
+        "layer_2_effective_rank": shared_rank.q1_effective_rank,
+        "rank_definition": shared_rank.rank_definition,
+        "rank_rtol": shared_rank.rank_rtol,
+        "q0_effective_rank": shared_rank.q0_effective_rank,
+        "q1_effective_rank": shared_rank.q1_effective_rank,
+        "q0_relative_threshold": shared_rank.q0_relative_threshold,
+        "q1_relative_threshold": shared_rank.q1_relative_threshold,
+        "requested_shared_rank": shared_rank.requested_shared_rank,
+        "applied_shared_rank": shared_rank.applied_shared_rank,
+        "rank_was_capped": shared_rank.rank_was_capped,
+        "rank_cap": shared_rank.rank_cap,
+        "cap_reason": shared_rank.cap_reason,
+        "attack_time_seconds": perf_counter() - attack_started,
+        "thresholds": {
+            "l1_span_thresh": controls.tau1,
+            "l2_span_thresh": controls.tau2,
+            "rank_rtol": controls.rank_tolerance,
+            "rank_definition": "relative_svd_threshold",
+            "rank_cutoff": controls.rank_cutoff,
+            "distance_norm": "l2",
+        },
+        "search_budget": {
+            "maxC": controls.max_search_candidates,
+            "parallel": controls.parallel,
+            "vocab_chunk_size": controls.parallel,
+            "max_ids": controls.max_candidate_ids,
+            "max_length": controls.max_sequence_length,
+            "evaluated_prefix_count": layer2.evaluated_prefix_count,
+            "search_budget_exhausted": layer2.search_budget_exhausted,
+            "per_length_survivor_counts": [list(value) for value in layer2.per_length_survivor_counts],
+        },
+        "layer_2_completed_prefix_count": len(layer2.completed_prefixes),
+        "selected_layer_2_mean_span_distance": layer2.selected_mean_span_distance,
+        **layer2_audit_json_fields(layer2),
+        "q_proj": {
+            "parameter_names": list(q_parameter_names),
+            "canonical_indices": dict(q_canonical_indices),
+            "gradient_shapes": [list(gradient.shape) for gradient in observed_q_gradients],
+            "orientation": "raw_qwen3_nn_linear_gradient_right_singular_vectors",
+        },
+        "adapter": {
+            "execution_path": adapter.metadata.execution_path,
+            "hidden_size": adapter.metadata.hidden_size,
+            "vocab_size": adapter.metadata.vocab_size,
+        },
+    }
