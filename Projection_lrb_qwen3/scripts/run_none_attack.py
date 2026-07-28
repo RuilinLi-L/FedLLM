@@ -37,6 +37,10 @@ from src.dager_qwen3.gradient_decomposition import (
     decompose_qwen3_qproj_gradient,
     shared_dager_rank_for_qwen3_qproj_gradients,
 )
+from src.dager_qwen3.gradient_gate import (
+    decode_token_texts as _decode_token_texts_shared,
+    diagnostic_thresholds as _shared_diagnostic_thresholds,
+)
 from src.dager_qwen3.layer1_filter import filter_qwen3_vocab_layer1
 from src.dager_qwen3.layer2_decoder import Layer2DecoderConfig, decode_qwen3_rope_prefixes
 from src.dager_qwen3.metrics import compute_attack_metrics, preflight_legacy_dager_rouge_backend
@@ -78,26 +82,19 @@ def _git_commit() -> str | None:
 
 
 def _decode_token_texts(tokenizer: Any, token_ids: tuple[int, ...]) -> list[str]:
-    convert = getattr(tokenizer, "convert_ids_to_tokens", None)
-    if not callable(convert):
-        raise NoneAttackScriptError("Qwen3 tokenizer lacks convert_ids_to_tokens.")
-    values = convert(list(token_ids))
-    if not isinstance(values, list) or len(values) != len(token_ids) or any(not isinstance(value, str) for value in values):
-        raise NoneAttackScriptError("Qwen3 tokenizer returned invalid convert_ids_to_tokens values.")
-    return values
+    """Compatibility wrapper retained for the existing runner test surface."""
+    try:
+        return _decode_token_texts_shared(tokenizer, token_ids)
+    except Exception as error:
+        raise NoneAttackScriptError(str(error)) from error
 
 
 def _diagnostic_thresholds(dtype: str) -> dict[str, float]:
-    if dtype not in ("bfloat16", "float32"):
-        raise NoneAttackScriptError(f"Unsupported dtype {dtype!r}.")
-    return {
-        "rank_atol": 1e-6,
-        "rank_rtol": 1e-3,
-        "delta_rtol": 1e-3,
-        "identity_error_tol": 5e-3,
-        "max_active_relative_residual": 3e-3 if dtype == "bfloat16" else 2e-4,
-        "negative_control_factor": 10.0,
-    }
+    """Compatibility wrapper retained for the existing runner test surface."""
+    try:
+        return _shared_diagnostic_thresholds(dtype)
+    except Exception as error:
+        raise NoneAttackScriptError(str(error)) from error
 
 
 def _q_canonical_indices(manifest: Mapping[str, Any], names: tuple[str, str]) -> dict[str, int]:
