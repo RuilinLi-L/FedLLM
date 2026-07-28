@@ -28,6 +28,9 @@ from src.dager_qwen3.gradient_decomposition import (
     shared_dager_rank_for_qwen3_qproj_gradients,
 )
 from src.dager_qwen3.gradient_gate import diagnose_captured_q_projections
+from src.dager_qwen3.bf16_gate_profile_amendment import (
+    verify_amendment as verify_bf16_gate_profile_amendment,
+)
 from src.dager_qwen3.layer1_calibration import (
     Layer1CalibrationError,
     aggregate_calibration_records,
@@ -233,6 +236,8 @@ def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
     config = load_experiment_config(config_path)
     registered_head_seed(config, stage="calibration", requested_seed=args.head_seed)
     verify_amendment(project_root=QWEN_ROOT)
+    if args.dtype == "bfloat16":
+        verify_bf16_gate_profile_amendment(project_root=QWEN_ROOT)
     preregistration = _load_preregistration(config)
     output_root = _resolve_repository_path(args.output_root, description="output root")
     expected_outputs_root = (QWEN_ROOT / "outputs").resolve()

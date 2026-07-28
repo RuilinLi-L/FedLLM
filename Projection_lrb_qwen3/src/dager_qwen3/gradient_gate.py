@@ -21,7 +21,10 @@ def diagnostic_thresholds(dtype: str) -> dict[str, float]:
         "rank_rtol": 1e-3,
         "delta_rtol": 1e-3,
         "identity_error_tol": 5e-3,
-        "max_active_relative_residual": 3e-3 if dtype == "bfloat16" else 2e-4,
+        # This BF16 value is frozen by the 20-sample, Layer-1-free structural
+        # profile recorded in prereg_amendments/bf16_gradient_gate_pre_attack_075.
+        # It is a numerical diagnostic guard, not a DAGER tau1/tau2 control.
+        "max_active_relative_residual": 7.5e-3 if dtype == "bfloat16" else 2e-4,
         "negative_control_factor": 10.0,
     }
 

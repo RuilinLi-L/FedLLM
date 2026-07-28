@@ -87,7 +87,7 @@ class GradientFailureSidecarTest(unittest.TestCase):
         )
         self.assertEqual(
             RUNNER._diagnostic_thresholds("bfloat16")["max_active_relative_residual"],
-            3e-3,
+            7.5e-3,
         )
 
     def test_failure_writes_summary_before_any_attack_search(self) -> None:

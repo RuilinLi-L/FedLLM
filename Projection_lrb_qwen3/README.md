@@ -101,10 +101,16 @@ only as a BF16-noise diagnostic.  Per-token residual acceptance is restricted
 to positions active under the predeclared Delta-norm relative rule; inactive
 positions remain reported but cannot be used to force a direction failure.
 
-The fixed active-token diagnostic residual tolerances are `1e-4` for FP32 and
-`5e-4` for BF16.  These tolerances are solely for architecture and numerical-
-precision diagnostics; they are not DAGER `tau1`/`tau2` values and do not take
-part in attack-configuration calibration.
+The attack-adjacent runners use fixed active-token diagnostic residual
+tolerances of `2e-4` for FP32 and `7.5e-3` for BF16.  The BF16 value is fixed
+by the immutable 20-sample structural profile recorded in
+`prereg_amendments/bf16_gradient_gate_pre_attack_075/`; it is not derived from
+Layer-1 candidate selection, Layer-2 decoding, ROUGE, or LRB.  These
+tolerances are solely for architecture and numerical-precision diagnostics;
+they are not DAGER `tau1`/`tau2` values and do not take part in
+attack-configuration calibration.  The standalone `check_qwen3_gradient.py`
+keeps its explicit `--max-relative-residual` CLI control so the fixed profile
+can be reproduced at each candidate gate.
 
 Any failed identity, relative-rank-cap, active-token residual, finite-value,
 or fixed-negative-control check writes the complete diagnostic JSON with

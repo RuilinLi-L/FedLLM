@@ -311,26 +311,31 @@ class Layer1CalibrationTest(unittest.TestCase):
         record = {"sample_key": sample.sample_key}
         outputs_root = PROJECT_ROOT / "outputs"
         outputs_root.mkdir(parents=True, exist_ok=True)
-        with TemporaryDirectory(dir=outputs_root) as temporary_directory, mock.patch.object(
-            RUNNER, "load_experiment_config", return_value=SimpleNamespace()
-        ), mock.patch.object(RUNNER, "registered_head_seed"), mock.patch.object(
-            RUNNER, "verify_amendment"
-        ), mock.patch.object(
-            RUNNER, "_load_preregistration", return_value={"preregistration_sha256": "p" * 64}
-        ), mock.patch.object(RUNNER, "_select_samples", return_value=(sample,)), mock.patch.object(
-            RUNNER, "_run_one_sample", return_value=(record, Path(temporary_directory) / "sample.json")
-        ), mock.patch.object(layer2_module, "decode_qwen3_rope_prefixes") as layer2:
+        with (
+            TemporaryDirectory(dir=outputs_root) as temporary_directory,
+            mock.patch.object(RUNNER, "load_experiment_config", return_value=SimpleNamespace()),
+            mock.patch.object(RUNNER, "registered_head_seed"),
+            mock.patch.object(RUNNER, "verify_amendment"),
+            mock.patch.object(RUNNER, "verify_bf16_gate_profile_amendment") as verify_bf16_profile,
+            mock.patch.object(
+                RUNNER, "_load_preregistration", return_value={"preregistration_sha256": "p" * 64}
+            ),
+            mock.patch.object(RUNNER, "_select_samples", return_value=(sample,)),
+            mock.patch.object(RUNNER, "_run_one_sample", return_value=(record, Path(temporary_directory) / "sample.json")),
+            mock.patch.object(layer2_module, "decode_qwen3_rope_prefixes") as layer2,
+        ):
             args = SimpleNamespace(
                 stage="calibration",
                 config="Projection_lrb_qwen3/configs/experiment.json",
                 head_seed=11,
                 sample_key=sample.sample_key,
-                dtype="float32",
+                dtype="bfloat16",
                 output_root="Projection_lrb_qwen3/outputs",
             )
             result = RUNNER.run_calibration(args)
         self.assertEqual(result["sample_count"], 1)
         self.assertIs(result["layer2_invoked"], False)
+        verify_bf16_profile.assert_called_once_with(project_root=PROJECT_ROOT)
         layer2.assert_not_called()
 
     def test_amendment_hashes_the_actual_run6_failure_log(self) -> None:
