@@ -350,6 +350,10 @@ class ProjectionLrbPairSmokeTest(unittest.TestCase):
                 "layer_1_decoder_candidate_count": candidate_count,
                 "reconstructed_token_ids": [],
                 "token_recovery": 0.0,
+                "token_recovery_semantics": "first_layer2_survivor_position_match_for_reporting_only",
+                "legacy_l1_token_membership": float(candidate_count > 0),
+                "legacy_l1_token_membership_semantics": "root_attack_rec_token_excluding_terminal_eos",
+                "layer_2_survivor_count": int(candidate_count > 0),
                 "exact_recovery": False,
                 "rouge_1": 0.0,
                 "rouge_2": 0.0,
@@ -402,7 +406,11 @@ class ProjectionLrbPairSmokeTest(unittest.TestCase):
         self.assertEqual(records[0]["termination_reason"], "no_l1_candidates")
         self.assertEqual(records[0]["result_status"], "ok")
         self.assertEqual(records[0]["candidate_count"], 0)
+        self.assertEqual(records[0]["legacy_l1_token_membership"], 0.0)
+        self.assertEqual(records[0]["layer_2_survivor_count"], 0)
         self.assertEqual(records[1]["termination_reason"], "completed_prefix_found")
+        self.assertEqual(records[1]["legacy_l1_token_membership"], 1.0)
+        self.assertEqual(records[1]["layer_2_survivor_count"], 1)
 
     def test_all_smoke_loader_uses_each_manifest_key_without_manual_selection(self) -> None:
         first_key = "a" * 64
