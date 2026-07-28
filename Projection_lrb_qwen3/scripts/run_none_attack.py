@@ -64,6 +64,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--defense", choices=("none",), default="none")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", choices=("bfloat16", "float32"), default="bfloat16")
+    parser.add_argument(
+        "--true-prefix-diagnostic",
+        action="store_true",
+        help=(
+            "Smoke-only read-only check of registered tokens against fixed Layer-1/Layer-2 DAGER predicates; "
+            "never changes attack search or controls."
+        ),
+    )
     parser.add_argument("--output", required=True)
     return parser.parse_args()
 
@@ -71,6 +79,9 @@ def parse_args() -> argparse.Namespace:
 def run_attack(args: argparse.Namespace) -> dict[str, Any]:
     if args.defense != "none":
         raise NoneAttackScriptError("This entrypoint only permits defense=none.")
+    true_prefix_diagnostic = bool(getattr(args, "true_prefix_diagnostic", False))
+    if true_prefix_diagnostic and args.stage != "smoke":
+        raise NoneAttackScriptError("--true-prefix-diagnostic is permitted only for preregistered smoke samples.")
     tau_path = _resolve(args.tau1_control, description="tau1 control")
     frozen_tau1 = verify_frozen_tau1_control(project_root=PROJECT_ROOT, control_path=tau_path)
     # All protocol controls are verified before ROUGE/model/CUDA work.
@@ -96,8 +107,13 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
             parallel=controls.decode_batch_size, max_sequence_length=controls.max_sequence_length,
         ),
         head_seed=args.head_seed, device=args.device, dtype=args.dtype, rouge_backend=rouge_backend,
+        true_prefix_diagnostic=true_prefix_diagnostic,
     )
-    identity = sha256_text(f"{ATTACK_NAME}|none|{sample.preregistration_sha256}|{sample.stage}|{sample.sample_key}|{args.head_seed}|{args.dtype}|{frozen_tau1['frozen_control_identity_sha256']}")
+    identity = sha256_text(
+        f"{ATTACK_NAME}|none|{sample.preregistration_sha256}|{sample.stage}|{sample.sample_key}|"
+        f"{args.head_seed}|{args.dtype}|{frozen_tau1['frozen_control_identity_sha256']}|"
+        f"true_prefix_diagnostic={true_prefix_diagnostic}"
+    )
     record: dict[str, Any] = {
         "schema_version": 1, "record_type": "qwen3_dager_attack_result", "result_identity_sha256": identity,
         **none_only_attack_metadata(), "sample_id": sample.sample_key, "sample_key": sample.sample_key,
@@ -107,7 +123,8 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         "aggregation_sha256": frozen_tau1["aggregation_sha256"], "bf16_gate": frozen_tau1["bfloat16_gate"],
         "bf16_gate_amendment_identity": frozen_tau1["bf16_gate_amendment_identity"],
         "preregistration_sha256": frozen_tau1["preregistration_sha256"], "calibration_sample_list_sha256": frozen_tau1["calibration_sample_list_sha256"],
-        "head_seed": args.head_seed, "dtype": args.dtype, **core, "git_commit": _git_commit(),
+        "head_seed": args.head_seed, "dtype": args.dtype,
+        "true_prefix_diagnostic_enabled": true_prefix_diagnostic, **core, "git_commit": _git_commit(),
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     record["thresholds"]["tau1_source"] = "frozen_tau1_control"

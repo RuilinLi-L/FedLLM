@@ -103,6 +103,7 @@ def execute_none_only_dager(
     device: str,
     dtype: str,
     rouge_backend: Any,
+    true_prefix_diagnostic: bool = False,
 ) -> dict[str, Any]:
     """Execute standard defense-unaware DAGER once, without writing artifacts."""
     try:
@@ -167,6 +168,7 @@ def execute_none_only_dager(
             q_canonical_indices=canonical_indices,
             controls=controls,
             rouge_backend=rouge_backend,
+            true_prefix_diagnostic=true_prefix_diagnostic,
         )
         return {
             **result,
@@ -202,6 +204,7 @@ def execute_dager_from_observed_q_gradients(
     q_canonical_indices: Mapping[str, int],
     controls: NoneAttackCoreControls,
     rouge_backend: Any,
+    true_prefix_diagnostic: bool = False,
 ) -> dict[str, Any]:
     """Decode two observed q-projection gradients with standard DAGER only.
 
@@ -260,6 +263,23 @@ def execute_dager_from_observed_q_gradients(
         eos_token_id=sample.eos_token_id,
         max_ids=controls.max_candidate_ids,
     )
+    true_prefix_result: dict[str, Any] | None = None
+    if true_prefix_diagnostic:
+        try:
+            from .true_prefix_diagnostic import diagnose_true_prefix
+        except Exception as error:
+            raise NoneAttackCoreError(
+                f"Qwen3 true-prefix diagnostic dependencies are unavailable: {error}"
+            ) from error
+        true_prefix_result = diagnose_true_prefix(
+            adapter=adapter,
+            sample=sample,
+            layer1=layer1,
+            candidate_provider=candidate_provider,
+            layer2_span=q1_span,
+            threshold=controls.tau2,
+            distance_norm="l2",
+        )
     layer2 = decode_qwen3_rope_prefixes(
         adapter=adapter,
         span=q1_span,
@@ -279,7 +299,7 @@ def execute_dager_from_observed_q_gradients(
         eos_token_id=sample.eos_token_id,
         rouge_metric=rouge_backend.metric,
     )
-    return {
+    result = {
         "status": "search_budget_exhausted" if layer2.search_budget_exhausted else "ok",
         "tau1": controls.tau1,
         "tau2": controls.tau2,
@@ -346,3 +366,6 @@ def execute_dager_from_observed_q_gradients(
             "vocab_size": adapter.metadata.vocab_size,
         },
     }
+    if true_prefix_result is not None:
+        result["true_prefix_diagnostic"] = true_prefix_result
+    return result
