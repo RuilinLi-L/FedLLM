@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one preregistered none-only Qwen3/RoPE DAGER attack; no LRB is available."""
+"""Run one preregistered Qwen3 standard DAGER attack through the shared core."""
 
 from __future__ import annotations
 
@@ -9,573 +9,117 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-from tempfile import NamedTemporaryFile
-from time import perf_counter
-from typing import Any, Mapping
+from typing import Any
 
 
-QWEN_ROOT = Path(__file__).resolve().parents[1]
-REPOSITORY_ROOT = QWEN_ROOT.parent
-if str(REPOSITORY_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPOSITORY_ROOT))
-if str(QWEN_ROOT) not in sys.path:
-    sys.path.insert(0, str(QWEN_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = PROJECT_ROOT.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-import torch
-
-from src.config import ExperimentConfig, load_experiment_config
+from src.config import load_experiment_config
 from src.dager_qwen3 import ATTACK_NAME
-from src.dager_qwen3.candidate_provider import RoPECandidateProvider
-from src.dager_qwen3.diagnostics import (
-    AttackProtocolError,
-    load_none_attack_controls,
-    load_registered_sample,
-    none_only_attack_metadata,
-    registered_head_seed,
-)
-from src.dager_qwen3.gradient_decomposition import (
-    decompose_qwen3_qproj_gradient,
-    shared_dager_rank_for_qwen3_qproj_gradients,
-)
-from src.dager_qwen3.gradient_gate import (
-    decode_token_texts as _decode_token_texts_shared,
-    diagnostic_thresholds as _shared_diagnostic_thresholds,
-)
+from src.dager_qwen3.diagnostics import load_none_attack_controls, load_registered_sample, none_only_attack_metadata, registered_head_seed
 from src.dager_qwen3.frozen_tau1_control import verify_frozen_tau1_control
-from src.dager_qwen3.layer1_filter import filter_qwen3_vocab_layer1
-from src.dager_qwen3.layer2_decoder import (
-    Layer2DecoderConfig,
-    decode_qwen3_rope_prefixes,
-    layer2_audit_json_fields,
-)
-from src.dager_qwen3.metrics import compute_attack_metrics, preflight_legacy_dager_rouge_backend
-from src.dager_qwen3.model_adapter import Qwen3RoPEDagerAdapter
-from src.gradient_capture import build_canonical_gradient_manifest, capture_single_example_gradients
-from src.hashing import HashingError, canonical_json_bytes, sha256_file
-from src.qwen3_classifier import load_local_qwen3_sequence_classifier
+from src.dager_qwen3.metrics import preflight_legacy_dager_rouge_backend
+from src.dager_qwen3.none_attack_core import NoneAttackCoreControls, execute_none_only_dager
+from src.hashing import sha256_file, sha256_text
 from src.result_schema import ResultSchemaError, write_or_verify_jsonl
-from src.span_diagnostics import diagnose_two_q_projections
+
+# Explicit patch surface for preflight-contract tests.  Model construction is
+# intentionally owned by ``none_attack_core`` so this entrypoint and
+# calibration cannot diverge into separate attacks.
+load_local_qwen3_sequence_classifier: Any | None = None
 
 
 class NoneAttackScriptError(RuntimeError):
-    """Raised when this fixed-protocol attack request is not executable."""
+    """Raised when the standalone none-only attack request is invalid."""
 
 
-def _resolve_repository_path(value: str, *, description: str) -> Path:
-    candidate = Path(value).expanduser()
+def _resolve(value: str, *, description: str) -> Path:
+    candidate = Path(value)
     resolved = candidate.resolve() if candidate.is_absolute() else (REPOSITORY_ROOT / candidate).resolve()
     try:
-        resolved.relative_to(QWEN_ROOT)
+        resolved.relative_to(PROJECT_ROOT)
     except ValueError as error:
-        raise NoneAttackScriptError(f"{description} must remain under {QWEN_ROOT}, got {resolved}.") from error
+        raise NoneAttackScriptError(f"{description} must remain under {PROJECT_ROOT}.") from error
     return resolved
 
 
 def _git_commit() -> str | None:
     try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=REPOSITORY_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        completed = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPOSITORY_ROOT, check=True, capture_output=True, text=True)
     except (OSError, subprocess.CalledProcessError):
         return None
-    value = completed.stdout.strip()
-    return value if value else None
-
-
-def _decode_token_texts(tokenizer: Any, token_ids: tuple[int, ...]) -> list[str]:
-    """Compatibility wrapper retained for the existing runner test surface."""
-    try:
-        return _decode_token_texts_shared(tokenizer, token_ids)
-    except Exception as error:
-        raise NoneAttackScriptError(str(error)) from error
-
-
-def _diagnostic_thresholds(dtype: str) -> dict[str, float]:
-    """Compatibility wrapper retained for the existing runner test surface."""
-    try:
-        return _shared_diagnostic_thresholds(dtype)
-    except Exception as error:
-        raise NoneAttackScriptError(str(error)) from error
-
-
-def _q_canonical_indices(manifest: Mapping[str, Any], names: tuple[str, str]) -> dict[str, int]:
-    entries = manifest.get("entries")
-    if not isinstance(entries, list):
-        raise NoneAttackScriptError("Canonical gradient manifest lacks entries.")
-    result: dict[str, int] = {}
-    for entry in entries:
-        if isinstance(entry, Mapping) and entry.get("name") in names:
-            index = entry.get("canonical_index")
-            if isinstance(index, int) and not isinstance(index, bool):
-                result[str(entry["name"])] = index
-    if set(result) != set(names):
-        raise NoneAttackScriptError("Canonical gradient manifest does not contain both structural q_proj parameter names.")
-    return result
-
-
-def _as_mapping(value: Any) -> Mapping[str, Any]:
-    """Return a mapping view for optional diagnostic fields without guessing values."""
-    return value if isinstance(value, Mapping) else {}
-
-
-def _maximum_inactive_residual(layer: Mapping[str, Any]) -> float | None:
-    """Report the largest existing per-token residual among inactive positions."""
-    values: list[float] = []
-    per_token = layer.get("per_token")
-    if not isinstance(per_token, list):
-        return None
-    for token in per_token:
-        token_record = _as_mapping(token)
-        if token_record.get("active_by_delta") is False:
-            value = token_record.get("relative_row_space_residual")
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                values.append(float(value))
-    return max(values) if values else None
-
-
-def _diagnostic_layer_summary(layer: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract fixed observability fields from one existing q_proj diagnostic."""
-    identity = _as_mapping(layer.get("identity"))
-    rank = _as_mapping(layer.get("rank"))
-    residual = _as_mapping(layer.get("row_space_residual"))
-    active_residual = _as_mapping(residual.get("active_tokens"))
-    negative_control = _as_mapping(layer.get("gradient_t_negative_control"))
-    negative_active_residual = _as_mapping(negative_control.get("gradient_t_active_token_residual"))
-    return {
-        "identity_relative_error": identity.get("gradient_relative_error"),
-        "relative_effective_rank": rank.get("relative_threshold_rank"),
-        "theoretical_rank_cap": rank.get("theoretical_rank_cap"),
-        "spectral_gap": rank.get("spectral_gap_suggestion"),
-        "max_active_relative_residual": active_residual.get("max"),
-        "max_inactive_relative_residual": _maximum_inactive_residual(layer),
-        "negative_control_identity_error": identity.get("gradient_t_relative_error"),
-        "negative_control_max_active_relative_residual": negative_active_residual.get("max"),
-    }
-
-
-def _diagnostic_failure_summary(
-    diagnostic: Mapping[str, Any], *, diagnostic_thresholds: Mapping[str, float]
-) -> dict[str, Any]:
-    """Summarize failures using only the already-computed diagnostic fields."""
-    layers = _as_mapping(diagnostic.get("layers"))
-    failed_checks: dict[str, list[str]] = {}
-    failure_reasons: list[str] = []
-    for layer_name in ("q0", "q1"):
-        layer = _as_mapping(layers.get(layer_name))
-        checks = _as_mapping(layer.get("checks"))
-        failures = [name for name, passed in checks.items() if passed is not True]
-        if layer and layer.get("passed") is False and not failures:
-            failures.append("layer_passed_false_without_named_check")
-        failed_checks[layer_name] = failures
-        failure_reasons.extend(f"{layer_name}.{name}" for name in failures)
-    if diagnostic.get("passed") is False and not failure_reasons:
-        failure_reasons.append("diagnostic.passed_false_without_layer_reason")
-    return {
-        "passed": bool(diagnostic.get("passed", False)),
-        "failure_reasons": failure_reasons,
-        "failed_checks": failed_checks,
-        "q0": _diagnostic_layer_summary(_as_mapping(layers.get("q0"))),
-        "q1": _diagnostic_layer_summary(_as_mapping(layers.get("q1"))),
-        "diagnostic_thresholds": dict(diagnostic_thresholds),
-    }
-
-
-def _gradient_diagnostic_sidecar_path(output_path: Path) -> Path:
-    """Derive the required sidecar name from one requested JSONL result path."""
-    return output_path.with_suffix(".gradient_diagnostic.json")
-
-
-def _write_gradient_diagnostic_failure_sidecar(
-    *,
-    output_path: Path,
-    diagnostic: Mapping[str, Any],
-    diagnostic_thresholds: Mapping[str, float],
-) -> Path:
-    """Atomically replace the failure sidecar before refusing to start DAGER."""
-    sidecar_path = _gradient_diagnostic_sidecar_path(output_path)
-    try:
-        requested_output = output_path.relative_to(REPOSITORY_ROOT).as_posix()
-    except ValueError as error:
-        raise NoneAttackScriptError(f"Diagnostic output is outside repository root: {output_path}.") from error
-    document: dict[str, Any] = {
-        "schema_version": 1,
-        "record_type": "qwen3_gradient_diagnostic_failure",
-        "status": "failed_gradient_diagnostic",
-        "attack_name": ATTACK_NAME,
-        "defense": "none",
-        "requested_output": requested_output,
-        "diagnostic_summary": _diagnostic_failure_summary(
-            diagnostic,
-            diagnostic_thresholds=diagnostic_thresholds,
-        ),
-        "gradient_diagnostic": diagnostic,
-        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    }
-    try:
-        payload = canonical_json_bytes(document).decode("utf-8") + "\n"
-    except HashingError as error:
-        raise NoneAttackScriptError(f"Diagnostic failure sidecar is not JSON-serializable: {error}") from error
-
-    temporary_path: Path | None = None
-    try:
-        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
-            dir=sidecar_path.parent,
-            prefix=f".{sidecar_path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            handle.write(payload)
-            temporary_path = Path(handle.name)
-        temporary_path.replace(sidecar_path)
-    except OSError as error:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        raise NoneAttackScriptError(
-            f"Unable to write required gradient diagnostic failure sidecar {sidecar_path}: {error}"
-        ) from error
-    return sidecar_path
+    return completed.stdout.strip() or None
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse one immutable-manifest attack request; free-text inputs are intentionally absent."""
-    parser = argparse.ArgumentParser(
-        description=(
-            "Run defense-unaware DAGER on one preregistered Qwen3 SST-2 sample. "
-            "Only defense=none is implemented; no LRB code is loaded."
-        )
-    )
-    parser.add_argument(
-        "--config",
-        default="Projection_lrb_qwen3/configs/experiment.json",
-        help="Repository-relative immutable Qwen3 experiment.json.",
-    )
+    parser = argparse.ArgumentParser(description="Run defense-unaware DAGER on one preregistered Qwen3 sample.")
+    parser.add_argument("--config", default="Projection_lrb_qwen3/configs/experiment.json")
     parser.add_argument("--stage", choices=("calibration", "smoke", "final"), required=True)
-    parser.add_argument("--sample-key", required=True, help="SHA256 sample key from the selected immutable stage manifest.")
-    parser.add_argument("--head-seed", required=True, type=int, help="Registered random classifier-head seed for this stage.")
-    parser.add_argument(
-        "--tau1-control",
-        required=True,
-        help=(
-            "Repository-relative immutable qwen3_frozen_tau1_control JSON. "
-            "This is the only accepted source of formal Layer-1 tau1."
-        ),
-    )
-    parser.add_argument("--defense", choices=("none",), default="none", help="Only none is supported by this entrypoint.")
-    parser.add_argument("--device", default="cuda", help="Explicit CUDA device, e.g. cuda or cuda:0.")
+    parser.add_argument("--sample-key", required=True)
+    parser.add_argument("--head-seed", required=True, type=int)
+    parser.add_argument("--tau1-control", required=True)
+    parser.add_argument("--defense", choices=("none",), default="none")
+    parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", choices=("bfloat16", "float32"), default="bfloat16")
-    parser.add_argument(
-        "--output",
-        required=True,
-        help="Repository-relative JSONL output path under Projection_lrb_qwen3/outputs/.",
-    )
+    parser.add_argument("--output", required=True)
     return parser.parse_args()
 
 
-def _result_identity(
-    *,
-    preregistration_sha256: str,
-    stage: str,
-    sample_key: str,
-    head_seed: int,
-    dtype: str,
-    frozen_tau1_control_identity_sha256: str,
-) -> str:
-    # A deterministic identifier enables write-or-verify recovery without
-    # allowing one sample/seed to overwrite a distinct attack configuration.
-    import hashlib
-
-    payload = (
-        f"{ATTACK_NAME}|none|{preregistration_sha256}|{stage}|{sample_key}|{head_seed}|{dtype}|"
-        f"{frozen_tau1_control_identity_sha256}"
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 def run_attack(args: argparse.Namespace) -> dict[str, Any]:
-    """Execute capture, raw-gradient DAGER decomposition, filtering, and decoding."""
     if args.defense != "none":
         raise NoneAttackScriptError("This entrypoint only permits defense=none.")
-    tau1_control_path = _resolve_repository_path(args.tau1_control, description="tau1 control path")
-    frozen_tau1_control = verify_frozen_tau1_control(
-        project_root=QWEN_ROOT,
-        control_path=tau1_control_path,
-    )
-    # The frozen control is deliberately verified before the cached ROUGE
-    # preflight, model construction, or any CUDA work.
-    rouge_backend = preflight_legacy_dager_rouge_backend()
-    config_path = _resolve_repository_path(args.config, description="config path")
-    config: ExperimentConfig = load_experiment_config(config_path)
+    tau_path = _resolve(args.tau1_control, description="tau1 control")
+    frozen_tau1 = verify_frozen_tau1_control(project_root=PROJECT_ROOT, control_path=tau_path)
+    # All protocol controls are verified before ROUGE/model/CUDA work.
+    config = load_experiment_config(_resolve(args.config, description="config"), require_dataset_path=False)
     registered_head_seed(config, stage=args.stage, requested_seed=args.head_seed)
     sample = load_registered_sample(config=config, stage=args.stage, sample_key=args.sample_key)
-    controls = load_none_attack_controls(
-        config,
-        frozen_tau1=float(frozen_tau1_control["selected_tau1"]),
-    )
-    output_path = _resolve_repository_path(args.output, description="output path")
-    outputs_root = (QWEN_ROOT / "outputs").resolve()
+    controls = load_none_attack_controls(config, frozen_tau1=float(frozen_tau1["selected_tau1"]))
+    output = _resolve(args.output, description="output")
     try:
-        output_path.relative_to(outputs_root)
+        output.relative_to((PROJECT_ROOT / "outputs").resolve())
     except ValueError as error:
-        raise NoneAttackScriptError(f"Attack output must remain under {outputs_root}, got {output_path}.") from error
-    if output_path.suffix != ".jsonl":
-        raise NoneAttackScriptError("Attack output must use a .jsonl filename.")
-
-    torch.manual_seed(args.head_seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.head_seed)
-    bundle = load_local_qwen3_sequence_classifier(
-        config.model_path,
-        head_seed=args.head_seed,
-        device=args.device,
-        dtype=args.dtype,
-    )
-    if getattr(bundle.tokenizer, "eos_token_id", None) != sample.eos_token_id:
-        raise NoneAttackScriptError(
-            f"Manifest EOS id {sample.eos_token_id} differs from loaded Qwen3 tokenizer EOS "
-            f"{getattr(bundle.tokenizer, 'eos_token_id', None)!r}."
-        )
-    input_ids = torch.tensor([sample.input_ids], dtype=torch.long, device=bundle.device)
-    attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=bundle.device)
-    labels = torch.tensor([sample.label], dtype=torch.long, device=bundle.device)
-    capture_started = perf_counter()
-    captured = capture_single_example_gradients(
-        bundle.model,
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        labels=labels,
-    )
-    capture_seconds = perf_counter() - capture_started
-    canonical_manifest = build_canonical_gradient_manifest(bundle.model)
-    canonical_indices = _q_canonical_indices(canonical_manifest, captured.q_parameter_names)
-    diagnostic_controls = _diagnostic_thresholds(args.dtype)
-    token_texts = _decode_token_texts(bundle.tokenizer, sample.input_ids)
-    diagnostic = diagnose_two_q_projections(
-        q_inputs=captured.q_inputs,
-        q_output_gradients=captured.q_output_gradients,
-        q_gradients=captured.q_gradients,
-        q_parameter_names=captured.q_parameter_names,
-        token_ids=sample.input_ids,
-        token_texts=token_texts,
-        eos_token_id=sample.eos_token_id,
-        **diagnostic_controls,
-    )
-    if not diagnostic["passed"]:
-        sidecar_path = _write_gradient_diagnostic_failure_sidecar(
-            output_path=output_path,
-            diagnostic=diagnostic,
-            diagnostic_thresholds=diagnostic_controls,
-        )
-        raise NoneAttackScriptError(
-            "Qwen3 gradient diagnostic failed; details were written to "
-            f"{sidecar_path}. Refusing to run DAGER with an unverified orientation."
-        )
-
-    attack_started = perf_counter()
-    adapter = Qwen3RoPEDagerAdapter(bundle.model, bundle.tokenizer)
-    shared_rank = shared_dager_rank_for_qwen3_qproj_gradients(
-        captured.q_gradients,
-        feature_dim=adapter.metadata.hidden_size,
-        rank_tolerance=controls.rank_tolerance,
-        rank_cutoff=controls.rank_cutoff,
-        decomposition_device=bundle.device,
-    )
-    q0_span = decompose_qwen3_qproj_gradient(
-        captured.q_gradients[0],
-        feature_dim=adapter.metadata.hidden_size,
-        rank_tolerance=controls.rank_tolerance,
-        rank_cutoff=controls.rank_cutoff,
-        decomposition_device=bundle.device,
-        shared_truncated_rank=shared_rank.applied_shared_rank,
-    )
-    q1_span = decompose_qwen3_qproj_gradient(
-        captured.q_gradients[1],
-        feature_dim=adapter.metadata.hidden_size,
-        rank_tolerance=controls.rank_tolerance,
-        rank_cutoff=controls.rank_cutoff,
-        decomposition_device=bundle.device,
-        shared_truncated_rank=shared_rank.applied_shared_rank,
-    )
-    layer1 = filter_qwen3_vocab_layer1(
-        adapter=adapter,
-        span=q0_span,
-        threshold=controls.l1_span_threshold,
-        vocab_chunk_size=controls.vocab_chunk_size,
-        distance_norm="l2",
-    )
-    candidate_provider = RoPECandidateProvider.from_layer1_result(
-        layer1,
-        eos_token_id=sample.eos_token_id,
-        max_ids=controls.max_candidate_ids,
-    )
-    layer2 = decode_qwen3_rope_prefixes(
-        adapter=adapter,
-        span=q1_span,
-        candidate_provider=candidate_provider,
-        config=Layer2DecoderConfig(
-            max_sequence_length=controls.max_sequence_length,
-            threshold=controls.l2_span_threshold,
-            distance_norm="l2",
-            search_budget=controls.max_search_candidates,
-            decode_batch_size=controls.decode_batch_size,
+        raise NoneAttackScriptError("Output must remain under Projection_lrb_qwen3/outputs.") from error
+    if output.suffix != ".jsonl":
+        raise NoneAttackScriptError("Output must use .jsonl.")
+    rouge_backend = preflight_legacy_dager_rouge_backend()
+    core = execute_none_only_dager(
+        model_path=config.model_path,
+        sample=sample,
+        controls=NoneAttackCoreControls(
+            tau1=controls.l1_span_threshold, tau2=controls.l2_span_threshold,
+            rank_tolerance=controls.rank_tolerance, rank_cutoff=controls.rank_cutoff,
+            max_search_candidates=controls.max_search_candidates, max_candidate_ids=controls.max_candidate_ids,
+            parallel=controls.decode_batch_size, max_sequence_length=controls.max_sequence_length,
         ),
+        head_seed=args.head_seed, device=args.device, dtype=args.dtype, rouge_backend=rouge_backend,
     )
-    attack_seconds = perf_counter() - attack_started
-    metrics = compute_attack_metrics(
-        tokenizer=bundle.tokenizer,
-        ground_truth_token_ids=sample.input_ids,
-        reconstructed_token_ids=layer2.selected_token_ids,
-        eos_token_id=sample.eos_token_id,
-        rouge_metric=rouge_backend.metric,
-    )
-    identity = _result_identity(
-        preregistration_sha256=sample.preregistration_sha256,
-        stage=sample.stage,
-        sample_key=sample.sample_key,
-        head_seed=args.head_seed,
-        dtype=args.dtype,
-        frozen_tau1_control_identity_sha256=str(
-            frozen_tau1_control["frozen_control_identity_sha256"]
-        ),
-    )
+    identity = sha256_text(f"{ATTACK_NAME}|none|{sample.preregistration_sha256}|{sample.stage}|{sample.sample_key}|{args.head_seed}|{args.dtype}|{frozen_tau1['frozen_control_identity_sha256']}")
     record: dict[str, Any] = {
-        "schema_version": 1,
-        "record_type": "qwen3_dager_attack_result",
-        "result_identity_sha256": identity,
-        **none_only_attack_metadata(),
-        "status": "ok" if not layer2.search_budget_exhausted else "search_budget_exhausted",
-        "sample_id": sample.sample_key,
-        "sample_key": sample.sample_key,
-        "original_index": sample.original_index,
-        "stage": sample.stage,
-        "tau1": controls.l1_span_threshold,
-        "tau1_source": "frozen_tau1_control",
-        "frozen_tau1_control_path": tau1_control_path.relative_to(REPOSITORY_ROOT).as_posix(),
-        "frozen_tau1_control_sha256": sha256_file(tau1_control_path),
-        "frozen_tau1_control_identity_sha256": frozen_tau1_control[
-            "frozen_control_identity_sha256"
-        ],
-        "aggregation_sha256": frozen_tau1_control["aggregation_sha256"],
-        "bf16_gate": frozen_tau1_control["bfloat16_gate"],
-        "bf16_gate_amendment_identity": frozen_tau1_control[
-            "bf16_gate_amendment_identity"
-        ],
-        "preregistration_sha256": frozen_tau1_control["preregistration_sha256"],
-        "calibration_sample_list_sha256": frozen_tau1_control[
-            "calibration_sample_list_sha256"
-        ],
-        "head_seed": args.head_seed,
-        "dtype": args.dtype,
-        "ground_truth_token_ids": list(sample.input_ids),
-        "ground_truth_token_text": list(metrics.ground_truth_token_text),
-        "ground_truth_text": metrics.ground_truth_text,
-        "reconstructed_token_ids": list(layer2.selected_token_ids),
-        "reconstructed_token_text": list(metrics.reconstructed_token_text),
-        "reconstructed_text": metrics.reconstructed_text,
-        "token_recovery": metrics.token_recovery,
-        "exact_recovery": metrics.exact_recovery,
-        "rouge_1": metrics.rouge_1,
-        "rouge_2": metrics.rouge_2,
-        "legacy_rouge_backend": rouge_backend.json_metadata(),
-        "empty_reconstruction": metrics.empty_reconstruction,
-        "layer_1_candidate_count": layer1.candidate_count,
-        "layer_1_decoder_candidate_count": len(candidate_provider.token_ids),
-        "layer_1_rank": q0_span.truncated_rank,
-        "layer_1_effective_rank": shared_rank.q0_effective_rank,
-        "layer_2_rank": q1_span.truncated_rank,
-        "layer_2_effective_rank": shared_rank.q1_effective_rank,
-        "rank_definition": shared_rank.rank_definition,
-        "rank_rtol": shared_rank.rank_rtol,
-        "q0_effective_rank": shared_rank.q0_effective_rank,
-        "q1_effective_rank": shared_rank.q1_effective_rank,
-        "q0_relative_threshold": shared_rank.q0_relative_threshold,
-        "q1_relative_threshold": shared_rank.q1_relative_threshold,
-        "requested_shared_rank": shared_rank.requested_shared_rank,
-        "applied_shared_rank": shared_rank.applied_shared_rank,
-        "rank_was_capped": shared_rank.rank_was_capped,
-        "rank_cap": shared_rank.rank_cap,
-        "cap_reason": shared_rank.cap_reason,
-        "attack_time_seconds": attack_seconds,
-        "gradient_capture_time_seconds": capture_seconds,
-        "loss": captured.loss,
-        "gpu_peak_memory_bytes": captured.gpu_peak_memory_bytes,
-        "thresholds": {
-            "l1_span_thresh": controls.l1_span_threshold,
-            "tau1_source": "frozen_tau1_control",
-            "l2_span_thresh": controls.l2_span_threshold,
-            "rank_rtol": controls.rank_tolerance,
-            "rank_definition": "relative_svd_threshold",
-            "rank_cutoff": controls.rank_cutoff,
-            "distance_norm": "l2",
-        },
-        "search_budget": {
-            "maxC": controls.max_search_candidates,
-            "parallel": controls.decode_batch_size,
-            "vocab_chunk_size": controls.vocab_chunk_size,
-            "max_ids": controls.max_candidate_ids,
-            "max_length": controls.max_sequence_length,
-            "evaluated_prefix_count": layer2.evaluated_prefix_count,
-            "search_budget_exhausted": layer2.search_budget_exhausted,
-            "per_length_survivor_counts": [list(value) for value in layer2.per_length_survivor_counts],
-        },
-        "layer_1_chunk_diagnostics": [
-            {
-                "start_token_id": item.start_token_id,
-                "end_token_id_exclusive": item.end_token_id_exclusive,
-                "elapsed_seconds": item.elapsed_seconds,
-                "passing_candidate_count": item.passing_candidate_count,
-            }
-            for item in layer1.chunk_diagnostics
-        ],
-        "layer_2_completed_prefix_count": len(layer2.completed_prefixes),
-        "selected_layer_2_mean_span_distance": layer2.selected_mean_span_distance,
-        **layer2_audit_json_fields(layer2),
-        "q_proj": {
-            "parameter_names": list(captured.q_parameter_names),
-            "canonical_indices": canonical_indices,
-            "gradient_shapes": [list(gradient.shape) for gradient in captured.q_gradients],
-            "orientation": "raw_qwen3_nn_linear_gradient_right_singular_vectors",
-        },
-        "canonical_gradient_summary": {
-            "gradient_tensor_count": canonical_manifest["gradient_tensor_count"],
-            "gradient_numel": canonical_manifest["gradient_numel"],
-        },
-        "diagnostic_status": "ok",
-        "gradient_diagnostic": diagnostic,
-        "adapter": {
-            "execution_path": adapter.metadata.execution_path,
-            "hidden_size": adapter.metadata.hidden_size,
-            "vocab_size": adapter.metadata.vocab_size,
-        },
-        "git_commit": _git_commit(),
+        "schema_version": 1, "record_type": "qwen3_dager_attack_result", "result_identity_sha256": identity,
+        **none_only_attack_metadata(), "sample_id": sample.sample_key, "sample_key": sample.sample_key,
+        "original_index": sample.original_index, "stage": sample.stage,
+        "tau1_source": "frozen_tau1_control", "frozen_tau1_control_path": tau_path.relative_to(REPOSITORY_ROOT).as_posix(),
+        "frozen_tau1_control_sha256": sha256_file(tau_path), "frozen_tau1_control_identity_sha256": frozen_tau1["frozen_control_identity_sha256"],
+        "aggregation_sha256": frozen_tau1["aggregation_sha256"], "bf16_gate": frozen_tau1["bfloat16_gate"],
+        "bf16_gate_amendment_identity": frozen_tau1["bf16_gate_amendment_identity"],
+        "preregistration_sha256": frozen_tau1["preregistration_sha256"], "calibration_sample_list_sha256": frozen_tau1["calibration_sample_list_sha256"],
+        "head_seed": args.head_seed, "dtype": args.dtype, **core, "git_commit": _git_commit(),
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+    record["thresholds"]["tau1_source"] = "frozen_tau1_control"
     try:
-        # The timestamp is operational metadata rather than immutable identity;
-        # one completed run is retained when all scientific fields match.
-        if output_path.exists():
-            existing = output_path.read_text(encoding="utf-8").splitlines()
-            if len(existing) == 1:
-                existing_record = json.loads(existing[0])
-                if isinstance(existing_record, dict):
-                    existing_record.pop("created_at", None)
-                    comparable = dict(record)
-                    comparable.pop("created_at", None)
-                    if existing_record == comparable:
-                        return record
-        write_or_verify_jsonl(output_path, [record])
+        if output.exists():
+            existing = json.loads(output.read_text(encoding="utf-8").strip())
+            old = dict(existing); new = dict(record); old.pop("created_at", None); new.pop("created_at", None)
+            if old == new:
+                return record
+        write_or_verify_jsonl(output, [record])
     except (OSError, json.JSONDecodeError, ResultSchemaError) as error:
-        raise NoneAttackScriptError(f"Unable to recoverably write attack JSONL {output_path}: {error}") from error
+        raise NoneAttackScriptError(f"Unable to write immutable attack result: {error}") from error
     return record
 
 
@@ -584,23 +128,9 @@ def main() -> int:
     try:
         record = run_attack(args)
     except Exception as error:
-        print(
-            json.dumps(
-                {
-                    "record_type": "qwen3_dager_attack_error",
-                    "attack_name": ATTACK_NAME,
-                    "defense": "none",
-                    "status": "error",
-                    "error_type": type(error).__name__,
-                    "error": str(error),
-                },
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-            flush=True,
-        )
+        print(json.dumps({"record_type": "qwen3_dager_attack_error", "attack_name": ATTACK_NAME, "defense": "none", "status": "error", "error_type": type(error).__name__, "error": str(error)}, sort_keys=True), file=sys.stderr)
         return 2
-    print(json.dumps(record, sort_keys=True), flush=True)
+    print(json.dumps(record, sort_keys=True))
     return 0 if record["status"] == "ok" else 3
 
 

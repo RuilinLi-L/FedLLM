@@ -214,8 +214,8 @@ class Layer2RunnerSerializationTest(unittest.TestCase):
         self.assertEqual(fields["layer_2_distance_audit"][0]["rejected_count"], 19)
         self.assertTrue(math.isfinite(fields["layer_2_distance_audit"][0]["distance_median"]))
         self.assertIn("layer_2_distance_audit", json.dumps(fields, sort_keys=True))
-        runner_source = (PROJECT_ROOT / "scripts" / "run_none_attack.py").read_text(encoding="utf-8")
-        self.assertIn("**layer2_audit_json_fields(layer2)", runner_source)
+        core_source = (PROJECT_ROOT / "src" / "dager_qwen3" / "none_attack_core.py").read_text(encoding="utf-8")
+        self.assertIn("**layer2_audit_json_fields(layer2)", core_source)
 
 
 if __name__ == "__main__":
