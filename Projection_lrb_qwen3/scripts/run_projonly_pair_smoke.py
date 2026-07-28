@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one fixed Qwen3/SST-2 none vs Projection-LRB DAGER mechanism smoke."""
+"""Run fixed preregistered Qwen3/SST-2 none vs Projection-LRB DAGER smokes."""
 
 from __future__ import annotations
 
@@ -49,6 +49,9 @@ LRB_KEEP_RATIO = 0.5
 CONFIG_PATH = PROJECT_ROOT / "configs" / "experiment.json"
 FROZEN_TAU1_CONTROL_PATH = PROJECT_ROOT / "frozen_controls" / "qwen3_none_tau1_calibration.json"
 OUTPUT_PATH = PROJECT_ROOT / "outputs" / "smoke" / "minimal_projonly_pair" / "paired_smoke.jsonl"
+ALL_SMOKE_OUTPUT_PATH = (
+    PROJECT_ROOT / "outputs" / "smoke" / "minimal_projonly_pair" / "paired_smoke_all.jsonl"
+)
 
 
 class PairSmokeError(RuntimeError):
@@ -65,6 +68,30 @@ def _standard_controls(controls: Any) -> NoneAttackCoreControls:
         max_candidate_ids=controls.max_candidate_ids,
         parallel=controls.decode_batch_size,
         max_sequence_length=controls.max_sequence_length,
+    )
+
+
+def _all_registered_smoke_samples(config: Any) -> tuple[Any, ...]:
+    """Load every preregistered smoke sample through the normal validator."""
+    manifest_path = config.project_root / "manifests" / "smoke.jsonl"
+    try:
+        rows = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines()]
+    except (OSError, json.JSONDecodeError) as error:
+        raise PairSmokeError(f"Unable to read preregistered smoke manifest: {error}") from error
+    if len(rows) < 2:
+        raise PairSmokeError("All-smoke paired execution requires at least two preregistered smoke samples.")
+    sample_keys: list[str] = []
+    for row in rows:
+        sample = row.get("sample") if isinstance(row, dict) else None
+        key = sample.get("sample_key") if isinstance(sample, dict) else None
+        if not isinstance(key, str) or len(key) != 64:
+            raise PairSmokeError("Smoke manifest contains an invalid preregistered sample key.")
+        sample_keys.append(key)
+    if len(set(sample_keys)) != len(sample_keys):
+        raise PairSmokeError("Smoke manifest contains duplicate preregistered sample keys.")
+    return tuple(
+        load_registered_sample(config=config, stage=SMOKE_STAGE, sample_key=sample_key)
+        for sample_key in sample_keys
     )
 
 
@@ -227,23 +254,29 @@ def _arm_record(
     }
 
 
-def run_pair_smoke(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """Capture one fixed update, decode raw and full-tuple Projection-LRB arms."""
+def _run_paired_smoke_samples(
+    args: argparse.Namespace,
+    *,
+    config: Any,
+    samples: tuple[Any, ...],
+    output_path: Path,
+) -> list[dict[str, Any]]:
+    """Capture each fixed update and decode raw and full-tuple Projection-LRB arms."""
     from src.dager_qwen3.gradient_gate import decode_token_texts, diagnostic_thresholds
     from src.dager_qwen3.model_adapter import Qwen3RoPEDagerAdapter
     from src.gradient_capture import capture_single_example_gradients
     from src.qwen3_classifier import load_local_qwen3_sequence_classifier
     from src.span_diagnostics import diagnose_two_q_projections
 
-    config = load_experiment_config(CONFIG_PATH, require_dataset_path=False)
     registered_head_seed(config, stage=SMOKE_STAGE, requested_seed=SMOKE_HEAD_SEED)
-    sample = load_registered_sample(config=config, stage=SMOKE_STAGE, sample_key=SMOKE_SAMPLE_KEY)
     frozen_tau1 = verify_frozen_tau1_control(
         project_root=PROJECT_ROOT,
         control_path=FROZEN_TAU1_CONTROL_PATH,
     )
     controls = _standard_controls(load_none_attack_controls(config, frozen_tau1=float(frozen_tau1["selected_tau1"])))
     rouge_backend = preflight_legacy_dager_rouge_backend()
+    if not samples:
+        raise PairSmokeError("Paired smoke execution requires at least one preregistered sample.")
 
     torch.manual_seed(SMOKE_HEAD_SEED)
     if torch.cuda.is_available():
@@ -256,105 +289,108 @@ def run_pair_smoke(args: argparse.Namespace) -> list[dict[str, Any]]:
             device=args.device,
             dtype=SMOKE_DTYPE,
         )
-        if getattr(bundle.tokenizer, "eos_token_id", None) != sample.eos_token_id:
-            raise PairSmokeError("Manifest EOS id differs from the loaded Qwen3 tokenizer EOS id.")
-        input_ids = torch.tensor([sample.input_ids], dtype=torch.long, device=bundle.device)
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=bundle.device)
-        labels = torch.tensor([sample.label], dtype=torch.long, device=bundle.device)
-        captured = capture_single_example_gradients(
-            bundle.model,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-        )
         diagnostic_controls = diagnostic_thresholds(SMOKE_DTYPE)
-        raw_diagnostic = diagnose_two_q_projections(
-            q_inputs=captured.q_inputs,
-            q_output_gradients=captured.q_output_gradients,
-            q_gradients=captured.q_gradients,
-            q_parameter_names=captured.q_parameter_names,
-            token_ids=sample.input_ids,
-            token_texts=decode_token_texts(bundle.tokenizer, sample.input_ids),
-            eos_token_id=sample.eos_token_id,
-            **diagnostic_controls,
-        )
-        if raw_diagnostic.get("passed") is not True:
-            raise GradientDiagnosticFailure(raw_diagnostic, diagnostic_controls)
-
-        canonical_names, raw_canonical_gradients, canonical_manifest = _canonical_gradient_tuple(bundle.model)
-        canonical_q_indices = q_canonical_indices(canonical_manifest, captured.q_parameter_names)
-        none_observations = q_projection_observations_from_canonical_tuple(
-            canonical_gradients=raw_canonical_gradients,
-            canonical_parameter_names=canonical_names,
-            q_parameter_names=captured.q_parameter_names,
-            q_canonical_indices=canonical_q_indices,
-        )
-        if any(
-            not torch.equal(observed, captured_gradient)
-            for observed, captured_gradient in zip(none_observations, captured.q_gradients)
-        ):
-            raise PairSmokeError("Raw q_proj observations do not match the canonical complete-gradient tuple.")
-        lrb_canonical_gradients = apply_lrb_to_canonical_tuple(
-            canonical_gradients=raw_canonical_gradients,
-            canonical_parameter_names=canonical_names,
-        )
-        projonly_observations = q_projection_observations_from_canonical_tuple(
-            canonical_gradients=lrb_canonical_gradients,
-            canonical_parameter_names=canonical_names,
-            q_parameter_names=captured.q_parameter_names,
-            q_canonical_indices=canonical_q_indices,
-        )
-
         adapter = Qwen3RoPEDagerAdapter(bundle.model, bundle.tokenizer)
-        none_core = _decode_observed_arm(
-            adapter=adapter,
-            tokenizer=bundle.tokenizer,
-            sample=sample,
-            observed_q_gradients=none_observations,
-            q_parameter_names=captured.q_parameter_names,
-            canonical_q_indices=canonical_q_indices,
-            controls=controls,
-            rouge_backend=rouge_backend,
-        )
-        projonly_core = _decode_observed_arm(
-            adapter=adapter,
-            tokenizer=bundle.tokenizer,
-            sample=sample,
-            observed_q_gradients=projonly_observations,
-            q_parameter_names=captured.q_parameter_names,
-            canonical_q_indices=canonical_q_indices,
-            controls=controls,
-            rouge_backend=rouge_backend,
-        )
-        records = [
-            _arm_record(
-                defense="none",
-                preset="none",
-                keep_ratio=None,
-                lrb_seed=None,
+        records: list[dict[str, Any]] = []
+        for sample in samples:
+            if getattr(bundle.tokenizer, "eos_token_id", None) != sample.eos_token_id:
+                raise PairSmokeError("Manifest EOS id differs from the loaded Qwen3 tokenizer EOS id.")
+            input_ids = torch.tensor([sample.input_ids], dtype=torch.long, device=bundle.device)
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=bundle.device)
+            labels = torch.tensor([sample.label], dtype=torch.long, device=bundle.device)
+            captured = capture_single_example_gradients(
+                bundle.model,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            raw_diagnostic = diagnose_two_q_projections(
+                q_inputs=captured.q_inputs,
+                q_output_gradients=captured.q_output_gradients,
+                q_gradients=captured.q_gradients,
+                q_parameter_names=captured.q_parameter_names,
+                token_ids=sample.input_ids,
+                token_texts=decode_token_texts(bundle.tokenizer, sample.input_ids),
+                eos_token_id=sample.eos_token_id,
+                **diagnostic_controls,
+            )
+            if raw_diagnostic.get("passed") is not True:
+                raise GradientDiagnosticFailure(raw_diagnostic, diagnostic_controls)
+
+            canonical_names, raw_canonical_gradients, canonical_manifest = _canonical_gradient_tuple(bundle.model)
+            canonical_q_indices = q_canonical_indices(canonical_manifest, captured.q_parameter_names)
+            none_observations = q_projection_observations_from_canonical_tuple(
+                canonical_gradients=raw_canonical_gradients,
+                canonical_parameter_names=canonical_names,
+                q_parameter_names=captured.q_parameter_names,
+                q_canonical_indices=canonical_q_indices,
+            )
+            if any(
+                not torch.equal(observed, captured_gradient)
+                for observed, captured_gradient in zip(none_observations, captured.q_gradients)
+            ):
+                raise PairSmokeError("Raw q_proj observations do not match the canonical complete-gradient tuple.")
+            lrb_canonical_gradients = apply_lrb_to_canonical_tuple(
+                canonical_gradients=raw_canonical_gradients,
+                canonical_parameter_names=canonical_names,
+            )
+            projonly_observations = q_projection_observations_from_canonical_tuple(
+                canonical_gradients=lrb_canonical_gradients,
+                canonical_parameter_names=canonical_names,
+                q_parameter_names=captured.q_parameter_names,
+                q_canonical_indices=canonical_q_indices,
+            )
+            none_core = _decode_observed_arm(
+                adapter=adapter,
+                tokenizer=bundle.tokenizer,
                 sample=sample,
+                observed_q_gradients=none_observations,
+                q_parameter_names=captured.q_parameter_names,
                 canonical_q_indices=canonical_q_indices,
-                core=none_core,
-                raw_gradient_diagnostic=raw_diagnostic,
-                canonical_manifest=canonical_manifest,
-                frozen_tau1=frozen_tau1,
-                config_sha256=config.config_sha256,
-            ),
-            _arm_record(
-                defense="lrbprojonly",
-                preset=LRB_PRESET,
-                keep_ratio=LRB_KEEP_RATIO,
-                lrb_seed=LRB_SEED,
+                controls=controls,
+                rouge_backend=rouge_backend,
+            )
+            projonly_core = _decode_observed_arm(
+                adapter=adapter,
+                tokenizer=bundle.tokenizer,
                 sample=sample,
+                observed_q_gradients=projonly_observations,
+                q_parameter_names=captured.q_parameter_names,
                 canonical_q_indices=canonical_q_indices,
-                core=projonly_core,
-                raw_gradient_diagnostic=raw_diagnostic,
-                canonical_manifest=canonical_manifest,
-                frozen_tau1=frozen_tau1,
-                config_sha256=config.config_sha256,
-            ),
-        ]
-        write_or_verify_jsonl(OUTPUT_PATH, records)
+                controls=controls,
+                rouge_backend=rouge_backend,
+            )
+            records.extend(
+                (
+                    _arm_record(
+                        defense="none",
+                        preset="none",
+                        keep_ratio=None,
+                        lrb_seed=None,
+                        sample=sample,
+                        canonical_q_indices=canonical_q_indices,
+                        core=none_core,
+                        raw_gradient_diagnostic=raw_diagnostic,
+                        canonical_manifest=canonical_manifest,
+                        frozen_tau1=frozen_tau1,
+                        config_sha256=config.config_sha256,
+                    ),
+                    _arm_record(
+                        defense="lrbprojonly",
+                        preset=LRB_PRESET,
+                        keep_ratio=LRB_KEEP_RATIO,
+                        lrb_seed=LRB_SEED,
+                        sample=sample,
+                        canonical_q_indices=canonical_q_indices,
+                        core=projonly_core,
+                        raw_gradient_diagnostic=raw_diagnostic,
+                        canonical_manifest=canonical_manifest,
+                        frozen_tau1=frozen_tau1,
+                        config_sha256=config.config_sha256,
+                    ),
+                )
+            )
+        write_or_verify_jsonl(output_path, records)
         return records
     except (NoneAttackCoreError, ResultSchemaError) as error:
         raise PairSmokeError(str(error)) from error
@@ -365,18 +401,37 @@ def run_pair_smoke(args: argparse.Namespace) -> list[dict[str, Any]]:
             torch.cuda.empty_cache()
 
 
+def run_pair_smoke(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """Run the original fixed one-sample paired smoke without changing its artifact."""
+    config = load_experiment_config(CONFIG_PATH, require_dataset_path=False)
+    sample = load_registered_sample(config=config, stage=SMOKE_STAGE, sample_key=SMOKE_SAMPLE_KEY)
+    return _run_paired_smoke_samples(args, config=config, samples=(sample,), output_path=OUTPUT_PATH)
+
+
+def run_all_smoke_pairs(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """Run every preregistered smoke sample into a separate immutable artifact."""
+    config = load_experiment_config(CONFIG_PATH, require_dataset_path=False)
+    samples = _all_registered_smoke_samples(config)
+    return _run_paired_smoke_samples(args, config=config, samples=samples, output_path=ALL_SMOKE_OUTPUT_PATH)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the fixed one-sample Qwen3 none vs proj_only@0.5 DAGER mechanism smoke."
+        description="Run fixed preregistered Qwen3 none vs proj_only@0.5 DAGER mechanism smokes."
     )
     parser.add_argument("--device", default="cuda", help="Qwen3 execution device; protocol fields remain fixed.")
+    parser.add_argument(
+        "--all-smoke",
+        action="store_true",
+        help="Run every preregistered smoke sample and write a separate immutable aggregate JSONL.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        records = run_pair_smoke(args)
+        records = run_all_smoke_pairs(args) if args.all_smoke else run_pair_smoke(args)
     except Exception as error:
         print(
             json.dumps(

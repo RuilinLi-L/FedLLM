@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -401,6 +402,36 @@ class ProjectionLrbPairSmokeTest(unittest.TestCase):
         self.assertEqual(records[0]["candidate_count"], 0)
         self.assertEqual(records[1]["termination_reason"], "completed_prefix_found")
 
+    def test_all_smoke_loader_uses_each_manifest_key_without_manual_selection(self) -> None:
+        first_key = "a" * 64
+        second_key = "b" * 64
+        with TemporaryDirectory() as temporary:
+            project_root = Path(temporary)
+            manifest = project_root / "manifests" / "smoke.jsonl"
+            manifest.parent.mkdir()
+            manifest.write_text(
+                "\n".join(
+                    json.dumps({"sample": {"sample_key": key}})
+                    for key in (first_key, second_key)
+                ) + "\n",
+                encoding="utf-8",
+            )
+            config = SimpleNamespace(project_root=project_root)
+            with mock.patch.object(
+                RUNNER,
+                "load_registered_sample",
+                side_effect=lambda **kwargs: SimpleNamespace(sample_key=kwargs["sample_key"]),
+            ) as load_sample:
+                samples = RUNNER._all_registered_smoke_samples(config)
+        self.assertEqual(tuple(sample.sample_key for sample in samples), (first_key, second_key))
+        self.assertEqual(
+            [call.kwargs for call in load_sample.call_args_list],
+            [
+                {"config": config, "stage": "smoke", "sample_key": first_key},
+                {"config": config, "stage": "smoke", "sample_key": second_key},
+            ],
+        )
+
     def test_runner_is_fixed_smoke_only_and_has_no_other_attack_branch(self) -> None:
         source = (PROJECT_ROOT / "scripts" / "run_projonly_pair_smoke.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -414,6 +445,8 @@ class ProjectionLrbPairSmokeTest(unittest.TestCase):
         self.assertIn("SMOKE_HEAD_SEED = 22", source)
         self.assertIn('SMOKE_DTYPE = "bfloat16"', source)
         self.assertIn("apply_lrb_defense(canonical_gradients", source)
+        self.assertIn("--all-smoke", source)
+        self.assertIn("ALL_SMOKE_OUTPUT_PATH", source)
         self.assertNotIn("final.jsonl", source)
         self.assertNotIn("run_calibration", source)
         self.assertNotIn("run_none_attack", source)
