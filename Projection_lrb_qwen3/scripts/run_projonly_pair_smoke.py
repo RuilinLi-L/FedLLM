@@ -48,10 +48,9 @@ LRB_PRESET = "proj_only"
 LRB_KEEP_RATIO = 0.5
 CONFIG_PATH = PROJECT_ROOT / "configs" / "experiment.json"
 FROZEN_TAU1_CONTROL_PATH = PROJECT_ROOT / "frozen_controls" / "qwen3_none_tau1_calibration.json"
-OUTPUT_PATH = PROJECT_ROOT / "outputs" / "smoke" / "minimal_projonly_pair" / "paired_smoke.jsonl"
-ALL_SMOKE_OUTPUT_PATH = (
-    PROJECT_ROOT / "outputs" / "smoke" / "minimal_projonly_pair" / "paired_smoke_all.jsonl"
-)
+OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "smoke" / "minimal_projonly_pair_l1metrics_v1"
+OUTPUT_PATH = OUTPUT_ROOT / "paired_smoke.jsonl"
+ALL_SMOKE_OUTPUT_PATH = OUTPUT_ROOT / "paired_smoke_all.jsonl"
 
 
 class PairSmokeError(RuntimeError):
