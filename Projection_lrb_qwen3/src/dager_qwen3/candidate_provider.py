@@ -29,8 +29,6 @@ class RoPECandidateProvider:
     def from_layer1_result(
         cls, result: Layer1FilterResult, *, eos_token_id: int, max_ids: int = -1
     ) -> "RoPECandidateProvider":
-        if not result.token_ids:
-            raise CandidateProviderError("Layer-1 DAGER filtering produced no candidate tokens.")
         if len(result.token_ids) != len(result.distances):
             raise CandidateProviderError("Layer-1 DAGER candidate ids and distances have inconsistent lengths.")
         if isinstance(eos_token_id, bool) or not isinstance(eos_token_id, int) or eos_token_id < 0:
@@ -39,6 +37,13 @@ class RoPECandidateProvider:
             raise CandidateProviderError("Layer-1 DAGER candidate list contains duplicate token ids.")
         if isinstance(max_ids, bool) or not isinstance(max_ids, int) or max_ids == 0 or max_ids < -1:
             raise CandidateProviderError(f"max_ids must be -1 or one positive integer, got {max_ids!r}.")
+        # An empty threshold-filtered vocabulary is a normal standard-DAGER
+        # terminal condition, not a malformed provider.  The shared Layer-2
+        # decoder records it as ``termination_reason=no_l1_candidates`` without
+        # evaluating a prefix.  This matches the legacy attack's normal empty
+        # reconstruction path while preserving malformed non-empty lists as
+        # explicit errors.
+        #
         # This is the existing DAGER decoder cap: layer-1 candidates are already
         # sorted by span distance, and only then may the configured max_ids bound
         # the sequence decoder's Cartesian expansion.
