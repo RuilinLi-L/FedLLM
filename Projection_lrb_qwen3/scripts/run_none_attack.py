@@ -43,7 +43,11 @@ from src.dager_qwen3.gradient_gate import (
 )
 from src.dager_qwen3.frozen_tau1_control import verify_frozen_tau1_control
 from src.dager_qwen3.layer1_filter import filter_qwen3_vocab_layer1
-from src.dager_qwen3.layer2_decoder import Layer2DecoderConfig, decode_qwen3_rope_prefixes
+from src.dager_qwen3.layer2_decoder import (
+    Layer2DecoderConfig,
+    decode_qwen3_rope_prefixes,
+    layer2_audit_json_fields,
+)
 from src.dager_qwen3.metrics import compute_attack_metrics, preflight_legacy_dager_rouge_backend
 from src.dager_qwen3.model_adapter import Qwen3RoPEDagerAdapter
 from src.gradient_capture import build_canonical_gradient_manifest, capture_single_example_gradients
@@ -535,6 +539,7 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         ],
         "layer_2_completed_prefix_count": len(layer2.completed_prefixes),
         "selected_layer_2_mean_span_distance": layer2.selected_mean_span_distance,
+        **layer2_audit_json_fields(layer2),
         "q_proj": {
             "parameter_names": list(captured.q_parameter_names),
             "canonical_indices": canonical_indices,
