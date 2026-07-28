@@ -83,8 +83,15 @@ def _must_be_within(path: Path, parent: Path, *, field_name: str) -> None:
         ) from error
 
 
-def load_experiment_config(config_path: Path) -> ExperimentConfig:
-    """Load and validate ``Projection_lrb_qwen3/configs/experiment.json``."""
+def load_experiment_config(
+    config_path: Path, *, require_dataset_path: bool = True
+) -> ExperimentConfig:
+    """Load and validate ``Projection_lrb_qwen3/configs/experiment.json``.
+
+    Preregistration requires the saved DatasetDict to exist.  A later
+    calibration run consumes only its immutable ``calibration.jsonl`` rows and
+    therefore explicitly disables that unrelated filesystem check.
+    """
     resolved_config = config_path.resolve()
     if not resolved_config.is_file():
         raise PreregistrationConfigError(f"Configuration file does not exist: {resolved_config}")
@@ -110,7 +117,7 @@ def load_experiment_config(config_path: Path) -> ExperimentConfig:
         raw["dataset_path"], repository_root=repository_root, field_name="dataset_path"
     )
     _must_be_within(dataset_path, repository_root, field_name="dataset_path")
-    if not dataset_path.is_dir():
+    if require_dataset_path and not dataset_path.is_dir():
         raise PreregistrationConfigError(
             f"dataset_path must exist and be a directory containing a saved DatasetDict: {dataset_path}"
         )
