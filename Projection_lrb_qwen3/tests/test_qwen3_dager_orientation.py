@@ -62,6 +62,8 @@ class Qwen3DagerOrientationTest(unittest.TestCase):
                 "0" * 64,
                 "--head-seed",
                 "1",
+                "--tau1-control",
+                "Projection_lrb_qwen3/frozen_controls/test.json",
                 "--output",
                 "Projection_lrb_qwen3/outputs/smoke/test.jsonl",
                 "--sentence",

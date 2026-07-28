@@ -90,11 +90,23 @@ def _only_grid_value(grid: Mapping[str, Any], key: str, *, allow_none: bool = Fa
     return value
 
 
-def load_none_attack_controls(config: ExperimentConfig) -> NoneAttackControls:
-    """Read only predeclared calibration/budget fields; no CLI tuning is accepted."""
+def load_none_attack_controls(
+    config: ExperimentConfig, *, frozen_tau1: float | None = None
+) -> NoneAttackControls:
+    """Read locked non-tau1 controls and one optional verified frozen tau1 value.
+
+    The historical ``experiment.json`` l1 value remains available to the
+    Layer-1 calibration observer.  Formal none-only reconstruction must pass
+    ``frozen_tau1`` from the immutable calibration control instead.
+    """
     grid = config.calibration_parameter_grid
     budget = config.attack_budget
-    l1 = float(_only_grid_value(grid, "l1_span_thresh"))
+    if frozen_tau1 is None:
+        l1 = float(_only_grid_value(grid, "l1_span_thresh"))
+    else:
+        if isinstance(frozen_tau1, bool) or not isinstance(frozen_tau1, (int, float)):
+            raise AttackProtocolError("frozen_tau1 must be a finite positive numeric value.")
+        l1 = float(frozen_tau1)
     l2 = float(_only_grid_value(grid, "l2_span_thresh"))
     rank_tolerance = float(_only_grid_value(grid, "rank_tol"))
     rank_cutoff_value = _only_grid_value(grid, "rank_cutoff")

@@ -125,6 +125,27 @@ JSONL, verifies the configuration and sample-list hashes, and requires a head
 seed registered for that stage.  Its fixed attack label is
 `dager_qwen3_rope_defense_unaware`; `--defense` only accepts `none`.
 
+Formal none-only reconstruction also requires `--tau1-control`.  The control
+is created from the complete 20-sample, Layer-1-only calibration aggregation;
+it independently rechecks every sample-output SHA256, the calibration manifest
+and preregistration identities, and the BF16 diagnostic-gate amendment before
+recording the selected `tau1`.  The attack runner rechecks that immutable
+control before ROUGE preflight or model/CUDA work, then uses only its selected
+`tau1`; the historical `experiment.json` `l1_span_thresh` is not a formal
+attack control.
+
+After the complete Layer-1 calibration aggregation has passed its fixed rule,
+freeze it exactly once before any smoke or final reconstruction:
+
+```bash
+python Projection_lrb_qwen3/scripts/freeze_tau1_control.py \
+  --aggregation Projection_lrb_qwen3/outputs/calibration/layer1_tau1_calibration_bf16_gate075_full20/aggregation.json \
+  --output Projection_lrb_qwen3/frozen_controls/qwen3_none_tau1_calibration.json
+```
+
+The command is write-or-verify: an identical artifact is retained, while a
+different file at the requested path is rejected without being overwritten.
+
 The first layer uses the raw Qwen3 `nn.Linear` q_proj gradient shape
 `[d_out, d_in]` directly.  Its DAGER basis has the legacy `[rank, feature]`
 layout and is obtained from the raw gradient's right-singular space; it never
@@ -160,6 +181,7 @@ Example (the sample key must be copied from the preregistered manifest):
 
 ```bash
 python Projection_lrb_qwen3/scripts/run_none_attack.py \
+  --tau1-control Projection_lrb_qwen3/frozen_controls/qwen3_none_tau1_calibration.json \
   --stage smoke \
   --sample-key '<64-character sample_key>' \
   --head-seed '<registered smoke seed>' \
@@ -169,8 +191,8 @@ python Projection_lrb_qwen3/scripts/run_none_attack.py \
   --output Projection_lrb_qwen3/outputs/smoke/qwen3_none_attack.jsonl
 ```
 
-Before resolving the config or loading a model, the runner performs a legacy
-ROUGE preflight.  It force-sets `HF_DATASETS_OFFLINE=1` and
+Before legacy ROUGE preflight or any model/CUDA work, the runner verifies the
+frozen tau1 control.  It then performs a legacy ROUGE preflight, force-sets `HF_DATASETS_OFFLINE=1` and
 `HF_HUB_OFFLINE=1`, requires `datasets.load_metric` to exist, and loads only
 the cached `datasets.load_metric('rouge')` metric.  A fixed exact-match
 self-test must return ROUGE-1 and ROUGE-2 of exactly `1.0`; any missing cache,

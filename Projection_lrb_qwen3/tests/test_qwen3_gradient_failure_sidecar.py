@@ -116,11 +116,16 @@ class GradientFailureSidecarTest(unittest.TestCase):
                 stage="smoke",
                 sample_key="a" * 64,
                 head_seed=404,
+                tau1_control="Projection_lrb_qwen3/frozen_controls/test.json",
                 device="cpu",
                 dtype="float32",
                 output=output_argument,
             )
-            with mock.patch.object(RUNNER, "preflight_legacy_dager_rouge_backend", return_value=SimpleNamespace()), mock.patch.object(
+            with mock.patch.object(
+                RUNNER,
+                "verify_frozen_tau1_control",
+                return_value={"selected_tau1": 2e-3},
+            ), mock.patch.object(RUNNER, "preflight_legacy_dager_rouge_backend", return_value=SimpleNamespace()), mock.patch.object(
                 RUNNER, "load_experiment_config", return_value=SimpleNamespace(model_path="unused")
             ), mock.patch.object(RUNNER, "registered_head_seed"), mock.patch.object(
                 RUNNER, "load_registered_sample", return_value=sample

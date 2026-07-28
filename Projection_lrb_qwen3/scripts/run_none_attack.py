@@ -41,12 +41,13 @@ from src.dager_qwen3.gradient_gate import (
     decode_token_texts as _decode_token_texts_shared,
     diagnostic_thresholds as _shared_diagnostic_thresholds,
 )
+from src.dager_qwen3.frozen_tau1_control import verify_frozen_tau1_control
 from src.dager_qwen3.layer1_filter import filter_qwen3_vocab_layer1
 from src.dager_qwen3.layer2_decoder import Layer2DecoderConfig, decode_qwen3_rope_prefixes
 from src.dager_qwen3.metrics import compute_attack_metrics, preflight_legacy_dager_rouge_backend
 from src.dager_qwen3.model_adapter import Qwen3RoPEDagerAdapter
 from src.gradient_capture import build_canonical_gradient_manifest, capture_single_example_gradients
-from src.hashing import HashingError, canonical_json_bytes
+from src.hashing import HashingError, canonical_json_bytes, sha256_file
 from src.qwen3_classifier import load_local_qwen3_sequence_classifier
 from src.result_schema import ResultSchemaError, write_or_verify_jsonl
 from src.span_diagnostics import diagnose_two_q_projections
@@ -258,6 +259,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage", choices=("calibration", "smoke", "final"), required=True)
     parser.add_argument("--sample-key", required=True, help="SHA256 sample key from the selected immutable stage manifest.")
     parser.add_argument("--head-seed", required=True, type=int, help="Registered random classifier-head seed for this stage.")
+    parser.add_argument(
+        "--tau1-control",
+        required=True,
+        help=(
+            "Repository-relative immutable qwen3_frozen_tau1_control JSON. "
+            "This is the only accepted source of formal Layer-1 tau1."
+        ),
+    )
     parser.add_argument("--defense", choices=("none",), default="none", help="Only none is supported by this entrypoint.")
     parser.add_argument("--device", default="cuda", help="Explicit CUDA device, e.g. cuda or cuda:0.")
     parser.add_argument("--dtype", choices=("bfloat16", "float32"), default="bfloat16")
@@ -270,13 +279,22 @@ def parse_args() -> argparse.Namespace:
 
 
 def _result_identity(
-    *, preregistration_sha256: str, stage: str, sample_key: str, head_seed: int, dtype: str
+    *,
+    preregistration_sha256: str,
+    stage: str,
+    sample_key: str,
+    head_seed: int,
+    dtype: str,
+    frozen_tau1_control_identity_sha256: str,
 ) -> str:
     # A deterministic identifier enables write-or-verify recovery without
     # allowing one sample/seed to overwrite a distinct attack configuration.
     import hashlib
 
-    payload = f"{ATTACK_NAME}|none|{preregistration_sha256}|{stage}|{sample_key}|{head_seed}|{dtype}"
+    payload = (
+        f"{ATTACK_NAME}|none|{preregistration_sha256}|{stage}|{sample_key}|{head_seed}|{dtype}|"
+        f"{frozen_tau1_control_identity_sha256}"
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -284,14 +302,22 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
     """Execute capture, raw-gradient DAGER decomposition, filtering, and decoding."""
     if args.defense != "none":
         raise NoneAttackScriptError("This entrypoint only permits defense=none.")
-    # Deliberately first: an unavailable cached legacy ROUGE definition must
-    # reject the request before config/model work can begin.
+    tau1_control_path = _resolve_repository_path(args.tau1_control, description="tau1 control path")
+    frozen_tau1_control = verify_frozen_tau1_control(
+        project_root=QWEN_ROOT,
+        control_path=tau1_control_path,
+    )
+    # The frozen control is deliberately verified before the cached ROUGE
+    # preflight, model construction, or any CUDA work.
     rouge_backend = preflight_legacy_dager_rouge_backend()
     config_path = _resolve_repository_path(args.config, description="config path")
     config: ExperimentConfig = load_experiment_config(config_path)
     registered_head_seed(config, stage=args.stage, requested_seed=args.head_seed)
     sample = load_registered_sample(config=config, stage=args.stage, sample_key=args.sample_key)
-    controls = load_none_attack_controls(config)
+    controls = load_none_attack_controls(
+        config,
+        frozen_tau1=float(frozen_tau1_control["selected_tau1"]),
+    )
     output_path = _resolve_repository_path(args.output, description="output path")
     outputs_root = (QWEN_ROOT / "outputs").resolve()
     try:
@@ -414,6 +440,9 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         sample_key=sample.sample_key,
         head_seed=args.head_seed,
         dtype=args.dtype,
+        frozen_tau1_control_identity_sha256=str(
+            frozen_tau1_control["frozen_control_identity_sha256"]
+        ),
     )
     record: dict[str, Any] = {
         "schema_version": 1,
@@ -425,7 +454,22 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         "sample_key": sample.sample_key,
         "original_index": sample.original_index,
         "stage": sample.stage,
-        "preregistration_sha256": sample.preregistration_sha256,
+        "tau1": controls.l1_span_threshold,
+        "tau1_source": "frozen_tau1_control",
+        "frozen_tau1_control_path": tau1_control_path.relative_to(REPOSITORY_ROOT).as_posix(),
+        "frozen_tau1_control_sha256": sha256_file(tau1_control_path),
+        "frozen_tau1_control_identity_sha256": frozen_tau1_control[
+            "frozen_control_identity_sha256"
+        ],
+        "aggregation_sha256": frozen_tau1_control["aggregation_sha256"],
+        "bf16_gate": frozen_tau1_control["bfloat16_gate"],
+        "bf16_gate_amendment_identity": frozen_tau1_control[
+            "bf16_gate_amendment_identity"
+        ],
+        "preregistration_sha256": frozen_tau1_control["preregistration_sha256"],
+        "calibration_sample_list_sha256": frozen_tau1_control[
+            "calibration_sample_list_sha256"
+        ],
         "head_seed": args.head_seed,
         "dtype": args.dtype,
         "ground_truth_token_ids": list(sample.input_ids),
@@ -463,6 +507,7 @@ def run_attack(args: argparse.Namespace) -> dict[str, Any]:
         "gpu_peak_memory_bytes": captured.gpu_peak_memory_bytes,
         "thresholds": {
             "l1_span_thresh": controls.l1_span_threshold,
+            "tau1_source": "frozen_tau1_control",
             "l2_span_thresh": controls.l2_span_threshold,
             "rank_rtol": controls.rank_tolerance,
             "rank_definition": "relative_svd_threshold",
