@@ -12,7 +12,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Mapping
 
-from src.hashing import canonical_json_bytes, hash_sample_list, sha256_file, sha256_json
+from src.hashing import hash_sample_list, sha256_json, sha256_lf_normalized_text_file
 from src.result_schema import ResultSchemaError, write_or_verify_json
 
 
@@ -175,7 +175,10 @@ def _build_document(
         "preregistration_sha256": tau1["preregistration_sha256"],
         "calibration_sample_list_sha256": tau1["calibration_sample_list_sha256"],
         "frozen_tau1_control_path": _relative(project_root, tau1_control_path),
-        "frozen_tau1_control_file_sha256": sha256_file(tau1_control_path),
+        # The JSON identity above secures the tau1 content; this textual file
+        # hash is LF-normalized so Git's CRLF checkout conversion cannot make
+        # an otherwise identical immutable control platform-specific.
+        "frozen_tau1_control_file_sha256": sha256_lf_normalized_text_file(tau1_control_path),
         "frozen_tau1_control_identity_sha256": tau1["frozen_control_identity_sha256"],
         "fixed_tau1": FIXED_TAU1,
         "bf16_gate": FIXED_BF16_GATE,
@@ -234,7 +237,7 @@ def verify_calibration_grid_control(*, project_root: Path, control_path: Path) -
     required = {
         "preregistration_sha256": tau1["preregistration_sha256"],
         "calibration_sample_list_sha256": tau1["calibration_sample_list_sha256"],
-        "frozen_tau1_control_file_sha256": sha256_file(tau1_path),
+        "frozen_tau1_control_file_sha256": sha256_lf_normalized_text_file(tau1_path),
         "frozen_tau1_control_identity_sha256": tau1["frozen_control_identity_sha256"],
         "fixed_tau1": FIXED_TAU1,
         "bf16_gate": FIXED_BF16_GATE,

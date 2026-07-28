@@ -19,7 +19,14 @@ from .dager_qwen3.calibration_grid_control import (
     verify_calibration_grid_control, verify_tau1_reference,
 )
 from .dager_qwen3.none_attack_core import NoneAttackCoreControls, execute_none_only_dager
-from .hashing import hash_directory_contents, hash_file_map, hash_sample_list, sha256_file, sha256_json
+from .hashing import (
+    hash_directory_contents,
+    hash_file_map,
+    hash_sample_list,
+    sha256_file,
+    sha256_json,
+    sha256_lf_normalized_text_file,
+)
 from .result_schema import ResultSchemaError, write_or_verify_json, write_or_verify_jsonl
 
 
@@ -197,7 +204,7 @@ def run_calibration(*, config: ExperimentConfig, manifest_path: Path, tau1_contr
         grid = verify_calibration_grid_control(project_root=config.project_root, control_path=calibration_grid_control_path)
     except CalibrationGridControlError as error:
         raise CalibrationError(str(error)) from error
-    if grid["frozen_tau1_control_identity_sha256"] != tau1["frozen_control_identity_sha256"] or grid["frozen_tau1_control_file_sha256"] != sha256_file(tau1_control_path):
+    if grid["frozen_tau1_control_identity_sha256"] != tau1["frozen_control_identity_sha256"] or grid["frozen_tau1_control_file_sha256"] != sha256_lf_normalized_text_file(tau1_control_path):
         raise CalibrationError("tau1 control identity/file hash does not match calibration-grid control.")
     manifest = load_calibration_manifest(manifest_path, expected_path=config.project_root / "manifests" / "calibration.jsonl", expected_preregistration_sha256=grid["preregistration_sha256"], expected_sample_list_sha256=grid["calibration_sample_list_sha256"])
     candidates = candidate_parameters_from_grid(grid)

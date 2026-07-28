@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.calibration import CalibrationError, CalibrationManifest, CalibrationRunContext, CalibrationSample, run_calibration
 from src.config import ExperimentConfig, load_experiment_config
 from src.dager_qwen3.calibration_grid_control import candidate_parameters_from_grid, verify_calibration_grid_control
-from src.hashing import hash_sample_list, sha256_file
+from src.hashing import hash_sample_list, sha256_file, sha256_lf_normalized_text_file
 
 
 TAU = PROJECT_ROOT / "frozen_controls" / "qwen3_none_tau1_calibration.json"
@@ -70,6 +70,18 @@ class Stage5ControlTest(unittest.TestCase):
         }
         self.assertEqual(varying_axes, {"tau2"})
 
+    def test_tau1_control_file_hash_is_invariant_to_checkout_line_endings(self) -> None:
+        grid = json.loads(GRID.read_text(encoding="utf-8"))
+        lf = TAU.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        crlf = lf.replace(b"\n", b"\r\n")
+        with TemporaryDirectory(dir=PROJECT_ROOT) as temporary:
+            lf_path = Path(temporary) / "tau_lf.json"
+            crlf_path = Path(temporary) / "tau_crlf.json"
+            lf_path.write_bytes(lf)
+            crlf_path.write_bytes(crlf)
+            self.assertEqual(sha256_lf_normalized_text_file(lf_path), sha256_lf_normalized_text_file(crlf_path))
+            self.assertEqual(grid["frozen_tau1_control_file_sha256"], sha256_lf_normalized_text_file(lf_path))
+
     def test_tampered_grid_is_rejected_and_manifest_inputs_remain_unchanged(self) -> None:
         before = {path: sha256_file(path) for path in (PROJECT_ROOT / "configs" / "experiment.json", MANIFEST, PROJECT_ROOT / "manifests" / "smoke.jsonl", PROJECT_ROOT / "manifests" / "final.jsonl")}
         with TemporaryDirectory(dir=PROJECT_ROOT) as temporary:
@@ -106,7 +118,7 @@ class Stage5RunnerUnitTest(unittest.TestCase):
 
     def test_single_candidate_fails_fast_before_executor(self) -> None:
         temporary, config, manifest, tau, grid = self._fixture(); self.addCleanup(temporary.cleanup)
-        with mock.patch("src.calibration.verify_tau1_reference", return_value=tau), mock.patch("src.calibration.verify_calibration_grid_control", return_value=grid), mock.patch("src.calibration.sha256_file", return_value="e" * 64), mock.patch("src.calibration.candidate_parameters_from_grid", return_value=({"tau1": .002},)), mock.patch("src.calibration._default_executor") as executor:
+        with mock.patch("src.calibration.verify_tau1_reference", return_value=tau), mock.patch("src.calibration.verify_calibration_grid_control", return_value=grid), mock.patch("src.calibration.sha256_lf_normalized_text_file", return_value="e" * 64), mock.patch("src.calibration.candidate_parameters_from_grid", return_value=({"tau1": .002},)), mock.patch("src.calibration._default_executor") as executor:
             with self.assertRaises(CalibrationError):
                 run_calibration(config=config, manifest_path=manifest, tau1_control_path=config.project_root / "tau.json", calibration_grid_control_path=config.project_root / "grid.json", output_root=config.project_root / "outputs" / "calibration", device="cpu", dtype="float32", plan_only=True)
         executor.assert_not_called()
@@ -117,7 +129,7 @@ class Stage5RunnerUnitTest(unittest.TestCase):
             {"tau1": .002, "tau2": .001, "numerical_rank_threshold": .001, "rank_cutoff": 20, "candidate_budget": {"max_ids": -1}, "search_budget": {"maxC": 10, "parallel": 1}},
             {"tau1": .002, "tau2": .002, "numerical_rank_threshold": .001, "rank_cutoff": 20, "candidate_budget": {"max_ids": -1}, "search_budget": {"maxC": 10, "parallel": 1}},
         )
-        with mock.patch("src.calibration.verify_tau1_reference", return_value=tau), mock.patch("src.calibration.verify_calibration_grid_control", return_value=grid), mock.patch("src.calibration.sha256_file", return_value="e" * 64), mock.patch("src.calibration.candidate_parameters_from_grid", return_value=candidates), mock.patch("src.calibration._git_commit", return_value="f" * 40):
+        with mock.patch("src.calibration.verify_tau1_reference", return_value=tau), mock.patch("src.calibration.verify_calibration_grid_control", return_value=grid), mock.patch("src.calibration.sha256_lf_normalized_text_file", return_value="e" * 64), mock.patch("src.calibration.candidate_parameters_from_grid", return_value=candidates), mock.patch("src.calibration._git_commit", return_value="f" * 40):
             result = run_calibration(config=config, manifest_path=manifest, tau1_control_path=config.project_root / "tau.json", calibration_grid_control_path=config.project_root / "grid.json", output_root=config.project_root / "outputs" / "calibration", device="cpu", dtype="float32", executor=lambda _context, _rouge: (_ for _ in ()).throw(RuntimeError("failed")))
         self.assertEqual(result["status"], "failed")
         self.assertIsNone(result["frozen_attack_config_path"])
@@ -142,7 +154,7 @@ class Stage5RunnerUnitTest(unittest.TestCase):
         patches = (
             mock.patch("src.calibration.verify_tau1_reference", return_value=tau),
             mock.patch("src.calibration.verify_calibration_grid_control", return_value=grid),
-            mock.patch("src.calibration.sha256_file", return_value="e" * 64),
+            mock.patch("src.calibration.sha256_lf_normalized_text_file", return_value="e" * 64),
             mock.patch("src.calibration.candidate_parameters_from_grid", return_value=candidates),
             mock.patch("src.calibration._git_commit", return_value="f" * 40),
         )

@@ -54,6 +54,24 @@ def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def sha256_lf_normalized_text_file(path: Path) -> str:
+    """Hash one UTF-8 text file after canonicalizing line endings to LF.
+
+    Protocol controls are JSON text files committed through Git.  A Windows
+    checkout may materialize their final newline as CRLF while a Linux
+    checkout retains LF; neither representation changes the JSON document.
+    This helper intentionally normalizes only line endings, preserving every
+    other byte of the decoded text.
+    """
+    if not path.is_file():
+        raise HashingError(f"Required hash target is not a regular file: {path}")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise HashingError(f"Unable to read UTF-8 text hash target {path}: {error}") from error
+    return sha256(text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")).hexdigest()
+
+
 def hash_file_map(paths: Iterable[Path], *, base_dir: Path) -> dict[str, str]:
     """Hash paths under ``base_dir`` using normalized relative-path keys."""
     result: dict[str, str] = {}
