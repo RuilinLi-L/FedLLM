@@ -367,6 +367,7 @@ def parse_train(text: str, meta: dict) -> list[dict]:
         flags = _parse_train_argv(argv_list)
         for key in (
             "dataset",
+            "task",
             "batch_size",
             "noise",
             "num_epochs",
@@ -669,6 +670,12 @@ def _all_keys(rows: list[dict]) -> list[str]:
         ],
         "last_total_time",
         "final_train_loss",
+        "pretrained_val_nll",
+        "pretrained_val_perplexity",
+        "epoch1_val_nll",
+        "epoch1_val_perplexity",
+        "val_nll",
+        "val_perplexity",
         "eval_accuracy",
         "eval_macro_f1",
         "eval_loss",
@@ -1044,6 +1051,7 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
     for row in train_rows:
         key = (
             row.get("dataset", ""),
+            row.get("task", row.get("train_task", "seq_class")) or "seq_class",
             row.get("batch_size", row.get("train_batch_size", "")),
             row.get("train_method", row.get("train_train_method", "full")),
             _peft_method(row, "train_peft_method"),
@@ -1061,6 +1069,7 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
     for key, items in sorted(grouped.items()):
         (
             dataset,
+            task,
             batch_size,
             train_method,
             peft_method,
@@ -1077,6 +1086,7 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
         row = {
             "log_kind": "utility_summary",
             "dataset": dataset,
+            "task": task,
             "batch_size": batch_size,
             "train_method": train_method,
             "peft_method": peft_method,
@@ -1103,12 +1113,33 @@ def build_utility_results(rows: list[dict]) -> list[dict]:
         else:
             row["result_status"] = "mixed"
 
-        for field in ("eval_accuracy", "eval_macro_f1", "eval_loss", "final_train_loss"):
+        for field in (
+            "eval_accuracy",
+            "eval_macro_f1",
+            "eval_loss",
+            "epoch1_val_nll",
+            "epoch1_val_perplexity",
+            "val_nll",
+            "val_perplexity",
+            "final_train_loss",
+        ):
             values = [_to_float(item.get(field)) for item in valid_items]
             clean_values = [value for value in values if value is not None]
             mean, std = _stats(clean_values)
             row[field] = mean
             row[f"{field}_std"] = std
+
+        # The untouched GPT-2 result is one deterministic evaluation reference,
+        # not one training measurement per seed. Preserve one value when repeated
+        # run logs agree; expose variation only if the evaluations genuinely differ.
+        for field in ("pretrained_val_nll", "pretrained_val_perplexity"):
+            values = [_to_float(item.get(field)) for item in valid_items]
+            clean_values = [value for value in values if value is not None]
+            if clean_values:
+                row[field] = f"{clean_values[0]:.6f}"
+                if any(value != clean_values[0] for value in clean_values[1:]):
+                    row[f"{field}_varied"] = "true"
+                    row[f"{field}_observed_values"] = " ".join(f"{value:.6f}" for value in clean_values)
 
         time_values = [_time_to_seconds(item.get("total_train_time")) for item in valid_items]
         clean_time_values = [value for value in time_values if value is not None]

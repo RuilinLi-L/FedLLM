@@ -37,6 +37,14 @@ from utils.dpsgd_opacus import (
 from utils.gpu import resolve_cuda_device
 from utils.lrb_presets import apply_lrb_preset
 from utils.lrb_defense import lrb_seed_summary_fields
+from utils.ntp_utility import (
+    causal_lm_labels,
+    evaluate_causal_lm,
+    load_ntp_model_and_tokenizer,
+    load_ntp_sst2_datasets,
+    safe_perplexity,
+    valid_shifted_target_count,
+)
 from utils.peft_utils import (
     apply_peft_config_to_args,
     normalize_peft_args,
@@ -63,6 +71,9 @@ from utils.training_defense_wrapper import TrainingDefenseModelWrapper
 TRAIN_SUMMARY_START = "===== TRAIN RESULT SUMMARY START ====="
 TRAIN_SUMMARY_END = "===== TRAIN RESULT SUMMARY END ====="
 UTILITY_ONLY_DEFENSE_CHOICES = (DPSGD_OPACUS_DEFENSE,)
+UTILITY_LEARNING_RATE = 5e-5
+UTILITY_SCHEDULER = "linear"
+UTILITY_WARMUP_STEPS = 0
 
 
 def resolve_default_output_dir(args) -> Path:
@@ -195,6 +206,29 @@ def emit_train_result_summary(args, tracker: dict) -> None:
     for key in sorted(eval_metrics):
         fields.append((f"eval_{key}", eval_metrics[key]))
 
+    if tracker.get("task") == "next_token_pred":
+        fields.extend(
+            [
+                ("initialization", "pretrained_gpt2"),
+                ("train_source_partition", "train"),
+                ("eval_source_partition", "official_validation"),
+                ("train_epochs", tracker.get("num_epochs")),
+                ("optimizer", "adamw"),
+                ("learning_rate", UTILITY_LEARNING_RATE),
+                ("scheduler", UTILITY_SCHEDULER),
+                ("warmup_steps", UTILITY_WARMUP_STEPS),
+                ("pretrained_val_nll", tracker.get("pretrained_val_nll")),
+                ("pretrained_val_perplexity", tracker.get("pretrained_val_perplexity")),
+                ("epoch1_train_nll", tracker.get("epoch1_train_nll")),
+                ("epoch1_val_nll", tracker.get("epoch1_val_nll")),
+                ("epoch1_val_perplexity", tracker.get("epoch1_val_perplexity")),
+                ("val_nll", tracker.get("val_nll")),
+                ("val_perplexity", tracker.get("val_perplexity")),
+                ("val_valid_tokens", tracker.get("val_valid_tokens")),
+                ("defense_updates_completed", tracker.get("defense_updates_completed", 0)),
+            ]
+        )
+
     if tracker.get("error_type"):
         fields.append(("error_type", tracker["error_type"]))
     if tracker.get("error_message"):
@@ -263,12 +297,24 @@ def apply_training_defense(model, wrapper, trainable_params, batch, labels, loss
 def build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", choices=["cola", "sst2", "rte", "rotten_tomatoes"], default="cola")
-    parser.add_argument("--task", choices=["seq_class"], default="seq_class")
+    parser.add_argument("--task", choices=["seq_class", "next_token_pred"], default="seq_class")
     parser.add_argument("--save_every", type=int, default=5000)
     parser.add_argument("--noise", type=float, default=None)
     parser.add_argument("--pct_mask", type=float, default=None)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_epochs", type=int, default=1)
+    parser.add_argument(
+        "--max_train_samples",
+        type=int,
+        default=None,
+        help="Optional next-token-prediction smoke-test limit; formal runs leave this unset.",
+    )
+    parser.add_argument(
+        "--max_eval_samples",
+        type=int,
+        default=None,
+        help="Optional next-token-prediction smoke-test limit; formal runs leave this unset.",
+    )
     parser.add_argument("--model_path", type=str, default="bert-base-uncased")
     parser.add_argument(
         "--finetuned_path",
@@ -327,6 +373,36 @@ def build_parser():
         extra_defense_choices=UTILITY_ONLY_DEFENSE_CHOICES,
     )
     return parser
+
+
+def validate_next_token_pred_args(parser, args) -> None:
+    if args.task != "next_token_pred":
+        return
+    if args.dataset != "sst2":
+        parser.error("--task next_token_pred currently implements the fixed GLUE SST-2 utility protocol only.")
+    if args.model_path != "gpt2":
+        parser.error("Formal next-token-prediction utility must initialize from --model_path gpt2.")
+    if args.finetuned_path is not None:
+        parser.error("next_token_pred utility cannot load --finetuned_path; every run starts from pretrained gpt2.")
+    if args.tokenizer_path not in (None, "gpt2"):
+        parser.error("next_token_pred utility uses the tokenizer from the original gpt2 checkpoint.")
+    if args.train_method != "full":
+        parser.error("The fixed next-token-prediction utility protocol requires --train_method full.")
+    if args.defense not in {"none", "lrbprojonly"}:
+        parser.error("next_token_pred utility supports only the formal none and lrbprojonly conditions.")
+    if args.defense == "none" and (args.defense_noise is not None or args.defense_pct_mask is not None):
+        parser.error("The formal none condition cannot include gradient noise or masking.")
+    if args.defense == "lrbprojonly":
+        if abs(float(args.defense_lrb_keep_ratio_sensitive) - 0.5) > 1e-12:
+            parser.error("The formal SLR condition requires --defense_lrb_keep_ratio_sensitive 0.5.")
+        if args.defense_lrb_seed_mode != "static":
+            parser.error("The formal SLR condition requires --defense_lrb_seed_mode static.")
+    if rep_bottleneck_active(args):
+        parser.error("Representation bottlenecks are sequence-classification-only and unsupported for next_token_pred.")
+    for field in ("max_train_samples", "max_eval_samples"):
+        value = getattr(args, field)
+        if value is not None and value <= 0:
+            parser.error(f"--{field} must be positive when provided.")
 
 
 def run_training_dpsgd_opacus(args, tracker: dict, model, tokenizer, train_loader, eval_loader, device, output_dir: Path) -> None:
@@ -420,7 +496,152 @@ def run_training_dpsgd_opacus(args, tracker: dict, model, tokenizer, train_loade
     print("END")
 
 
+def run_next_token_pred_training(args, tracker: dict) -> None:
+    set_random_seed(args.rng_seed)
+    device = resolve_cuda_device(args.device) if torch.cuda.is_available() else "cpu"
+    print(f"[dager] Using device: {device}", flush=True)
+    print(
+        "[dager] NTP initialization: original Hugging Face pretrained gpt2 "
+        "(SST-2 sentiment labels ignored).",
+        flush=True,
+    )
+    output_dir = resolve_default_output_dir(args)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    model, tokenizer = load_ntp_model_and_tokenizer(args)
+    model = model.to(device)
+    train_dataset, eval_dataset, data_collator = load_ntp_sst2_datasets(args, tokenizer)
+
+    shuffle_generator = torch.Generator()
+    shuffle_generator.manual_seed(args.rng_seed)
+    train_loader = DataLoader(
+        train_dataset,
+        shuffle=True,
+        batch_size=args.batch_size,
+        collate_fn=data_collator,
+        generator=shuffle_generator,
+    )
+    eval_loader = DataLoader(
+        eval_dataset,
+        shuffle=False,
+        batch_size=args.batch_size,
+        collate_fn=data_collator,
+    )
+
+    pretrained_metrics = evaluate_causal_lm(model, eval_loader, device)
+    tracker["pretrained_val_nll"] = pretrained_metrics["nll"]
+    tracker["pretrained_val_perplexity"] = pretrained_metrics["perplexity"]
+    print("metric pretrained eval: ", pretrained_metrics, flush=True)
+
+    trainable_params = iter_trainable_parameters(model)
+    opt = AdamW(trainable_params, lr=UTILITY_LEARNING_RATE)
+    num_training_steps = max(1, args.num_epochs * len(train_loader))
+    lr_scheduler = get_scheduler(
+        UTILITY_SCHEDULER,
+        optimizer=opt,
+        num_warmup_steps=UTILITY_WARMUP_STEPS,
+        num_training_steps=num_training_steps,
+    )
+    progress_bar = tqdm(range(num_training_steps))
+    wrapper = prepare_training_defense(model, args, trainable_params)
+    train_start = time.time()
+    n_steps = 0
+    defense_updates = 0
+
+    for epoch in range(args.num_epochs):
+        model.train()
+        epoch_total_nll = 0.0
+        epoch_total_tokens = 0
+
+        for batch in train_loader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            input_ids = batch["input_ids"]
+            attention_mask = batch["attention_mask"]
+            labels = causal_lm_labels(input_ids, attention_mask)
+            n_valid = valid_shifted_target_count(labels)
+            if n_valid == 0:
+                continue
+
+            args.defense_rng_step = n_steps
+            opt.zero_grad(set_to_none=True)
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            loss = outputs.loss
+            epoch_total_nll += float(loss.item()) * n_valid
+            epoch_total_tokens += n_valid
+
+            if args.defense == "none":
+                loss.backward()
+            else:
+                apply_training_defense(
+                    model,
+                    wrapper,
+                    trainable_params,
+                    batch,
+                    labels,
+                    loss,
+                    args,
+                )
+                defense_updates += 1
+
+            # lrbprojonly has already overwritten parameter.grad above, so every
+            # defended update is transformed before the optimizer consumes it.
+            opt.step()
+            lr_scheduler.step()
+            progress_bar.update(1)
+
+            n_steps += 1
+            tracker["steps_completed"] = n_steps
+            tracker["defense_updates_completed"] = defense_updates
+            if args.save_every > 0 and n_steps % args.save_every == 0:
+                ckpt_dir = output_dir / "checkpoints" / f"step_{n_steps}"
+                tracker["last_checkpoint_path"] = save_model(model, tokenizer, ckpt_dir, args.train_method)
+
+        if epoch_total_tokens == 0:
+            raise ValueError("Training epoch contains no valid shifted causal-LM targets.")
+        train_nll = epoch_total_nll / epoch_total_tokens
+        tracker["final_train_loss"] = train_nll
+        tracker[f"epoch{epoch + 1}_train_nll"] = train_nll
+        print(
+            "metric train: ",
+            {
+                "nll": train_nll,
+                "perplexity": safe_perplexity(train_nll),
+                "valid_tokens": epoch_total_tokens,
+            },
+            flush=True,
+        )
+        print("loss train: ", f"{train_nll:.6f}", flush=True)
+
+        eval_metrics = evaluate_causal_lm(model, eval_loader, device)
+        tracker[f"epoch{epoch + 1}_val_nll"] = eval_metrics["nll"]
+        tracker[f"epoch{epoch + 1}_val_perplexity"] = eval_metrics["perplexity"]
+        tracker["val_nll"] = eval_metrics["nll"]
+        tracker["val_perplexity"] = eval_metrics["perplexity"]
+        tracker["val_valid_tokens"] = eval_metrics["valid_tokens"]
+        print(f"metric eval epoch {epoch + 1}: ", eval_metrics, flush=True)
+
+    if args.defense == "lrbprojonly" and defense_updates != n_steps:
+        raise RuntimeError(
+            "SLR coverage invariant failed: lrbprojonly must transform every optimizer update."
+        )
+    tracker["total_train_time"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - train_start))
+    if getattr(args, "skip_final_save", False):
+        tracker["final_model_path"] = "n/a"
+        print("[dager] Skipping final model save.", flush=True)
+    else:
+        tracker["final_model_path"] = save_model(model, tokenizer, output_dir / "final", args.train_method)
+    print("END")
+
+
 def run_training(args, tracker: dict) -> None:
+    if args.task == "next_token_pred":
+        run_next_token_pred_training(args, tracker)
+        return
+
     set_random_seed(args.rng_seed)
     device = resolve_cuda_device(args.device) if torch.cuda.is_available() else "cpu"
     print(f"[dager] Using device: {device}", flush=True)
@@ -547,6 +768,7 @@ def main():
             parser.error(f"--finetuned_path does not exist: {args.finetuned_path}")
     normalize_legacy_training_defense_args(args)
     normalize_dpsgd_opacus_args(args)
+    validate_next_token_pred_args(parser, args)
     apply_lrb_preset(args)
     validate_rep_bottleneck_args(args)
     apply_peft_config_to_args(args, require_checkpoint=False)

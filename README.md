@@ -7,6 +7,7 @@
 - [PEFT 框架说明](./docs/PEFT_EVAL.md)
 - [DEFENSE_BASELINES](./docs/DEFENSE_BASELINES.md)
 - [UTILITY_BASELINES](./docs/UTILITY_BASELINES.md)
+- [GPT-2 / SST-2 Next-Token Prediction Utility](./docs/NTP_SST2_UTILITY.md)
 - [断连后继续跑实验](./docs/断连后继续跑实验.md)
 - [实验运行指南](./docs/实验运行指南.md)
 - [FL-LLM](./docs/FL-LLM.md)
