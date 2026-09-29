@@ -29,7 +29,9 @@ failure artifact. Never delete failure records to make a resume pass.
 The controller writes `pipeline_status.json`; every job has a specification,
 progress record, log, provenance, and terminal artifact. Attack deadlines are
 enforced by an external process watchdog, including when the worker is inside
-CUDA. Timeout and OOM are not converted to zero recovery. Training is never
+CUDA. A Python timer ends an interruptible arm five seconds before the hard
+deadline, records it as timeout, and permits subsequent independent arms.
+Timeout and OOM are not converted to zero recovery. Training is never
 silently retried with a smaller batch or different precision.
 
 ## Interfaces and numerical semantics
@@ -63,8 +65,9 @@ keeps its historical metrics, and reports a fixed alternate reconstruction rule:
 longest surviving prefix, then smallest mean residual, then lexicographic token
 IDs. Since the RoPE candidate provider removes EOS, v2 text exact/position
 recovery excludes the explicit terminal EOS, without claiming EOS generation.
-Resource-limited searches expose partial metrics separately and use null primary
-recovery metrics.
+The public length limit is 31 text tokens plus the explicit EOS; v2 prefix
+search therefore caps text at 31. Resource-limited searches expose partial
+metrics separately and use null primary recovery metrics.
 
 `load_local_qwen3_sequence_classifier(mode='trained_checkpoint')` refuses
 missing/mismatched model weights and preserves score.weight. Default

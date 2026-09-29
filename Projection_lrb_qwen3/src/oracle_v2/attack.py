@@ -71,6 +71,8 @@ def token_diagnostics(scan, token_ids, eos, active_mask, grid):
     payload = [item for item in items if not item['is_eos']]
     unique = {item['token_id']: item for item in payload}
     summary = {'token_diagnostics': items,
+        'rank_informative': not bool(torch.all(distances == distances[0])),
+        'all_vocabulary_distances_tied': bool(torch.all(distances == distances[0])),
         'false_q01_residual': float(torch.quantile(false, .01)),
         'true_mean_residual': sum(t['distance'] for t in payload) / len(payload),
         'true_token_rank_mean': sum(t['rank'] for t in payload) / len(payload),
@@ -94,7 +96,7 @@ def decode_observed_q_gradients(*, adapter, spans, transforms, scan, variant,
     layer1 = filter_qwen3_layer1_distance_scan(scan, threshold=tau1)
     provider = RoPECandidateProvider.from_layer1_result(layer1, eos_token_id=eos_token_id, max_ids=-1)
     decoded = decode_qwen3_rope_prefixes(adapter=adapter, span=spans[1], candidate_provider=provider,
-        config=Layer2DecoderConfig(max_sequence_length=config['max_length'], threshold=tau2,
+        config=Layer2DecoderConfig(max_sequence_length=config['max_length'] - 1, threshold=tau2,
             distance_norm='l2', search_budget=config['maxC'], decode_batch_size=config['decode_batch_size']),
         candidate_transform=transforms[1] if variant == 'oracle' else None)
     selected = min(decoded.survivor_prefixes, key=lambda p: (-len(p.token_ids), p.mean_span_distance, p.token_ids), default=None)

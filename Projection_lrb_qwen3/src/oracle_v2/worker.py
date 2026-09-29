@@ -1,7 +1,9 @@
 from __future__ import annotations
 import dataclasses
+from contextlib import contextmanager
 import json
 import os
+import signal
 from pathlib import Path
 import time
 import traceback
@@ -16,6 +18,24 @@ from src.dager_qwen3.metrics import preflight_legacy_dager_rouge_backend
 from .protocol import read_json, write_json, digest, file_hash, directory_hashes, code_hashes, load_samples, sample_namespace
 from .attack import paired_spans, capacity, scan_arm, token_diagnostics, report_decode
 from .training import train
+
+
+@contextmanager
+def attack_timer(seconds):
+    """Release a Python-controlled search before the external hard deadline.
+
+    The controller still kills a worker that is stuck inside an uninterruptible
+    CUDA call. A timed-out arm is never retried; subsequent arms are independent.
+    """
+    def expired(_signum, _frame):
+        raise TimeoutError('Registered attack time budget exhausted')
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def run_job(config, job):
@@ -153,6 +173,7 @@ def execute_attacks(config, job, progress):
                     'checkpoint_sha256': model_identity, 'model_mode': model_mode,
                     'condition': cid, 'preset': condition['preset'], 'rho': condition['rho'],
                     'variant': variant, 'capacity': cap, 'transform_states': state_metadata,
+                    'observed_gradient_norms': [float(g.float().norm()) for g in observed],
                     'observed_gradient_sha256': observed_hashes, 'status': 'ok'}
                 progress(kind='scan', record=stem, sample_key=sample.sample_key, condition=cid, variant=variant,
                     deadline=time.time()+config['attack_timeout_seconds'], failure_record=base)
@@ -175,11 +196,19 @@ def execute_attacks(config, job, progress):
                         record_base = {**base, 'tau1': control['tau1'], 'tau2': tau2}
                         progress(kind='decode', record=decode_stem, sample_key=sample.sample_key,
                             deadline=time.time()+config['attack_timeout_seconds'], failure_record=record_base)
-                        with torch.no_grad():
-                            result = report_decode(adapter=adapter, spans=spans, transforms=transforms, scan=scan,
-                                variant=variant, sample=sample, config=config, tau1=control['tau1'], tau2=tau2,
-                                rouge_backend=rouge)
+                        try:
+                            with attack_timer(max(.1, config['attack_timeout_seconds'] - 5)), torch.no_grad():
+                                result = report_decode(adapter=adapter, spans=spans, transforms=transforms, scan=scan,
+                                    variant=variant, sample=sample, config=config, tau1=control['tau1'], tau2=tau2,
+                                    rouge_backend=rouge)
+                        except Exception as error:
+                            result = {'status': 'timeout' if isinstance(error, TimeoutError) else 'error',
+                                'tau1': control['tau1'], 'tau2': tau2, 'error_type': type(error).__name__,
+                                'error': str(error), 'token_recovery': None, 'exact_recovery': None,
+                                'rouge_1': None, 'rouge_2': None}
+                            torch.cuda.empty_cache()
                         write_json(root / 'records' / f'{decode_stem}.json', {**base, **result})
+                        progress(kind='decode_arm_complete', record=decode_stem, status=result['status'])
                 progress(kind='arm_complete', record=stem)
             if condition['preset'] == 'proj_uniform' and condition['rho'] == 1:
                 if not all(torch.equal(g, raw[i]) for g, i in zip(observed, q_indices)):

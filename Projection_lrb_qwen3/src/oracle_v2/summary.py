@@ -61,6 +61,14 @@ def summarize(root):
         writer.writeheader()
         writer.writerows(utility_rows)
     write_json(output / 'privacy_summary.json', summary_rows, immutable=False)
+    utilities = {r['condition']: r for r in utility_rows}
+    combined = [{**r, 'utility_accuracy_mean': utilities.get(r['checkpoint_condition'], {}).get('accuracy_mean'),
+                 'utility_accuracy_std': utilities.get(r['checkpoint_condition'], {}).get('accuracy_std')}
+                for r in summary_rows]
+    with (output / 'privacy_utility.csv').open('w') as f:
+        writer = csv.DictWriter(f, fieldnames=fields + ['utility_accuracy_mean', 'utility_accuracy_std'])
+        writer.writeheader()
+        writer.writerows(combined)
     scan_rows = []
     for path in sorted((root / 'jobs').glob('*/scans/*.json')):
         r = read_json(path)
@@ -80,12 +88,14 @@ def summarize(root):
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots(figsize=(7,4))
-        selected = [r for r in scan_rows if r['job'] == 'pilot_clean_rho_sweep']
+        plot_job = 'pilot_clean_rho_sweep' if any(r['job'] == 'pilot_clean_rho_sweep' for r in scan_rows) else 'p0_random_head_scans'
+        selected = [r for r in scan_rows if r['job'] == plot_job and r['B'] > 0]
         for variant in ('standard', 'oracle'):
             points = [r for r in selected if r['variant'] == variant]
             if points:
                 ax.scatter([r['B_over_q'] for r in points], [r['rank_mean'] for r in points], s=14, alpha=.5, label=variant)
         ax.set(xlabel='Applied basis width B / feature image dimension q', ylabel='Mean true-token rank', yscale='log')
+        ax.set_title('Calibration: trained clean pilot' if plot_job == 'pilot_clean_rho_sweep' else 'Smoke only: random classification head')
         if selected:
             ax.legend()
         fig.tight_layout()

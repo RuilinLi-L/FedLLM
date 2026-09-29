@@ -184,3 +184,37 @@ def test_zero_absolute_rank_is_reported_as_empty_span_not_fake_recovery():
         layer0_qproj_inputs_for_token_ids=lambda ids: candidates[ids])
     result = scan_qwen3_vocab_layer1_distances(adapter=adapter, span=spans[0], vocab_chunk_size=2)
     torch.testing.assert_close(result.distances, torch.ones(3))
+
+
+def test_attack_timer_restores_signal_handler():
+    import signal
+    import time
+    from src.oracle_v2.worker import attack_timer
+    before = signal.getsignal(signal.SIGALRM)
+    with pytest.raises(TimeoutError):
+        with attack_timer(.01):
+            time.sleep(.2)
+    assert signal.getsignal(signal.SIGALRM) == before
+    assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
+
+
+def test_source_inventory_hashes_runtime_inputs():
+    from src.oracle_v2.protocol import code_hashes
+    files = code_hashes(ROOT)
+    assert 'utils/lrb_defense.py' in files
+    assert 'Projection_lrb_qwen3/src/oracle_v2/worker.py' in files
+    assert all(len(value) == 64 for value in files.values())
+
+
+def test_summary_excludes_timeouts_from_recovery_mean(tmp_path):
+    from src.oracle_v2.protocol import write_json, read_json
+    from src.oracle_v2.summary import summarize
+    directory = tmp_path / 'jobs/final_seed101_none/records'
+    base = {'condition':'none', 'variant':'standard', 'token_recovery':.75,
+            'exact_recovery':False, 'rouge_1':.6, 'rouge_2':.4}
+    write_json(directory/'ok.json', {**base, 'status':'ok'})
+    write_json(directory/'timeout.json', {**base, 'status':'timeout', 'token_recovery':None})
+    summarize(tmp_path)
+    row = read_json(tmp_path/'summary/privacy_summary.json')[0]
+    assert row['n_total'] == 2 and row['n_completed'] == 1 and row['timeout'] == 1
+    assert row['token_recovery'] == .75

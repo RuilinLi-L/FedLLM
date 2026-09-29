@@ -113,6 +113,12 @@ def span_distances(*, basis: torch.Tensor, representations: torch.Tensor, norm: 
         )
     if not bool(torch.isfinite(basis).all()) or not bool(torch.isfinite(representations).all()):
         raise Layer1FilterError("DAGER span distance requires finite basis and candidate representations.")
+    if basis.shape[0] == 0 and norm == "l2":
+        if bool((representations.float().norm(dim=-1) == 0).any()):
+            raise Layer1FilterError("Zero candidate norm makes normalized span distance undefined.")
+        # The normalized L2 residual to the zero subspace is exactly one.
+        # Do not rank vocabulary items by normalization roundoff in this case.
+        return torch.ones(representations.shape[0], device=representations.device, dtype=torch.float32)
     # ``check_if_in_span`` normalizes in-place; clone makes the legacy distance
     # definition reusable without corrupting native Qwen3 candidate tensors.
     distances = check_if_in_span(
