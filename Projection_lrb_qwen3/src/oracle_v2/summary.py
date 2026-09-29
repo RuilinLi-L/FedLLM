@@ -2,6 +2,7 @@
 from __future__ import annotations
 from collections import Counter, defaultdict
 import csv
+import json
 from pathlib import Path
 from statistics import mean, stdev
 from .protocol import read_json, write_json
@@ -21,6 +22,9 @@ def summarize(root):
         group = ('clean_mechanism' if checkpoint_condition == 'none' else 'matched_training',
                  checkpoint_condition, row['condition'], row['variant'])
         groups[group].append(row)
+    with (output / 'per_sample.jsonl').open('w') as f:
+        for row in all_records:
+            f.write(json.dumps(row, ensure_ascii=False, sort_keys=True, allow_nan=False) + '\n')
     fields = ['group', 'checkpoint_condition', 'condition', 'variant', 'n_total', 'n_completed',
               'ok', 'no_candidate', 'search_budget_exhausted', 'timeout', 'error', 'calibration_failed',
               'token_recovery', 'exact_recovery', 'rouge_1', 'rouge_2', 'r1_r2']

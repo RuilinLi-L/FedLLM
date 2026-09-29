@@ -218,3 +218,20 @@ def test_summary_excludes_timeouts_from_recovery_mean(tmp_path):
     row = read_json(tmp_path/'summary/privacy_summary.json')[0]
     assert row['n_total'] == 2 and row['n_completed'] == 1 and row['timeout'] == 1
     assert row['token_recovery'] == .75
+    import json
+    records = [json.loads(line) for line in (tmp_path/'summary/per_sample.jsonl').read_text().splitlines()]
+    assert len(records) == 2 and {r['status'] for r in records} == {'ok', 'timeout'}
+
+
+def test_gpu_admission_waits_for_existing_compute_process(monkeypatch):
+    from src.oracle_v2 import worker
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '4')
+    snapshots = iter(['12345\n', ''])
+    monkeypatch.setattr(worker.subprocess, 'check_output', lambda *a, **k: next(snapshots))
+    waits = []
+    monkeypatch.setattr(worker.time, 'sleep', waits.append)
+    events = []
+    worker.wait_for_idle_gpu(lambda **fields: events.append(fields))
+    assert waits == [30]
+    assert events[0]['kind'] == 'waiting_for_idle_gpu'
+    assert events[-1]['kind'] == 'gpu_admission'

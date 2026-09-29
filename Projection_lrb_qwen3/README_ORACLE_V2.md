@@ -21,6 +21,10 @@ python Projection_lrb_qwen3/scripts/run_oracle_v2_pipeline.py --gpus 4,5,6
 python Projection_lrb_qwen3/scripts/summarize_oracle_v2.py
 ```
 
+If matplotlib is absent, install its plotting dependencies into the isolated
+repository directory with `python -m pip install --target .plot_runtime matplotlib`.
+This directory is used only by reporting; the shared training environment is unchanged.
+
 The pipeline skips only completed jobs whose specifications and JSON artifacts
 match their completion receipt. Failed/interrupted jobs are never retried
 implicitly. An approved new attempt must use a new output identity; retain the
@@ -33,6 +37,8 @@ CUDA. A Python timer ends an interruptible arm five seconds before the hard
 deadline, records it as timeout, and permits subsequent independent arms.
 Timeout and OOM are not converted to zero recovery. Training is never
 silently retried with a smaller batch or different precision.
+Each worker also checks active compute PIDs immediately before allocating the
+model and waits for an idle GPU; sufficient free VRAM alone is not admission.
 
 ## Interfaces and numerical semantics
 
@@ -103,7 +109,7 @@ blocks that reconstruction arm. Controls retain their input receipts.
 - Versioned sample/model/data/config provenance and frozen controls.
 - Complete training checkpoints with weights/tokenizer hashes, utility metadata,
   paired initialization/order checks, and reload verification.
-- Per-sample scan/attack JSON, status-separated privacy CSV, utility CSV,
+- Per-sample scan/attack JSON and consolidated `summary/per_sample.jsonl`, status-separated privacy CSV, utility CSV,
   checkpoint manifest and B/q versus token-rank figure.
 - A success means the registered experiment completed with honest coverage;
   candidate separability collapse is a hypothesis, never a stopping criterion.

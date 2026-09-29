@@ -19,3 +19,4 @@ log/1.txt
 .tmp/codex/
 
 .plot_runtime/
+.plot_wheels/

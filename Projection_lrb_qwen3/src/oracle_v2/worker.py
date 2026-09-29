@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import json
 import os
 import signal
+import subprocess
 from pathlib import Path
 import time
 import traceback
@@ -18,6 +19,23 @@ from src.dager_qwen3.metrics import preflight_legacy_dager_rouge_backend
 from .protocol import read_json, write_json, digest, file_hash, directory_hashes, code_hashes, load_samples, sample_namespace
 from .attack import paired_spans, capacity, scan_arm, token_diagnostics, report_decode
 from .training import train
+
+
+def wait_for_idle_gpu(progress):
+    """Check actual compute occupancy before allocating model/optimizer memory."""
+    gpu = os.environ.get('CUDA_VISIBLE_DEVICES', '0')
+    if ',' in gpu or not gpu:
+        raise ValueError('A v2 worker requires exactly one visible GPU')
+    while True:
+        output = subprocess.check_output(['nvidia-smi', '-i', gpu,
+            '--query-compute-apps=pid', '--format=csv,noheader,nounits'], text=True)
+        occupants = [int(line.strip()) for line in output.splitlines()
+                     if line.strip().isdigit() and int(line.strip()) != os.getpid()]
+        if not occupants:
+            progress(kind='gpu_admission', physical_gpu=gpu, other_compute_pids=[])
+            return
+        progress(kind='waiting_for_idle_gpu', physical_gpu=gpu, other_compute_pids=occupants)
+        time.sleep(30)
 
 
 @contextmanager
@@ -53,6 +71,7 @@ def run_job(config, job):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     try:
+        wait_for_idle_gpu(progress)
         if job['kind'] == 'train':
             result = train(config, seed=job['seed'], condition=job['condition'],
                 output=root / 'training', smoke_steps=job.get('smoke_steps'), progress=progress)
