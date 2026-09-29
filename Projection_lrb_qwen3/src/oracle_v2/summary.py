@@ -84,6 +84,11 @@ def summarize(root):
         writer.writeheader()
         writer.writerows(scan_rows)
     if scan_rows:
+        # Plotting dependencies are isolated from the shared training environment.
+        import sys
+        plot_runtime = Path(__file__).resolve().parents[3] / '.plot_runtime'
+        if plot_runtime.is_dir():
+            sys.path.insert(0, str(plot_runtime))
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt

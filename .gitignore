@@ -17,3 +17,5 @@ log/1.txt
 .codex_tmp/
 .learnings/
 .tmp/codex/
+
+.plot_runtime/
