@@ -171,3 +171,16 @@ def test_no_candidate_metrics_and_exhaustion_are_distinct(monkeypatch):
     status[0] = 'search_budget_exhausted'
     result = attack.report_decode(**args)
     assert result['token_recovery'] is None and result['partial_metrics']['token_recovery'] == 1
+
+
+def test_zero_absolute_rank_is_reported_as_empty_span_not_fake_recovery():
+    from src.oracle_v2.attack import capacity
+    gradients = (torch.zeros(25, 25), torch.zeros(25, 25))
+    spans = paired_spans(gradients, {'rank_atol': .001, 'rank_cutoff': 20})
+    assert spans[0].basis.shape == (0, 25)
+    assert capacity(spans, (None, None))[0]['zero_rank_at_registered_atol'] is True
+    candidates = torch.randn(3, 25)
+    adapter = SimpleNamespace(device=torch.device('cpu'), metadata=SimpleNamespace(vocab_size=3, hidden_size=25),
+        layer0_qproj_inputs_for_token_ids=lambda ids: candidates[ids])
+    result = scan_qwen3_vocab_layer1_distances(adapter=adapter, span=spans[0], vocab_chunk_size=2)
+    torch.testing.assert_close(result.distances, torch.ones(3))

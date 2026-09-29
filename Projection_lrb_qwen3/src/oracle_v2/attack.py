@@ -21,8 +21,6 @@ def paired_spans(gradients, config):
     """
     decomposed = [torch.linalg.svd(g.detach().float(), full_matrices=False) for g in gradients]
     ranks = [int((s > config['rank_atol']).sum()) for _, s, _ in decomposed]
-    if max(ranks) == 0:
-        raise ValueError('Both observed q gradients have zero absolute effective rank')
     requested = max(ranks)
     width = gradients[0].shape[1]
     cap = min(width - config['rank_cutoff'], *(min(g.shape) for g in gradients))
@@ -44,6 +42,7 @@ def capacity(spans, transforms):
         q = span.feature_dim if transform is None else transform.q
         result.append({'B': span.applied_rank, 'q': q, 'B_over_q': span.applied_rank / q,
             'effective_gradient_rank': span.effective_rank,
+            'zero_rank_at_registered_atol': span.effective_rank == 0,
             'shared_B_exceeds_effective_rank': span.applied_rank > span.effective_rank,
             'B_exceeds_feature_image_rank': span.applied_rank > q,
             'rank_atol': span.absolute_tolerance, 'rank_definition': 'absolute_matrix_rank_atol_rtol_zero',
