@@ -133,6 +133,7 @@ def scan_qwen3_vocab_layer1_distances(
     span: GradientSpan,
     vocab_chunk_size: int,
     distance_norm: DistanceNorm = "l2",
+    candidate_transform=None,
 ) -> Layer1DistanceScanResult:
     """Scan all native layer-0 candidates once without applying a threshold.
 
@@ -156,6 +157,8 @@ def scan_qwen3_vocab_layer1_distances(
         started = perf_counter()
         ids = torch.arange(start, end, device=adapter.device, dtype=torch.long)
         representations = adapter.layer0_qproj_inputs_for_token_ids(ids)
+        if candidate_transform is not None:
+            representations = candidate_transform(representations)
         distances = span_distances(basis=span.basis, representations=representations, norm=distance_norm)
         token_id_chunks.append(ids.detach().to(device="cpu", dtype=torch.long))
         distance_chunks.append(distances.detach().to(device="cpu", dtype=torch.float32))
@@ -236,12 +239,15 @@ def filter_qwen3_vocab_layer1(
     threshold: float,
     vocab_chunk_size: int,
     distance_norm: DistanceNorm = "l2",
+    candidate_transform=None,
 ) -> Layer1FilterResult:
     """Scan the vocabulary in bounded chunks using actual layer-0 q_proj inputs."""
+    transform_kwargs = {} if candidate_transform is None else {"candidate_transform": candidate_transform}
     scan = scan_qwen3_vocab_layer1_distances(
         adapter=adapter,
         span=span,
         vocab_chunk_size=vocab_chunk_size,
         distance_norm=distance_norm,
+        **transform_kwargs,
     )
     return filter_qwen3_layer1_distance_scan(scan, threshold=threshold)

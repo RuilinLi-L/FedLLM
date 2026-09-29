@@ -100,6 +100,7 @@ def _evaluate_prefix_batch(
     prefixes: list[tuple[int, ...]],
     threshold: float,
     distance_norm: DistanceNorm,
+    candidate_transform=None,
 ) -> tuple[list[bool], list[float]]:
     if not prefixes:
         return [], []
@@ -113,6 +114,8 @@ def _evaluate_prefix_batch(
         attention_mask=attention_mask,
     )
     flattened = q1_inputs.reshape(-1, q1_inputs.shape[-1])
+    if candidate_transform is not None:
+        flattened = candidate_transform(flattened)
     try:
         distances = span_distances(basis=span.basis, representations=flattened, norm=distance_norm)
     except Layer1FilterError as error:
@@ -222,6 +225,7 @@ def decode_qwen3_rope_prefixes(
     span: GradientSpan,
     candidate_provider: RoPECandidateProvider,
     config: Layer2DecoderConfig,
+    candidate_transform=None,
 ) -> Layer2DecodeResult:
     """Report all standard-DAGER threshold-passing prefixes in enumeration order.
 
@@ -231,6 +235,7 @@ def decode_qwen3_rope_prefixes(
     candidate order and performs no beam pruning or candidate re-ranking.
     """
     _validate_config(config)
+    transform_kwargs = {} if candidate_transform is None else {"candidate_transform": candidate_transform}
     if span.feature_dim != adapter.metadata.hidden_size:
         raise Layer2DecoderError(
             f"Layer-2 span feature dimension {span.feature_dim} does not match Qwen3 hidden "
@@ -273,6 +278,7 @@ def decode_qwen3_rope_prefixes(
                 prefixes=batch,
                 threshold=float(config.threshold),
                 distance_norm=config.distance_norm,
+                **transform_kwargs,
             )
             evaluated += len(batch)
             length_passes.extend(passes)
@@ -294,6 +300,7 @@ def decode_qwen3_rope_prefixes(
                 prefixes=batch,
                 threshold=float(config.threshold),
                 distance_norm=config.distance_norm,
+                **transform_kwargs,
             )
             evaluated += len(batch)
             length_passes.extend(passes)

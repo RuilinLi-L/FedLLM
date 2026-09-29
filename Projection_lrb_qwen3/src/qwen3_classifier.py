@@ -25,7 +25,7 @@ class Qwen3ClassifierBundle:
     tokenizer: Any
     device: torch.device
     model_path: Path
-    head_seed: int
+    head_seed: int | None
     head_parameter_names: tuple[str, ...]
     compute_dtype: torch.dtype
 
@@ -95,16 +95,20 @@ def _initialize_head(model: nn.Module, *, head_seed: int, std: float = 1e-3) -> 
 def load_local_qwen3_sequence_classifier(
     model_path: Path,
     *,
-    head_seed: int,
+    head_seed: int | None = None,
     device: str | torch.device = "cuda",
     dtype: ComputeDTypeName = "bfloat16",
+    mode: Literal["random_head_diagnostic", "trained_checkpoint"] = "random_head_diagnostic",
 ) -> Qwen3ClassifierBundle:
     """Load Qwen3 locally as a BF16, two-label sequence classifier.
 
     The loader never substitutes a causal-LM head or contacts a model hub.
     """
     target_device = _require_cuda_device(device)
-    _require_seed(head_seed)
+    if mode not in ("random_head_diagnostic", "trained_checkpoint"):
+        raise Qwen3ClassifierError(f"Unknown classifier loading mode: {mode}")
+    if mode == "random_head_diagnostic":
+        _require_seed(head_seed)
     compute_dtype = resolve_compute_dtype(dtype)
     resolved_model_path = model_path.resolve()
     if not resolved_model_path.is_dir():
@@ -125,6 +129,11 @@ def load_local_qwen3_sequence_classifier(
         raise Qwen3ClassifierError(
             f"Expected model_type='qwen3', got {getattr(model_config, 'model_type', None)!r}."
         )
+    if mode == "trained_checkpoint" and (
+        getattr(model_config, "num_labels", None) != 2
+        or "Qwen3ForSequenceClassification" not in (model_config.architectures or [])
+    ):
+        raise Qwen3ClassifierError("Trained checkpoint must declare a two-label Qwen3ForSequenceClassification.")
     model_config.num_labels = 2
     model_config.use_cache = False
     eos_token_id = getattr(model_config, "eos_token_id", None)
@@ -137,12 +146,18 @@ def load_local_qwen3_sequence_classifier(
             local_files_only=True,
             trust_remote_code=False,
         )
-        model = AutoModelForSequenceClassification.from_pretrained(
+        loaded = AutoModelForSequenceClassification.from_pretrained(
             str(resolved_model_path),
             config=model_config,
             local_files_only=True,
             torch_dtype=compute_dtype,
+            **({"output_loading_info": True} if mode == "trained_checkpoint" else {}),
         )
+        if mode == "trained_checkpoint":
+            model, loading_info = loaded
+            validate_trained_loading_info(loading_info)
+        else:
+            model = loaded
     except Exception as error:  # Transformers loading errors must be surfaced with path context.
         raise Qwen3ClassifierError(
             f"Unable to load local Qwen3 sequence classifier from {resolved_model_path}: {error}"
@@ -151,7 +166,13 @@ def load_local_qwen3_sequence_classifier(
         raise Qwen3ClassifierError("Loaded classifier does not expose num_labels=2.")
     model.config.use_cache = False
     model.config.pad_token_id = eos_token_id
-    head_parameter_names = _initialize_head(model, head_seed=head_seed)
+    head_parameter_names = (
+        _initialize_head(model, head_seed=head_seed)
+        if mode == "random_head_diagnostic"
+        else tuple(name for name, _ in model.named_parameters() if name.startswith("score."))
+    )
+    if not head_parameter_names:
+        raise Qwen3ClassifierError("Trained classifier has no score parameters.")
     model.to(device=target_device, dtype=compute_dtype)
     model.train()
     wrong_dtype = [
@@ -173,6 +194,13 @@ def load_local_qwen3_sequence_classifier(
         head_parameter_names=head_parameter_names,
         compute_dtype=compute_dtype,
     )
+
+
+def validate_trained_loading_info(info: Mapping[str, Any]) -> None:
+    """A trained classifier may not silently initialize missing model/head weights."""
+    failures = {key: info.get(key) for key in ("missing_keys", "mismatched_keys", "error_msgs") if info.get(key)}
+    if failures:
+        raise Qwen3ClassifierError(f"Incomplete trained checkpoint: {failures}")
 
 
 def tokenize_single_example(

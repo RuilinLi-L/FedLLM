@@ -1,10 +1,16 @@
 # Qwen3 SST-2 preregistration scaffold
 
+For the trained-checkpoint and exact-state oracle extension, see
+[README_ORACLE_V2.md](README_ORACLE_V2.md). The historical commands below remain
+versioned controls. Current attack code uses **absolute** rank tolerance
+(`rank_atol`, `rtol=0`); earlier relative-rank prose below describes the historical
+protocol and must not be used to interpret current output.
+
 This directory is the isolated workspace for the Qwen3-1.7B-Base SST-2
 Projection-LRB study.  It contains a narrow, defense-unaware Qwen3/RoPE DAGER
-implementation for `defense=none` only; there is still **no LRB application,
-defended-gradient path, training loop, PEFT path, or federated aggregation
-code**.
+implementation, paired full-canonical-tuple Projection-LRB smokes, and the
+isolated v2 training/oracle protocol. PEFT and federated aggregation are outside
+the Qwen experiment scope.
 
 Implemented capabilities are deterministic preregistration, one strict Qwen3
 single-sample classification gradient diagnostic, and a manifest-only
