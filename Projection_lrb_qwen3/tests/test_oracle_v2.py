@@ -81,6 +81,18 @@ def test_calibration_guards_and_tie_breaks():
     assert choose_tau2(decode_rows, [.001])['status'] == 'calibration_failed'
 
 
+def test_tau2_handles_records_blocked_by_tau1_without_crashing():
+    blocked = {'stage': 'calibration', 'status': 'calibration_failed',
+               'reason': 'no_tau1_satisfies_registered_rule'}
+    grid = [.0005, .001, .002]
+    assert choose_tau2([blocked.copy() for _ in range(20)], grid) == {
+        'status': 'calibration_failed', 'reason': 'no_complete_tau2_candidate'}
+    completed = {'stage': 'calibration', 'status': 'ok', 'tau2': .001}
+    # Nineteen successes plus one blocked sample cannot count as twenty.
+    assert choose_tau2([completed.copy() for _ in range(19)] + [blocked], grid)[
+        'status'] == 'calibration_failed'
+
+
 def test_ranks_ties_eos_and_duplicates():
     scan = Layer1DistanceScanResult(torch.arange(5), torch.tensor([.1, .1, .3, .4, .5]), 'l2', 5, ())
     result = token_diagnostics(scan, (1, 1, 4), 4, [True, True, False], [.2])

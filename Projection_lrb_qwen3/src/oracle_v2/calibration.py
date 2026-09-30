@@ -47,7 +47,9 @@ def choose_tau2(rows, grid):
         raise ValueError('tau2 selection may not read final outcomes')
     eligible = []
     for tau in grid:
-        group = [r for r in rows if r['tau2'] == tau]
+        # A failed tau1 gate emits blocked records without a tau2 field.
+        # They cannot qualify as completed tau2 observations.
+        group = [r for r in rows if r.get('tau2') == tau]
         if len(group) != 20 or any(r['status'] not in ('ok', 'no_candidate') for r in group):
             continue
         eligible.append((tau, group))
