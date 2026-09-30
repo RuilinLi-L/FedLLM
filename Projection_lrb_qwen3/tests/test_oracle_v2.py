@@ -237,3 +237,22 @@ def test_gpu_admission_waits_for_existing_compute_process(monkeypatch):
     assert waits == [30]
     assert events[0]['kind'] == 'waiting_for_idle_gpu'
     assert events[-1]['kind'] == 'gpu_admission'
+
+
+def test_shared_gpu_admission_requires_registered_free_memory(monkeypatch):
+    from src.oracle_v2 import worker
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '0')
+    monkeypatch.setenv('QWEN_V2_SHARED_MIN_FREE_MIB', '50000')
+    free = iter(['49000', '62000'])
+    def query(command, **_kwargs):
+        return next(free) if '--query-gpu=memory.free' in command else '12345\n'
+    monkeypatch.setattr(worker.subprocess, 'check_output', query)
+    waits = []
+    monkeypatch.setattr(worker.time, 'sleep', waits.append)
+    events = []
+    worker.wait_for_idle_gpu(lambda **fields: events.append(fields))
+    assert waits == [30]
+    assert events[0]['kind'] == 'waiting_for_idle_gpu'
+    assert events[-1]['kind'] == 'gpu_admission'
+    assert events[-1]['free_mib'] == 62000
+    assert events[-1]['other_compute_pids'] == [12345]

@@ -22,19 +22,29 @@ from .training import train
 
 
 def wait_for_idle_gpu(progress):
-    """Check actual compute occupancy before allocating model/optimizer memory."""
+    """Check occupancy, with an explicit capacity-gated shared-GPU override."""
     gpu = os.environ.get('CUDA_VISIBLE_DEVICES', '0')
     if ',' in gpu or not gpu:
         raise ValueError('A v2 worker requires exactly one visible GPU')
+    shared_mib = os.environ.get('QWEN_V2_SHARED_MIN_FREE_MIB')
+    if shared_mib is not None:
+        shared_mib = int(shared_mib)
+        if shared_mib < 30000:
+            raise ValueError('Shared-GPU admission requires at least 30000 MiB free')
     while True:
         output = subprocess.check_output(['nvidia-smi', '-i', gpu,
             '--query-compute-apps=pid', '--format=csv,noheader,nounits'], text=True)
         occupants = [int(line.strip()) for line in output.splitlines()
                      if line.strip().isdigit() and int(line.strip()) != os.getpid()]
-        if not occupants:
-            progress(kind='gpu_admission', physical_gpu=gpu, other_compute_pids=[])
+        free_mib = (int(subprocess.check_output(['nvidia-smi', '-i', gpu,
+            '--query-gpu=memory.free', '--format=csv,noheader,nounits'], text=True).strip())
+            if shared_mib is not None else None)
+        if not occupants or (shared_mib is not None and free_mib >= shared_mib):
+            progress(kind='gpu_admission', physical_gpu=gpu, other_compute_pids=occupants,
+                     free_mib=free_mib, shared_min_free_mib=shared_mib)
             return
-        progress(kind='waiting_for_idle_gpu', physical_gpu=gpu, other_compute_pids=occupants)
+        progress(kind='waiting_for_idle_gpu', physical_gpu=gpu, other_compute_pids=occupants,
+                 free_mib=free_mib, shared_min_free_mib=shared_mib)
         time.sleep(30)
 
 

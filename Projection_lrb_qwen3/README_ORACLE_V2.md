@@ -39,6 +39,9 @@ Timeout and OOM are not converted to zero recovery. Training is never
 silently retried with a smaller batch or different precision.
 Each worker also checks active compute PIDs immediately before allocating the
 model and waits for an idle GPU; sufficient free VRAM alone is not admission.
+For an explicitly supervised shared-GPU run, set
+`QWEN_V2_SHARED_MIN_FREE_MIB` to a measured capacity threshold. Admission then
+records existing compute PIDs and free MiB. The default remains exclusive.
 
 ## Interfaces and numerical semantics
 
