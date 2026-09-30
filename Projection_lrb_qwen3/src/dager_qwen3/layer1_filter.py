@@ -113,6 +113,12 @@ def span_distances(*, basis: torch.Tensor, representations: torch.Tensor, norm: 
         )
     if not bool(torch.isfinite(basis).all()) or not bool(torch.isfinite(representations).all()):
         raise Layer1FilterError("DAGER span distance requires finite basis and candidate representations.")
+    if basis.shape[0] == 0 and norm == "l2":
+        if bool((representations.float().norm(dim=-1) == 0).any()):
+            raise Layer1FilterError("Zero candidate norm makes normalized span distance undefined.")
+        # The normalized L2 residual to the zero subspace is exactly one.
+        # Do not rank vocabulary items by normalization roundoff in this case.
+        return torch.ones(representations.shape[0], device=representations.device, dtype=torch.float32)
     # ``check_if_in_span`` normalizes in-place; clone makes the legacy distance
     # definition reusable without corrupting native Qwen3 candidate tensors.
     distances = check_if_in_span(
@@ -133,6 +139,7 @@ def scan_qwen3_vocab_layer1_distances(
     span: GradientSpan,
     vocab_chunk_size: int,
     distance_norm: DistanceNorm = "l2",
+    candidate_transform=None,
 ) -> Layer1DistanceScanResult:
     """Scan all native layer-0 candidates once without applying a threshold.
 
@@ -156,6 +163,8 @@ def scan_qwen3_vocab_layer1_distances(
         started = perf_counter()
         ids = torch.arange(start, end, device=adapter.device, dtype=torch.long)
         representations = adapter.layer0_qproj_inputs_for_token_ids(ids)
+        if candidate_transform is not None:
+            representations = candidate_transform(representations)
         distances = span_distances(basis=span.basis, representations=representations, norm=distance_norm)
         token_id_chunks.append(ids.detach().to(device="cpu", dtype=torch.long))
         distance_chunks.append(distances.detach().to(device="cpu", dtype=torch.float32))
@@ -236,12 +245,15 @@ def filter_qwen3_vocab_layer1(
     threshold: float,
     vocab_chunk_size: int,
     distance_norm: DistanceNorm = "l2",
+    candidate_transform=None,
 ) -> Layer1FilterResult:
     """Scan the vocabulary in bounded chunks using actual layer-0 q_proj inputs."""
+    transform_kwargs = {} if candidate_transform is None else {"candidate_transform": candidate_transform}
     scan = scan_qwen3_vocab_layer1_distances(
         adapter=adapter,
         span=span,
         vocab_chunk_size=vocab_chunk_size,
         distance_norm=distance_norm,
+        **transform_kwargs,
     )
     return filter_qwen3_layer1_distance_scan(scan, threshold=threshold)

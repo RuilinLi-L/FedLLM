@@ -1,10 +1,16 @@
 # Qwen3 SST-2 preregistration scaffold
 
+For the trained-checkpoint and exact-state oracle extension, see
+[README_ORACLE_V2.md](README_ORACLE_V2.md). The historical commands below remain
+versioned controls. Current attack code uses **absolute** rank tolerance
+(`rank_atol`, `rtol=0`); historical frozen artifacts retain their original
+field names and must be interpreted using their recorded rank definition.
+
 This directory is the isolated workspace for the Qwen3-1.7B-Base SST-2
 Projection-LRB study.  It contains a narrow, defense-unaware Qwen3/RoPE DAGER
-implementation for `defense=none` only; there is still **no LRB application,
-defended-gradient path, training loop, PEFT path, or federated aggregation
-code**.
+implementation, paired full-canonical-tuple Projection-LRB smokes, and the
+isolated v2 training/oracle protocol. PEFT and federated aggregation are outside
+the Qwen experiment scope.
 
 Implemented capabilities are deterministic preregistration, one strict Qwen3
 single-sample classification gradient diagnostic, and a manifest-only
@@ -153,13 +159,13 @@ applies the GPT-2 `Conv1D` transpose.  Token candidates are the actual inputs
 to `model.model.layers[0].self_attn.q_proj`, obtained from the local embedding
 table and Qwen3's native RMSNorm.  The vocabulary is scanned in bounded chunks
 whose size comes from the predeclared `attack_budget.parallel` field.
-For Stage 4, the existing configuration key `rank_tol` is explicitly a
-**relative rank tolerance**.  For each raw, untransposed q_proj gradient, the
-attack computes `torch.linalg.svdvals(gradient.detach().float())`, sets
-`relative_threshold = largest_singular_value * rank_tol`, and counts singular
-values greater than or equal to that threshold.  The requested shared rank is
-`max(q0_effective_rank, q1_effective_rank)`; it never uses captured `H`,
-`Delta`, true text, or a theoretical diagnostic rank cap.
+The current attack interprets the legacy configuration key `rank_tol` as an
+**absolute rank tolerance**, exposed as `rank_atol` in result records. For each
+raw, untransposed q_proj gradient, it counts singular values greater than the
+absolute tolerance with `rtol=0`. The requested shared rank is
+`max(q0_effective_rank, q1_effective_rank)`. Captured `H`, `Delta`, true text, and
+the diagnostic relative-rank cap never determine the production attack rank.
+The structural diagnostic's separate relative-rank controls are unchanged.
 
 The legacy `feature_dim - rank_cutoff` and matrix-dimension limits may still
 constrain basis extraction.  Such a constraint is not silent: every JSONL row
