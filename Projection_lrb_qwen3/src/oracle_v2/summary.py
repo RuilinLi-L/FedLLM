@@ -27,7 +27,8 @@ def summarize(root):
             f.write(json.dumps(row, ensure_ascii=False, sort_keys=True, allow_nan=False) + '\n')
     fields = ['group', 'checkpoint_condition', 'condition', 'variant', 'n_total', 'n_completed',
               'ok', 'no_candidate', 'search_budget_exhausted', 'timeout', 'error', 'calibration_failed',
-              'token_recovery', 'exact_recovery', 'rouge_1', 'rouge_2', 'r1_r2']
+              'token_recovery', 'exact_recovery', 'rouge_1', 'rouge_2',
+              'r1_r2_raw', 'r1_r2_pct']
     summary_rows = []
     for key, rows in sorted(groups.items()):
         statuses = Counter(r['status'] for r in rows)
@@ -38,7 +39,8 @@ def summarize(root):
             result[status] = statuses[status]
         for metric in ('token_recovery', 'exact_recovery', 'rouge_1', 'rouge_2'):
             result[metric] = mean(float(r[metric]) for r in completed) if completed else None
-        result['r1_r2'] = result['rouge_1'] + result['rouge_2'] if completed else None
+        result['r1_r2_raw'] = result['rouge_1'] + result['rouge_2'] if completed else None
+        result['r1_r2_pct'] = 100 * result['r1_r2_raw'] if completed else None
         summary_rows.append(result)
     with (output / 'privacy.csv').open('w') as f:
         writer = csv.DictWriter(f, fieldnames=fields)

@@ -111,5 +111,8 @@ blocks that reconstruction arm. Controls retain their input receipts.
   paired initialization/order checks, and reload verification.
 - Per-sample scan/attack JSON and consolidated `summary/per_sample.jsonl`, status-separated privacy CSV, utility CSV,
   checkpoint manifest and B/q versus token-rank figure.
+- Summary ROUGE fields are fractions in `[0,1]`; `r1_r2_raw` is their sum
+  in `[0,2]`, and `r1_r2_pct = 100 * r1_r2_raw` is the paper-facing
+  `[0,200]` scale. Failed searches have null values for both sums.
 - A success means the registered experiment completed with honest coverage;
   candidate separability collapse is a hypothesis, never a stopping criterion.

@@ -218,6 +218,8 @@ def test_summary_excludes_timeouts_from_recovery_mean(tmp_path):
     row = read_json(tmp_path/'summary/privacy_summary.json')[0]
     assert row['n_total'] == 2 and row['n_completed'] == 1 and row['timeout'] == 1
     assert row['token_recovery'] == .75
+    assert row['r1_r2_raw'] == 1.0 and row['r1_r2_pct'] == 100.0
+    assert 'r1_r2' not in row
     import json
     records = [json.loads(line) for line in (tmp_path/'summary/per_sample.jsonl').read_text().splitlines()]
     assert len(records) == 2 and {r['status'] for r in records} == {'ok', 'timeout'}
